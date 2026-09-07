@@ -2,16 +2,10 @@
 #include "Logger.h"
 #include "Defines.h"
 
-SerialCli::SerialCli(
-    SettingsManager *settingsManager,
-    DeviceTopicMap *topicMap,
-    ZigbeeCoordinator *coordinator,
-    MqttClient *mqttClient
-)
-    : settingsManager(settingsManager),
-      topicMap(topicMap),
-      coordinator(coordinator),
-      mqttClient(mqttClient) {}
+#include <string.h>
+
+SerialCli::SerialCli(SettingsManager *settingsManager)
+    : settingsManager(settingsManager) {}
 
 void SerialCli::dispatch() {
     while (Serial.available() > 0) {
@@ -31,17 +25,18 @@ void SerialCli::dispatch() {
 }
 
 void SerialCli::printHelp() {
-    LOGGER.info("Commands:");
+    LOGGER.info("USB CLI (web console may be down on STA)");
     LOGGER.info("  help");
-    LOGGER.info("  devices");
-    LOGGER.info("  permit [seconds]");
-    LOGGER.info("  join close");
-    LOGGER.info("  map <ieee> <stateTopic> <commandTopic> [availabilityTopic] [name]");
+    LOGGER.info("  settings");
     LOGGER.info("  wifi <ssid> <password>");
+    LOGGER.info("  mode AP|STA");
     LOGGER.info("  mqtt <server> [port]");
     LOGGER.info("  mqttuser <username> <password>");
-    LOGGER.info("  channel <11-26>");
+    LOGGER.info("  mqttid <clientId>");
+    LOGGER.info("  mqttbase <baseTopic>");
+    LOGGER.info("  mqtten on|off");
     LOGGER.info("  save");
+    LOGGER.info("  log");
 }
 
 void SerialCli::handleLine(const String &line) {
@@ -50,145 +45,137 @@ void SerialCli::handleLine(const String &line) {
     if (trimmed.length() == 0) {
         return;
     }
-
-    LOGGER.info("> " + trimmed);
-
     if (trimmed == "help") {
         printHelp();
         return;
     }
-    if (trimmed == "devices") {
-        LOGGER.info(coordinator->devicesJson(topicMap));
-        return;
-    }
-    if (trimmed == "join close") {
-        coordinator->closeJoin();
-        return;
-    }
-    if (trimmed.startsWith("permit")) {
-        int seconds = DEFAULT_PERMIT_JOIN_SEC;
-        if (trimmed.length() > 7) {
-            seconds = trimmed.substring(7).toInt();
-        }
-        if (seconds <= 0) {
-            coordinator->closeJoin();
-        } else {
-            coordinator->permitJoin((uint8_t)constrain(seconds, 1, 254));
-        }
-        return;
-    }
-    if (trimmed.startsWith("map ")) {
-        String rest = trimmed.substring(4);
-        rest.trim();
-        int firstSpace = rest.indexOf(' ');
-        int secondSpace = rest.indexOf(' ', firstSpace + 1);
-        if (firstSpace < 0 || secondSpace < 0) {
-            LOGGER.error("map <ieee> <state> <command> [avail] [name]");
-            return;
-        }
-        String ieeeText = rest.substring(0, firstSpace);
-        String afterIeee = rest.substring(firstSpace + 1);
-        afterIeee.trim();
-        int stateEnd = afterIeee.indexOf(' ');
-        String stateTopic = afterIeee.substring(0, stateEnd);
-        String afterState = afterIeee.substring(stateEnd + 1);
-        afterState.trim();
-
-        String commandTopic;
-        String availability;
-        String friendlyName;
-        int commandEnd = afterState.indexOf(' ');
-        if (commandEnd < 0) {
-            commandTopic = afterState;
-        } else {
-            commandTopic = afterState.substring(0, commandEnd);
-            String leftover = afterState.substring(commandEnd + 1);
-            leftover.trim();
-            int availEnd = leftover.indexOf(' ');
-            if (availEnd < 0) {
-                availability = leftover;
-            } else {
-                availability = leftover.substring(0, availEnd);
-                friendlyName = leftover.substring(availEnd + 1);
-                friendlyName.trim();
-            }
-        }
-
-        uint8_t ieee[8];
-        if (!topicMap->parseIeee(ieeeText.c_str(), ieee)) {
-            LOGGER.error("Bad IEEE");
-            return;
-        }
-        if (topicMap->upsert(ieee, friendlyName.c_str(), stateTopic.c_str(), commandTopic.c_str(), availability.c_str())
-            == nullptr) {
-            LOGGER.error("Device map full");
-            return;
-        }
-        settingsManager->saveSetting(false);
-        mqttClient->subscribeDeviceCommands();
-        mqttClient->publishDevices(coordinator->devicesJson(topicMap));
-        LOGGER.info("Mapped " + ieeeText);
-        return;
-    }
-    if (trimmed.startsWith("wifi ")) {
-        String rest = trimmed.substring(5);
-        rest.trim();
-        int split = rest.indexOf(' ');
-        if (split < 0) {
-            LOGGER.error("wifi <ssid> <password>");
-            return;
-        }
-        GlobalSettings *settings = settingsManager->getSettings();
-        String ssid = rest.substring(0, split);
-        String password = rest.substring(split + 1);
-        strncpy(settings->network.ssid, ssid.c_str(), sizeof(settings->network.ssid) - 1);
-        strncpy(settings->network.password, password.c_str(), sizeof(settings->network.password) - 1);
-        settings->network.wifiEnabled = true;
-        settingsManager->saveSetting(true);
-        LOGGER.info("WiFi saved; restarting");
-        return;
-    }
-    if (trimmed.startsWith("mqttuser ")) {
-        String rest = trimmed.substring(9);
-        rest.trim();
-        int split = rest.indexOf(' ');
-        GlobalSettings *settings = settingsManager->getSettings();
-        if (split < 0) {
-            strncpy(settings->mqttUsername, rest.c_str(), sizeof(settings->mqttUsername) - 1);
-            settings->mqttPassword[0] = '\0';
-        } else {
-            strncpy(settings->mqttUsername, rest.substring(0, split).c_str(), sizeof(settings->mqttUsername) - 1);
-            strncpy(settings->mqttPassword, rest.substring(split + 1).c_str(), sizeof(settings->mqttPassword) - 1);
-        }
-        settingsManager->saveSetting(false);
-        LOGGER.info("MQTT user saved");
-        return;
-    }
-    if (trimmed.startsWith("mqtt ")) {
-        String rest = trimmed.substring(5);
-        rest.trim();
-        int split = rest.indexOf(' ');
-        GlobalSettings *settings = settingsManager->getSettings();
-        if (split < 0) {
-            strncpy(settings->mqttServer, rest.c_str(), sizeof(settings->mqttServer) - 1);
-        } else {
-            strncpy(settings->mqttServer, rest.substring(0, split).c_str(), sizeof(settings->mqttServer) - 1);
-            settings->mqttPort = rest.substring(split + 1).toInt();
-        }
-        settingsManager->saveSetting(false);
-        LOGGER.info("MQTT broker saved");
-        return;
-    }
-    if (trimmed.startsWith("channel ")) {
-        uint8_t channel = (uint8_t)trimmed.substring(8).toInt();
-        SettingsManager::clampZigbeeChannel(channel);
-        settingsManager->getSettings()->zigbeeChannel = channel;
-        settingsManager->saveSetting(true);
-        LOGGER.info("Channel saved; restarting");
+    if (trimmed == "settings") {
+        settingsManager->logSettings();
         return;
     }
     if (trimmed == "save") {
-        settingsManager->saveSetting(false);
+        settingsManager->saveSetting(true);
+        return;
+    }
+    if (trimmed == "log") {
+        String logText;
+        LOGGER.copyRing(logText);
+        Serial.print(logText);
+        return;
+    }
+
+    GlobalSettings *settings = settingsManager->getSettings();
+
+    if (trimmed.startsWith("mode ")) {
+        String modeText = trimmed.substring(5);
+        modeText.trim();
+        modeText.toUpperCase();
+        if (modeText == "STA") {
+            settings->wifi.mode = WifiSettingsModeSta;
+        } else if (modeText == "AP") {
+            settings->wifi.mode = WifiSettingsModeAp;
+        } else {
+            LOGGER.error("mode AP|STA");
+            return;
+        }
+        LOGGER.info("MODE " + modeText + " (save to apply)");
+        return;
+    }
+
+    if (trimmed.startsWith("wifi ")) {
+        String rest = trimmed.substring(5);
+        rest.trim();
+        const int split = rest.indexOf(' ');
+        if (split < 1) {
+            LOGGER.error("wifi <ssid> <password>");
+            return;
+        }
+        String ssid = rest.substring(0, split);
+        String password = rest.substring(split + 1);
+        ssid.trim();
+        password.trim();
+        strncpy(settings->wifi.bssid, ssid.c_str(), sizeof(settings->wifi.bssid) - 1);
+        settings->wifi.bssid[sizeof(settings->wifi.bssid) - 1] = '\0';
+        strncpy(settings->wifi.password, password.c_str(), sizeof(settings->wifi.password) - 1);
+        settings->wifi.password[sizeof(settings->wifi.password) - 1] = '\0';
+        settings->wifi.mode = WifiSettingsModeSta;
+        LOGGER.info("Wi-Fi STA '" + ssid + "' (save to apply)");
+        return;
+    }
+
+    if (trimmed.startsWith("mqtt ")) {
+        String rest = trimmed.substring(5);
+        rest.trim();
+        const int split = rest.indexOf(' ');
+        String server = split < 0 ? rest : rest.substring(0, split);
+        server.trim();
+        if (server.length() == 0) {
+            LOGGER.error("mqtt <server> [port]");
+            return;
+        }
+        strncpy(settings->mqtt.server, server.c_str(), sizeof(settings->mqtt.server) - 1);
+        settings->mqtt.server[sizeof(settings->mqtt.server) - 1] = '\0';
+        if (split >= 0) {
+            int port = rest.substring(split + 1).toInt();
+            if (port < 1 || port > 65535) {
+                LOGGER.error("port must be 1-65535");
+                return;
+            }
+            settings->mqtt.port = port;
+        }
+        LOGGER.info(
+            "MQTT " + String(settings->mqtt.server) + ":" + String(settings->mqtt.port) + " (save to apply)"
+        );
+        return;
+    }
+
+    if (trimmed.startsWith("mqttuser ")) {
+        String rest = trimmed.substring(9);
+        rest.trim();
+        const int split = rest.indexOf(' ');
+        if (split < 0) {
+            strncpy(settings->mqtt.username, rest.c_str(), sizeof(settings->mqtt.username) - 1);
+            settings->mqtt.username[sizeof(settings->mqtt.username) - 1] = '\0';
+            settings->mqtt.password[0] = '\0';
+        } else {
+            String username = rest.substring(0, split);
+            strncpy(settings->mqtt.username, username.c_str(), sizeof(settings->mqtt.username) - 1);
+            settings->mqtt.username[sizeof(settings->mqtt.username) - 1] = '\0';
+            strncpy(
+                settings->mqtt.password,
+                rest.substring(split + 1).c_str(),
+                sizeof(settings->mqtt.password) - 1
+            );
+            settings->mqtt.password[sizeof(settings->mqtt.password) - 1] = '\0';
+        }
+        LOGGER.info("MQTT user set (save to apply)");
+        return;
+    }
+
+    if (trimmed.startsWith("mqttid ")) {
+        String clientId = trimmed.substring(7);
+        clientId.trim();
+        strncpy(settings->mqtt.clientId, clientId.c_str(), sizeof(settings->mqtt.clientId) - 1);
+        settings->mqtt.clientId[sizeof(settings->mqtt.clientId) - 1] = '\0';
+        LOGGER.info("MQTT client id (save to apply)");
+        return;
+    }
+
+    if (trimmed.startsWith("mqttbase ")) {
+        String baseTopic = trimmed.substring(9);
+        baseTopic.trim();
+        strncpy(settings->mqtt.baseTopic, baseTopic.c_str(), sizeof(settings->mqtt.baseTopic) - 1);
+        settings->mqtt.baseTopic[sizeof(settings->mqtt.baseTopic) - 1] = '\0';
+        LOGGER.info("MQTT base topic (save to apply)");
+        return;
+    }
+
+    if (trimmed.startsWith("mqtten ")) {
+        String flag = trimmed.substring(7);
+        flag.trim();
+        flag.toLowerCase();
+        settings->mqtt.enabled = (flag == "on" || flag == "1" || flag == "true");
+        LOGGER.info(String("MQTT enabled ") + (settings->mqtt.enabled ? "true" : "false") + " (save to apply)");
         return;
     }
 

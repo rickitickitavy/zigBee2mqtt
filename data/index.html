@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>z2m-gateway</title>
+    <link rel="stylesheet" type="text/css" href="css/all.css"/>
+    <script>
+        function showMainSection(name) {
+            var buttons = document.querySelectorAll(".sidebar-btn");
+            var sections = document.querySelectorAll(".section-panel");
+            var buttonIndex;
+            for (buttonIndex = 0; buttonIndex < buttons.length; buttonIndex++) {
+                if (buttons[buttonIndex].getAttribute("data-section") == name) {
+                    buttons[buttonIndex].classList.add("active");
+                } else {
+                    buttons[buttonIndex].classList.remove("active");
+                }
+            }
+            var sectionIndex;
+            for (sectionIndex = 0; sectionIndex < sections.length; sectionIndex++) {
+                if (sections[sectionIndex].id == "section-" + name) {
+                    sections[sectionIndex].classList.add("active");
+                } else {
+                    sections[sectionIndex].classList.remove("active");
+                }
+            }
+            if (name == "system") {
+                var activeSystem = document.querySelector(".system-tab-btn.active");
+                if (activeSystem && activeSystem.getAttribute("data-tab") == "log") {
+                    startLogPolling();
+                } else {
+                    stopLogPolling();
+                }
+            } else {
+                stopLogPolling();
+            }
+        }
+
+        function showSystemTab(name) {
+            var buttons = document.querySelectorAll(".system-tab-btn");
+            var panels = document.querySelectorAll(".system-tab-panel");
+            var buttonIndex;
+            for (buttonIndex = 0; buttonIndex < buttons.length; buttonIndex++) {
+                if (buttons[buttonIndex].getAttribute("data-tab") == name) {
+                    buttons[buttonIndex].classList.add("active");
+                } else {
+                    buttons[buttonIndex].classList.remove("active");
+                }
+            }
+            var panelIndex;
+            for (panelIndex = 0; panelIndex < panels.length; panelIndex++) {
+                if (panels[panelIndex].id == "system-tab-" + name) {
+                    panels[panelIndex].classList.add("active");
+                } else {
+                    panels[panelIndex].classList.remove("active");
+                }
+            }
+            if (name == "log") {
+                startLogPolling();
+            } else {
+                stopLogPolling();
+            }
+        }
+
+        function setupPasswordToggle(inputId, buttonId) {
+            var input = document.getElementById(inputId);
+            var button = document.getElementById(buttonId);
+            if (!input || !button) {
+                return;
+            }
+            button.onclick = function () {
+                var hidden = input.type == "password";
+                input.type = hidden ? "text" : "password";
+                button.textContent = hidden ? "Hide" : "Show";
+            };
+        }
+
+        var logPollTimer = null;
+
+        function stopLogPolling() {
+            if (logPollTimer != null) {
+                window.clearInterval(logPollTimer);
+                logPollTimer = null;
+            }
+        }
+
+        function startLogPolling() {
+            refreshLog();
+            if (logPollTimer != null) {
+                return;
+            }
+            logPollTimer = window.setInterval(refreshLog, 2000);
+        }
+
+        function refreshLog() {
+            var logViewer = document.getElementById("memoryLogViewer");
+            if (!logViewer) {
+                return;
+            }
+            fetch("/api/log").then(function (response) {
+                return response.text().then(function (text) {
+                    if (response.ok) {
+                        logViewer.value = text || "";
+                    } else {
+                        logViewer.value = "Failed to load log (HTTP " + response.status + ")";
+                    }
+                });
+            }).catch(function () {
+                logViewer.value = "Failed to load log (network error)";
+            });
+        }
+
+        function loadWifi() {
+            fetch("/api/wifi").then(function (response) {
+                return response.json();
+            }).then(function (wifiSettings) {
+                document.getElementById("wifiBssid").value = wifiSettings.bssid || wifiSettings.bsid || "";
+                document.getElementById("wifiPassword").value = wifiSettings.password || "";
+                document.getElementById("wifiDeviceName").value = wifiSettings.deviceName || "";
+                document.getElementById("wifiApIp").value = wifiSettings.apIp || "192.168.0.1";
+                document.getElementById("wifiMode").value = wifiSettings.mode || "AP";
+                document.getElementById("wifiOtgEnabled").checked = !!wifiSettings.otgEnabled;
+                updateApIpVisibility();
+            }).catch(function () {
+            });
+        }
+
+        function loadMqtt() {
+            fetch("/api/mqtt").then(function (response) {
+                return response.json();
+            }).then(function (mqttSettings) {
+                document.getElementById("mqttEnabled").checked = !!mqttSettings.enabled;
+                document.getElementById("mqttServer").value = mqttSettings.server || "";
+                document.getElementById("mqttPort").value = mqttSettings.port || 1883;
+                document.getElementById("mqttUsername").value = mqttSettings.username || "";
+                document.getElementById("mqttPassword").value = mqttSettings.password || "";
+                document.getElementById("mqttClientId").value = mqttSettings.clientId || "";
+                document.getElementById("mqttBaseTopic").value = mqttSettings.baseTopic || "";
+                document.getElementById("mqttReconnectIntervalMs").value = mqttSettings.reconnectIntervalMs || 3000;
+                document.getElementById("mqttClientTimeoutMs").value = mqttSettings.clientTimeoutMs || 200;
+            }).catch(function () {
+            });
+        }
+
+        function saveMqtt() {
+            var saveError = document.getElementById("mqttSaveError");
+            var saveSuccess = document.getElementById("mqttSaveSuccess");
+            saveError.hidden = true;
+            saveSuccess.hidden = true;
+            var body = {
+                enabled: document.getElementById("mqttEnabled").checked,
+                server: document.getElementById("mqttServer").value,
+                port: parseInt(document.getElementById("mqttPort").value, 10),
+                username: document.getElementById("mqttUsername").value,
+                password: document.getElementById("mqttPassword").value,
+                clientId: document.getElementById("mqttClientId").value,
+                baseTopic: document.getElementById("mqttBaseTopic").value,
+                reconnectIntervalMs: parseInt(document.getElementById("mqttReconnectIntervalMs").value, 10),
+                clientTimeoutMs: parseInt(document.getElementById("mqttClientTimeoutMs").value, 10)
+            };
+            fetch("/api/mqtt", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body)
+            }).then(function (response) {
+                return response.text().then(function (text) {
+                    if (response.ok) {
+                        saveSuccess.hidden = false;
+                        saveSuccess.textContent = text || "Saved. Device will apply MQTT settings.";
+                    } else {
+                        saveError.hidden = false;
+                        saveError.textContent = text || ("Save failed (HTTP " + response.status + ")");
+                    }
+                });
+            }).catch(function () {
+                saveError.hidden = false;
+                saveError.textContent = "Save failed (network error)";
+            });
+        }
+
+        function saveWifi() {
+            var saveError = document.getElementById("wifiSaveError");
+            var saveSuccess = document.getElementById("wifiSaveSuccess");
+            saveError.hidden = true;
+            saveSuccess.hidden = true;
+            var body = {
+                bssid: document.getElementById("wifiBssid").value,
+                password: document.getElementById("wifiPassword").value,
+                deviceName: document.getElementById("wifiDeviceName").value,
+                apIp: document.getElementById("wifiApIp").value,
+                mode: document.getElementById("wifiMode").value,
+                otgEnabled: document.getElementById("wifiOtgEnabled").checked
+            };
+            fetch("/api/wifi", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body)
+            }).then(function (response) {
+                return response.text().then(function (text) {
+                    if (response.ok) {
+                        saveSuccess.hidden = false;
+                        saveSuccess.textContent = text || "Saved. Device will apply Wi-Fi settings.";
+                    } else {
+                        saveError.hidden = false;
+                        saveError.textContent = text || ("Save failed (HTTP " + response.status + ")");
+                    }
+                });
+            }).catch(function () {
+                saveError.hidden = false;
+                saveError.textContent = "Save failed (network error)";
+            });
+        }
+
+        function loadVersion() {
+            fetch("/api/version").then(function (response) {
+                return response.json();
+            }).then(function (payload) {
+                var versionLabel = document.getElementById("firmwareVersion");
+                if (versionLabel) {
+                    versionLabel.textContent = payload.version || "";
+                }
+            }).catch(function () {
+            });
+        }
+
+        function uploadFirmware() {
+            var fileInput = document.getElementById("updateCodeFile");
+            var progressBar = document.getElementById("updateCodeProgress");
+            var statusLine = document.getElementById("updateCodeStatus");
+            if (!fileInput.files || fileInput.files.length == 0) {
+                statusLine.textContent = "Choose a .bin file first.";
+                return;
+            }
+            var formData = new FormData();
+            formData.append("firmware", fileInput.files[0], fileInput.files[0].name);
+            var xhr = new XMLHttpRequest();
+            xhr.open("POST", "/update", true);
+            progressBar.hidden = false;
+            progressBar.value = 0;
+            xhr.upload.onprogress = function (event) {
+                if (event.lengthComputable) {
+                    progressBar.value = (event.loaded / event.total) * 100;
+                }
+            };
+            xhr.onload = function () {
+                statusLine.textContent = xhr.status === 200
+                    ? (xhr.responseText || "Update started. Device will restart.")
+                    : (xhr.responseText || ("Update failed (HTTP " + xhr.status + ")"));
+            };
+            xhr.onerror = function () {
+                statusLine.textContent = "Update failed (network error)";
+            };
+            xhr.send(formData);
+        }
+
+        function updateApIpVisibility() {
+            var apIpField = document.getElementById("wifiApIpField");
+            if (!apIpField) {
+                return;
+            }
+            apIpField.hidden = document.getElementById("wifiMode").value != "AP";
+        }
+
+        window.onload = function () {
+            setupPasswordToggle("wifiPassword", "wifiPasswordToggle");
+            setupPasswordToggle("mqttPassword", "mqttPasswordToggle");
+            document.getElementById("wifiMode").onchange = updateApIpVisibility;
+            loadWifi();
+            loadMqtt();
+            loadVersion();
+        };
+    </script>
+</head>
+<body>
+<div class="app-shell">
+    <nav class="sidebar-nav" role="navigation" aria-label="Main sections">
+        <h1 class="sidebar-title">Gateway</h1>
+        <button type="button" class="sidebar-btn active" data-section="status" onclick="showMainSection('status')">Status</button>
+        <button type="button" class="sidebar-btn" data-section="wifi" onclick="showMainSection('wifi')">WiFi</button>
+        <button type="button" class="sidebar-btn" data-section="mqtt" onclick="showMainSection('mqtt')">MQTT</button>
+        <button type="button" class="sidebar-btn" data-section="zigbee" onclick="showMainSection('zigbee')">ZigBee</button>
+        <button type="button" class="sidebar-btn" data-section="devices" onclick="showMainSection('devices')">Devices</button>
+        <button type="button" class="sidebar-btn" data-section="system" onclick="showMainSection('system')">System</button>
+    </nav>
+    <div class="main-panel">
+        <section id="section-status" class="section-panel active" aria-label="Status">
+            <h2 class="section-title">Status</h2>
+        </section>
+
+        <section id="section-wifi" class="section-panel" aria-label="WiFi">
+            <h2 class="section-title">WiFi</h2>
+            <p id="wifiSaveError" class="save-error" hidden></p>
+            <p id="wifiSaveSuccess" class="save-success" hidden></p>
+            <div class="field">
+                <label for="wifiBssid">BSSID</label>
+                <input id="wifiBssid" type="text" autocomplete="off">
+                <p class="field-hint">One network name for both modes: STA joins this name, AP advertises this name.</p>
+            </div>
+            <div class="field">
+                <label for="wifiPassword">PASSWORD</label>
+                <div class="password-row">
+                    <input id="wifiPassword" type="password" autocomplete="off">
+                    <button type="button" id="wifiPasswordToggle" class="password-toggle">Show</button>
+                </div>
+            </div>
+            <div class="field">
+                <label for="wifiDeviceName">DEVICE_NAME</label>
+                <input id="wifiDeviceName" type="text" autocomplete="off">
+                <p class="field-hint">Wi-Fi hostname only. Not used as the AP or STA network name.</p>
+            </div>
+            <div class="field" id="wifiApIpField">
+                <label for="wifiApIp">AP IP</label>
+                <input id="wifiApIp" type="text" autocomplete="off">
+                <p class="field-hint">SoftAP address. Used only when the radio is in AP mode. Default 192.168.0.1.</p>
+            </div>
+            <div class="field">
+                <label for="wifiMode">MODE</label>
+                <select id="wifiMode">
+                    <option value="AP">AP</option>
+                    <option value="STA">STA</option>
+                </select>
+            </div>
+            <div class="field field-check">
+                <input id="wifiOtgEnabled" type="checkbox">
+                <label for="wifiOtgEnabled">OTG_ENABLED</label>
+            </div>
+            <div class="page-footer">
+                <div class="page-footer-inner">
+                    <button type="button" class="btn btn-primary" onclick="saveWifi()">Save</button>
+                    <button type="button" class="btn btn-secondary" onclick="window.location='/'">Reload</button>
+                </div>
+            </div>
+        </section>
+
+        <section id="section-mqtt" class="section-panel" aria-label="MQTT">
+            <h2 class="section-title">MQTT</h2>
+            <p id="mqttSaveError" class="save-error" hidden></p>
+            <p id="mqttSaveSuccess" class="save-success" hidden></p>
+            <div class="field field-check">
+                <input id="mqttEnabled" type="checkbox">
+                <label for="mqttEnabled">ENABLED</label>
+            </div>
+            <div class="field">
+                <label for="mqttServer">SERVER</label>
+                <input id="mqttServer" type="text" autocomplete="off">
+                <p class="field-hint">Broker host or IPv4. Must be reachable from the STA LAN.</p>
+            </div>
+            <div class="field">
+                <label for="mqttPort">PORT</label>
+                <input id="mqttPort" type="number" min="1" max="65535" autocomplete="off">
+            </div>
+            <div class="field">
+                <label for="mqttUsername">USERNAME</label>
+                <input id="mqttUsername" type="text" autocomplete="off">
+                <p class="field-hint">Leave empty for anonymous brokers.</p>
+            </div>
+            <div class="field">
+                <label for="mqttPassword">PASSWORD</label>
+                <div class="password-row">
+                    <input id="mqttPassword" type="password" autocomplete="off">
+                    <button type="button" id="mqttPasswordToggle" class="password-toggle">Show</button>
+                </div>
+            </div>
+            <div class="field">
+                <label for="mqttClientId">CLIENT_ID</label>
+                <input id="mqttClientId" type="text" autocomplete="off">
+            </div>
+            <div class="field">
+                <label for="mqttBaseTopic">BASE_TOPIC</label>
+                <input id="mqttBaseTopic" type="text" autocomplete="off">
+            </div>
+            <div class="field">
+                <label for="mqttReconnectIntervalMs">RECONNECT_INTERVAL_MS</label>
+                <input id="mqttReconnectIntervalMs" type="number" min="500" autocomplete="off">
+            </div>
+            <div class="field">
+                <label for="mqttClientTimeoutMs">CLIENT_TIMEOUT_MS</label>
+                <input id="mqttClientTimeoutMs" type="number" min="50" max="1500" autocomplete="off">
+                <p class="field-hint">Clamped to 50–1500 ms.</p>
+            </div>
+            <div class="page-footer">
+                <div class="page-footer-inner">
+                    <button type="button" class="btn btn-primary" onclick="saveMqtt()">Save</button>
+                    <button type="button" class="btn btn-secondary" onclick="window.location='/'">Reload</button>
+                </div>
+            </div>
+        </section>
+
+        <section id="section-zigbee" class="section-panel" aria-label="ZigBee">
+            <h2 class="section-title">ZigBee</h2>
+        </section>
+
+        <section id="section-devices" class="section-panel" aria-label="Devices">
+            <h2 class="section-title">Devices</h2>
+        </section>
+
+        <section id="section-system" class="section-panel" aria-label="System">
+            <h2 class="section-title">System</h2>
+            <nav class="tabs system-tabs" role="tablist" aria-label="System groups">
+                <button type="button" class="system-tab-btn tab-btn active" data-tab="update" role="tab" onclick="showSystemTab('update')">Update</button>
+                <button type="button" class="system-tab-btn tab-btn" data-tab="log" role="tab" onclick="showSystemTab('log')">Log</button>
+            </nav>
+            <div class="tab-content">
+                <div id="system-tab-update" class="system-tab-panel tab-panel active" role="tabpanel">
+                    <div class="upload-card">
+                        <h3 class="upload-title">Code (firmware)</h3>
+                        <p class="field-hint">Running version: <span id="firmwareVersion">—</span></p>
+                        <p class="field-hint">PlatformIO: <code>.pio/build/esp32-c6-devkitc-1/firmware.bin</code></p>
+                        <input id="updateCodeFile" type="file" accept=".bin,application/octet-stream">
+                        <progress id="updateCodeProgress" class="progress-bar" max="100" value="0" hidden></progress>
+                        <p id="updateCodeStatus" class="upload-status"></p>
+                        <button type="button" class="btn btn-primary" onclick="uploadFirmware()">Upload firmware</button>
+                    </div>
+                </div>
+                <div id="system-tab-log" class="system-tab-panel tab-panel" role="tabpanel">
+                    <div class="upload-card">
+                        <h3 class="upload-title">Log</h3>
+                        <p class="field-hint">In-memory firmware log (oldest lines drop when the ring is full).</p>
+                        <textarea id="memoryLogViewer" class="log-viewer" readonly></textarea>
+                        <button type="button" class="btn btn-secondary" onclick="refreshLog()">Refresh</button>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </div>
+</div>
+</body>
+</html>

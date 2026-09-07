@@ -12,6 +12,7 @@ public:
     void applyDefaults();
     void resetWiFi();
     void logSettings();
+    void requestRestart();
     bool handlePendingRestart(unsigned long delayMs);
     static void clampMqttClientTimeout(int &timeoutMs);
     static void clampZigbeeChannel(uint8_t &channel);

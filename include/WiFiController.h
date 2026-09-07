@@ -7,25 +7,41 @@ class WiFiController {
 public:
     WiFiController(SettingsManager *settingsManager, bool forceAp);
 
+    using InterfaceReadyFn = void (*)();
+
     bool isApMode() const;
     bool isStaConnected() const;
+    void setInterfaceReadyHandler(InterfaceReadyFn handler);
+    void applyStaRadio();
+    void enableIeee154Coex();
+    uint8_t zigbeeChannelOverlappingSta() const;
+    int staWifiChannel() const;
     void update();
 
 private:
-    static constexpr unsigned long kApTimeoutMs = 5UL * 60UL * 1000UL;
+    static constexpr unsigned long kStaJoinTimeoutMs = 20000UL;
     static constexpr unsigned long kStaReconnectMs = 10UL * 1000UL;
+    static constexpr unsigned long kApRestartMs = 10000UL;
+    static constexpr unsigned long kStaRadioRefreshMs = 10000UL;
 
     SettingsManager *settingsManager;
-    bool forceAp;
     bool apActive = false;
     bool staEnabledAtBoot = false;
-    unsigned long apStartedMs = 0;
     unsigned long lastStaReconnectMs = 0;
+    unsigned long lastApRestartMs = 0;
+    unsigned long lastStaRadioRefreshMs = 0;
     bool staWasConnected = false;
+    bool staNeedsWebRebind = false;
+    InterfaceReadyFn interfaceReadyHandler = nullptr;
+    bool recoveryApIdentity = false;
 
-    void startAp(const String &deviceName);
-    void stopAp();
-    void startSta(const String &deviceName);
+    void stopStationBeforeAp();
+    void startAp(bool useRecoveryIdentity);
+    bool isApRadioUp() const;
+    void startSta();
+    void beginStaJoin();
     void reconnectSta();
     void onStaConnected();
+    String apNetworkName() const;
+    String apPassword() const;
 };

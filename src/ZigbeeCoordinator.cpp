@@ -14,6 +14,10 @@ void ZigbeeCoordinator::setLightStateHandler(LightStateFn handler) {
     lightStateHandler = handler;
 }
 
+void ZigbeeCoordinator::setDeviceBoundHandler(DeviceBoundFn handler) {
+    deviceBoundHandler = handler;
+}
+
 void ZigbeeCoordinator::attachLibraryCallbacks(void (*withSource)(bool, uint8_t, esp_zb_zcl_addr_t)) {
     zigbeeSwitch.onLightStateChangeWithSource(withSource);
 }
@@ -37,16 +41,28 @@ bool ZigbeeCoordinator::begin(uint8_t channel, uint8_t permitJoinSec) {
         return false;
     }
 
+    started = true;
     LOGGER.info("Zigbee coordinator started");
     return true;
 }
 
+bool ZigbeeCoordinator::isStarted() const {
+    return started;
+}
+
 void ZigbeeCoordinator::permitJoin(uint8_t seconds) {
+    if (!started) {
+        LOGGER.warning("Zigbee is not started");
+        return;
+    }
     LOGGER.info("Permit join " + String(seconds) + "s");
     Zigbee.openNetwork(seconds);
 }
 
 void ZigbeeCoordinator::closeJoin() {
+    if (!started) {
+        return;
+    }
     LOGGER.info("Closing join window");
     Zigbee.closeNetwork();
 }
@@ -84,6 +100,9 @@ void ZigbeeCoordinator::storeBoundDevice(zb_device_params_t *device) {
     if (model != nullptr) {
         strncpy(slot->model, model, sizeof(slot->model) - 1);
     }
+    if (deviceBoundHandler != nullptr) {
+        deviceBoundHandler(slot);
+    }
 }
 
 void ZigbeeCoordinator::refreshBoundDevices() {
@@ -94,6 +113,9 @@ void ZigbeeCoordinator::refreshBoundDevices() {
 }
 
 void ZigbeeCoordinator::dispatch() {
+    if (!started) {
+        return;
+    }
     if ((millis() - lastRefreshMs) < 10000) {
         return;
     }
@@ -153,6 +175,10 @@ void ZigbeeCoordinator::handleLightStateWithSource(bool on, uint8_t endpoint, es
 }
 
 bool ZigbeeCoordinator::controlOnOff(const uint8_t ieee[8], const char *command) {
+    if (!started) {
+        LOGGER.warning("Zigbee is not started");
+        return false;
+    }
     BoundZigbeeDevice *device = findByIeee(ieee);
     if (device == nullptr) {
         LOGGER.warning("No bound Zigbee device for command");

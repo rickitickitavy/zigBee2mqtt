@@ -1,26 +1,16 @@
 #pragma once
 
+#include <Arduino.h>
 #include "SettingsManager.h"
-#include "DeviceTopicMap.h"
-#include "ZigbeeCoordinator.h"
-#include "MqttClient.h"
 
 class SerialCli {
 public:
-    SerialCli(
-        SettingsManager *settingsManager,
-        DeviceTopicMap *topicMap,
-        ZigbeeCoordinator *coordinator,
-        MqttClient *mqttClient
-    );
+    explicit SerialCli(SettingsManager *settingsManager);
 
     void dispatch();
 
 private:
     SettingsManager *settingsManager;
-    DeviceTopicMap *topicMap;
-    ZigbeeCoordinator *coordinator;
-    MqttClient *mqttClient;
     String lineBuffer;
 
     void handleLine(const String &line);

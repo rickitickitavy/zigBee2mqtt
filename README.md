@@ -1,6 +1,6 @@
 # ESP32-C6 Zigbee–MQTT gateway
 
-PlatformIO / Arduino firmware for **ESP32-C6-DevKitC-1 N16** (16 MB). The chip is a Zigbee coordinator on its native 802.15.4 radio and publishes On/Off state to **per-device MQTT topics**.
+PlatformIO / Arduino firmware for **two ESP32-C6-DevKitC-1 N16** boards (same `.bin`). GPIO15 selects the role: **LOW = Wi-Fi host**, **HIGH = Zigbee slave**. The host publishes On/Off state to **per-device MQTT topics**. The slave runs the Zigbee coordinator after the host pushes settings.
 
 This is not a port of the Node.js Zigbee2MQTT converter database.
 
@@ -8,13 +8,28 @@ This is not a port of the Node.js Zigbee2MQTT converter database.
 
 - Use the **native USB-C** port on the DevKit (USB Serial/JTAG CDC).
 - ESP32-C6 does **not** implement S2/S3-style USB OTG host/HID. CDC is for flash, monitor, and the USB CLI.
-- Hold **BOOT (GPIO9)** LOW at reset to force SoftAP (`z2m-gateway-AP` / `00000000`, 192.168.0.1). GPIO8 is the RGB LED / strapping pin — not used as the AP button.
+- Hold **BOOT (GPIO9)** LOW at reset on the **host** to force AP for that boot (does not change stored MODE). GPIO8 is the RGB LED / strapping pin — not used as the AP button.
+- **GPIO15** is a C6 strapping pin: hold host to **GND** and slave to **3.3 V** through reset.
+
+### Two-board wiring (3.3 V, common GND)
+
+| Signal | Host | Slave |
+|--------|------|--------|
+| ROLE | GPIO15 → GND | GPIO15 → 3.3 V |
+| RST | GPIO11 | slave **EN** (active LOW pulse) |
+| SCK | GPIO6 | GPIO6 |
+| MOSI | GPIO5 | GPIO5 |
+| MISO | GPIO4 | GPIO4 |
+| CS | GPIO7 | GPIO7 |
+| IRQ | GPIO10 in | GPIO10 out (HIGH = slave has a frame) |
+
+Host→slave uses CS + SCK + MOSI (no IRQ). Slave→host (Zigbee events and logs) uses the same SPI plus IRQ. Flash the same firmware on both chips.
 
 ## CLion
 
 1. Install the PlatformIO plugin.
 2. Open this folder. `pio project init --ide clion` generates CMake files if they are missing.
-3. Build: `pio run`. Upload: `pio run -t upload`. Monitor: `pio device monitor` (115200).
+3. Build: `pio run`. Upload: `pio run -t upload`. Filesystem (web UI): `pio run -t uploadfs`. Monitor: `pio device monitor` (115200).
 
 First Zigbee flash: erase recommended so `zb_storage` is clean:
 
@@ -33,7 +48,26 @@ mqtt 192.168.1.10 1883
 save
 ```
 
-(`wifi` schedules a restart.)
+(`wifi` writes BSSID/PASSWORD, sets MODE STA, and schedules a restart.)
+
+## Web console
+
+With AP or STA up, open `http://192.168.0.1/` (AP) or `http://<sta-ip>/`. There is **no HTTP password**. Firmware upload on **System → Update** is unauthenticated; recover with USB flash if needed.
+
+Flash `data/` after firmware so `/index.html` and `/css/all.css` exist (`pio run -t uploadfs`). Firmware-only flash still serves a short “filesystem missing” page.
+
+Wi-Fi group (also the **WiFi** sidebar form):
+
+| Field | Meaning |
+|-------|---------|
+| **BSSID** | One network name for STA join and AP advertise (default `z2m-gateway`) |
+| **PASSWORD** | PSK for STA and AP. Default `00000000` |
+| **DEVICE_NAME** | Wi-Fi hostname only (not the AP/STA network name) |
+| **AP IP** | SoftAP address, AP mode only. Default `192.168.0.1` |
+| **MODE** | `AP` (default) or `STA` |
+| **OTG_ENABLED** | Stored only (ESP32-C6 has no USB OTG) |
+
+Boot: MODE AP (default) → AP named **BSSID** at **AP IP**. MODE STA → join **BSSID** for **5 seconds**, then AP named the same **BSSID** if the router does not answer. After that fallback the device stays AP until the next boot or Save. Join the AP with PSK `00000000` unless you changed PASSWORD.
 
 ```
 permit 180
@@ -56,7 +90,7 @@ Assign topics per IEEE. Unmapped devices still show up in `bridge/devices`.
 
 ## Zigbee + WiFi
 
-Both use 2.4 GHz. Default Zigbee channel is **15**. Change with `channel 20` (restarts). Keep MQTT traffic modest.
+The host never starts 802.15.4. Zigbee runs only on the slave and stays up in host SoftAP or STA after `SET_SETTINGS`. Default channel is **15** (host settings). Logs: one 64 KiB ring on the host, lines stamped `YYYY-MM-DD HH:MM:SS [host]|[slave]` (NTP on STA when available, else local timer). Slave lines are pushed over IRQ + SPI immediately. CLI `log` and `GET /api/log` read that ring.
 
 ## Build notes
 

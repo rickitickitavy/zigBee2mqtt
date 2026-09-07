@@ -16,7 +16,7 @@ void MqttClient::setMessageHandler(MessageFn handler) {
 
 void MqttClient::rebuildTopics() {
     GlobalSettings *settings = settingsManager->getSettings();
-    const String base = String(settings->mqttBaseTopic);
+    const String base = String(settings->mqtt.baseTopic);
     topicStatus = base + "/bridge/status";
     topicDevices = base + "/bridge/devices";
     topicPermitJoin = base + "/bridge/permit_join";
@@ -26,10 +26,10 @@ void MqttClient::rebuildTopics() {
 void MqttClient::begin(void (*rawCallback)(char *topic, byte *payload, unsigned int length)) {
     GlobalSettings *settings = settingsManager->getSettings();
     rebuildTopics();
-    client->setServer(settings->mqttServer, settings->mqttPort);
+    client->setServer(settings->mqtt.server, settings->mqtt.port);
     client->setCallback(rawCallback);
     client->setBufferSize(1024);
-    client->setSocketTimeout(settings->mqttClientTimeoutMs / 1000 > 0 ? settings->mqttClientTimeoutMs / 1000 : 1);
+    client->setSocketTimeout(settings->mqtt.clientTimeoutMs / 1000 > 0 ? settings->mqtt.clientTimeoutMs / 1000 : 1);
 }
 
 void MqttClient::onMessage(char *topic, byte *payload, unsigned int length) {
@@ -70,11 +70,11 @@ void MqttClient::subscribeDeviceCommands() {
 
 void MqttClient::reconnect() {
     GlobalSettings *settings = settingsManager->getSettings();
-    LOGGER.info("MQTT connecting to " + String(settings->mqttServer));
+    LOGGER.info("MQTT connecting to " + String(settings->mqtt.server));
 
-    const char *user = settings->mqttUsername[0] != '\0' ? settings->mqttUsername : nullptr;
-    const char *password = user != nullptr ? settings->mqttPassword : nullptr;
-    const bool ok = client->connect(settings->mqttClientId, user, password);
+    const char *user = settings->mqtt.username[0] != '\0' ? settings->mqtt.username : nullptr;
+    const char *password = user != nullptr ? settings->mqtt.password : nullptr;
+    const bool ok = client->connect(settings->mqtt.clientId, user, password);
     if (!ok) {
         LOGGER.warning("MQTT connect failed, state " + String(client->state()));
         reconnectBackoffMs = reconnectBackoffMs == 0 ? 2000 : min(reconnectBackoffMs * 2, (unsigned long)30000);
@@ -89,7 +89,7 @@ void MqttClient::reconnect() {
 
 void MqttClient::dispatch(bool staConnected) {
     GlobalSettings *settings = settingsManager->getSettings();
-    if (!settings->mqttEnabled || !staConnected) {
+    if (!settings->mqtt.enabled || !staConnected) {
         return;
     }
 
@@ -99,7 +99,7 @@ void MqttClient::dispatch(bool staConnected) {
     }
 
     const unsigned long now = millis();
-    const unsigned long waitMs = reconnectBackoffMs > 0 ? reconnectBackoffMs : (unsigned long)settings->mqttReconnectIntervalMs;
+    const unsigned long waitMs = reconnectBackoffMs > 0 ? reconnectBackoffMs : (unsigned long)settings->mqtt.reconnectIntervalMs;
     if ((now - lastReconnectMs) < waitMs) {
         return;
     }

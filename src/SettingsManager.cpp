@@ -4,6 +4,7 @@
 
 #include <EEPROM.h>
 #include <string.h>
+#include <WiFi.h>
 
 static_assert(sizeof(GlobalSettings) <= 4096, "GlobalSettings must fit in EEPROM");
 
@@ -26,20 +27,23 @@ SettingsManager::SettingsManager() {
             settings.version = GLOBAL_CURRENT_SETTINGS_VERSION;
             saveSetting(false);
         }
-        clampMqttClientTimeout(settings.mqttClientTimeoutMs);
-        clampZigbeeChannel(settings.zigbeeChannel);
+        clampMqttClientTimeout(settings.mqtt.clientTimeoutMs);
+        clampZigbeeChannel(settings.zigbee.channel);
+        if (settings.wifi.mode != WifiSettingsModeAp && settings.wifi.mode != WifiSettingsModeSta) {
+            settings.wifi.mode = WifiSettingsModeAp;
+        }
         {
-            uint8_t rawWifi = 0;
-            memcpy(&rawWifi, &settings.network.wifiEnabled, sizeof(rawWifi));
-            if (rawWifi > 1) {
-                settings.network.wifiEnabled = false;
+            uint8_t rawOtg = 0;
+            memcpy(&rawOtg, &settings.wifi.otgEnabled, sizeof(rawOtg));
+            if (rawOtg > 1) {
+                settings.wifi.otgEnabled = false;
             }
         }
         {
             uint8_t rawMqtt = 0;
-            memcpy(&rawMqtt, &settings.mqttEnabled, sizeof(rawMqtt));
+            memcpy(&rawMqtt, &settings.mqtt.enabled, sizeof(rawMqtt));
             if (rawMqtt > 1) {
-                settings.mqttEnabled = true;
+                settings.mqtt.enabled = true;
             }
         }
     }
@@ -56,24 +60,26 @@ void SettingsManager::applyDefaults() {
     settings.version = GLOBAL_CURRENT_SETTINGS_VERSION;
 
     resetWiFi();
-    settings.network.wifiEnabled = true;
 
-    strncpy(settings.mqttServer, DEFAULT_MQTT_SERVER, sizeof(settings.mqttServer) - 1);
-    settings.mqttPort = DEFAULT_MQTT_PORT;
-    settings.mqttReconnectIntervalMs = DEFAULT_MQTT_RECONNECT_MS;
-    settings.mqttClientTimeoutMs = DEFAULT_MQTT_CLIENT_TIMEOUT_MS;
-    settings.mqttEnabled = true;
-    strncpy(settings.mqttClientId, WIFI_DEFAULT_HOST_NAME, sizeof(settings.mqttClientId) - 1);
-    strncpy(settings.mqttBaseTopic, DEFAULT_MQTT_BASE_TOPIC, sizeof(settings.mqttBaseTopic) - 1);
+    strncpy(settings.mqtt.server, DEFAULT_MQTT_SERVER, sizeof(settings.mqtt.server) - 1);
+    settings.mqtt.port = DEFAULT_MQTT_PORT;
+    settings.mqtt.reconnectIntervalMs = DEFAULT_MQTT_RECONNECT_MS;
+    settings.mqtt.clientTimeoutMs = DEFAULT_MQTT_CLIENT_TIMEOUT_MS;
+    settings.mqtt.enabled = true;
+    strncpy(settings.mqtt.clientId, DEFAULT_MQTT_CLIENT_ID, sizeof(settings.mqtt.clientId) - 1);
+    strncpy(settings.mqtt.baseTopic, DEFAULT_MQTT_BASE_TOPIC, sizeof(settings.mqtt.baseTopic) - 1);
 
-    settings.zigbeeChannel = DEFAULT_ZIGBEE_CHANNEL;
-    settings.permitJoinOnBootSec = DEFAULT_PERMIT_JOIN_SEC;
+    settings.zigbee.channel = DEFAULT_ZIGBEE_CHANNEL;
+    settings.zigbee.permitJoinOnBootSec = DEFAULT_PERMIT_JOIN_SEC;
 }
 
 void SettingsManager::resetWiFi() {
-    strncpy(settings.network.ssid, WIFI_DEFAULT_SSID, sizeof(settings.network.ssid) - 1);
-    strncpy(settings.network.password, WIFI_DEFAULT_PASSWORD, sizeof(settings.network.password) - 1);
-    strncpy(settings.network.hostName, WIFI_DEFAULT_HOST_NAME, sizeof(settings.network.hostName) - 1);
+    strncpy(settings.wifi.bssid, WIFI_DEFAULT_BSSID, sizeof(settings.wifi.bssid) - 1);
+    strncpy(settings.wifi.password, WIFI_DEFAULT_PASSWORD, sizeof(settings.wifi.password) - 1);
+    strncpy(settings.wifi.deviceName, WIFI_DEFAULT_DEVICE_NAME, sizeof(settings.wifi.deviceName) - 1);
+    strncpy(settings.wifi.apIp, WIFI_DEFAULT_AP_IP, sizeof(settings.wifi.apIp) - 1);
+    settings.wifi.mode = WifiSettingsModeAp;
+    settings.wifi.otgEnabled = false;
 }
 
 void SettingsManager::clampMqttClientTimeout(int &timeoutMs) {
@@ -100,6 +106,12 @@ void SettingsManager::readSettings() {
     readSettings(&settings);
 }
 
+void SettingsManager::requestRestart() {
+    pendingRestart = true;
+    restartRequestedMs = millis();
+    LOGGER.warning("Restart scheduled");
+}
+
 void SettingsManager::saveSetting(bool restart) {
     LOGGER.info("Saving settings...");
     char *dataPtr = (char *)&settings;
@@ -108,9 +120,7 @@ void SettingsManager::saveSetting(bool restart) {
     }
     EEPROM.commit();
     if (restart) {
-        pendingRestart = true;
-        restartRequestedMs = millis();
-        LOGGER.warning("Restart scheduled");
+        requestRestart();
     }
 }
 
@@ -122,6 +132,11 @@ bool SettingsManager::handlePendingRestart(unsigned long delayMs) {
         return false;
     }
     LOGGER.warning("RESTARTING...");
+    WiFi.persistent(false);
+    WiFi.disconnect(false, false, 2000);
+    delay(150);
+    WiFi.mode(WIFI_OFF);
+    delay(400);
     ESP.restart();
     return true;
 }
@@ -132,11 +147,15 @@ GlobalSettings *SettingsManager::getSettings() {
 
 void SettingsManager::logSettings() {
     LOGGER.info("----- SETTINGS ----");
-    LOGGER.info("  wifi ssid: " + String(settings.network.ssid));
-    LOGGER.info("  host: " + String(settings.network.hostName));
-    LOGGER.info("  wifiEnabled: " + String(settings.network.wifiEnabled ? "true" : "false"));
-    LOGGER.info("  mqtt enabled: " + String(settings.mqttEnabled ? "true" : "false"));
-    LOGGER.info("  mqtt server: " + String(settings.mqttServer) + ":" + String(settings.mqttPort));
-    LOGGER.info("  mqtt base: " + String(settings.mqttBaseTopic));
-    LOGGER.info("  zigbee channel: " + String(settings.zigbeeChannel));
+    LOGGER.info("  wifi bssid: " + String(settings.wifi.bssid));
+    LOGGER.info("  deviceName: " + String(settings.wifi.deviceName));
+    LOGGER.info(
+        String("  MODE ") + (settings.wifi.mode == WifiSettingsModeSta ? "STA" : "AP")
+    );
+    LOGGER.info("  OTG_ENABLED: " + String(settings.wifi.otgEnabled ? "true" : "false"));
+    LOGGER.info("  AP IP: " + String(settings.wifi.apIp));
+    LOGGER.info("  mqtt enabled: " + String(settings.mqtt.enabled ? "true" : "false"));
+    LOGGER.info("  mqtt server: " + String(settings.mqtt.server) + ":" + String(settings.mqtt.port));
+    LOGGER.info("  mqtt base: " + String(settings.mqtt.baseTopic));
+    LOGGER.info("  zigbee channel: " + String(settings.zigbee.channel));
 }
