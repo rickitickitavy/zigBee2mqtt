@@ -32,6 +32,12 @@
                 } else {
                     stopLogPolling();
                 }
+                if (activeSystem && activeSystem.getAttribute("data-tab") == "devices-json") {
+                    refreshDevicesJson();
+                }
+                if (activeSystem && activeSystem.getAttribute("data-tab") == "hardware") {
+                    loadHardware();
+                }
             } else {
                 stopLogPolling();
             }
@@ -43,6 +49,14 @@
             }
             if (name == "zigbee") {
                 loadZigbee();
+            }
+            if (name == "devices") {
+                loadDevices();
+            } else {
+                var searchDialog = document.getElementById("searchDialog");
+                if (searchDialog && !searchDialog.hidden) {
+                    closeSearchDialog(true);
+                }
             }
         }
 
@@ -69,6 +83,12 @@
                 startLogPolling();
             } else {
                 stopLogPolling();
+            }
+            if (name == "devices-json") {
+                refreshDevicesJson();
+            }
+            if (name == "hardware") {
+                loadHardware();
             }
         }
 
@@ -102,6 +122,86 @@
             logPollTimer = window.setInterval(refreshLog, 2000);
         }
 
+        function loadHardware() {
+            var saveError = document.getElementById("hardwareSaveError");
+            var speedSelect = document.getElementById("spiSpeedHz");
+            fetch("/api/hardware", { cache: "no-store" }).then(function (response) {
+                return response.text().then(function (text) {
+                    if (!response.ok) {
+                        throw new Error("HTTP " + response.status + (text ? ": " + text.slice(0, 80) : ""));
+                    }
+                    return JSON.parse(text);
+                });
+            }).then(function (hardwareSettings) {
+                if (saveError) {
+                    saveError.hidden = true;
+                }
+                if (speedSelect) {
+                    speedSelect.value = String(hardwareSettings.spiSpeedHz || 500000);
+                }
+            }).catch(function (error) {
+                if (speedSelect && !speedSelect.value) {
+                    speedSelect.value = "500000";
+                }
+                if (saveError) {
+                    saveError.hidden = false;
+                    saveError.textContent = "Failed to load hardware settings"
+                        + (error && error.message ? " (" + error.message + ")" : "")
+                        + ". Flash host firmware if this is HTTP 404.";
+                }
+            });
+        }
+
+        function saveHardware() {
+            var saveError = document.getElementById("hardwareSaveError");
+            var saveSuccess = document.getElementById("hardwareSaveSuccess");
+            saveError.hidden = true;
+            saveSuccess.hidden = true;
+            var body = {
+                spiSpeedHz: parseInt(document.getElementById("spiSpeedHz").value, 10)
+            };
+            fetch("/api/hardware", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body)
+            }).then(function (response) {
+                return response.text().then(function (text) {
+                    if (response.ok) {
+                        saveSuccess.hidden = false;
+                        saveSuccess.textContent = text || "Saved. SPI speed is active now.";
+                    } else {
+                        saveError.hidden = false;
+                        saveError.textContent = text || ("Save failed (HTTP " + response.status + ")");
+                    }
+                });
+            }).catch(function () {
+                saveError.hidden = false;
+                saveError.textContent = "Save failed (network error)";
+            });
+        }
+
+        function refreshDevicesJson() {
+            var viewer = document.getElementById("devicesJsonViewer");
+            if (!viewer) {
+                return;
+            }
+            fetch("/api/devices/store", { cache: "no-store" }).then(function (response) {
+                return response.text().then(function (text) {
+                    if (!response.ok) {
+                        viewer.value = "Failed to load " + "devices.json (HTTP " + response.status + ")";
+                        return;
+                    }
+                    try {
+                        viewer.value = JSON.stringify(JSON.parse(text), null, 2);
+                    } catch (parseError) {
+                        viewer.value = text || "[]";
+                    }
+                });
+            }).catch(function () {
+                viewer.value = "Failed to load devices.json (network error)";
+            });
+        }
+
         function refreshLog() {
             var logViewer = document.getElementById("memoryLogViewer");
             if (!logViewer) {
@@ -117,6 +217,52 @@
                 });
             }).catch(function () {
                 logViewer.value = "Failed to load log (network error)";
+            });
+        }
+
+        function logDownloadFileName() {
+            var now = new Date();
+            var pad = function (value) {
+                return value < 10 ? "0" + value : String(value);
+            };
+            return (
+                "z2m-log-"
+                + now.getFullYear()
+                + pad(now.getMonth() + 1)
+                + pad(now.getDate())
+                + "-"
+                + pad(now.getHours())
+                + pad(now.getMinutes())
+                + pad(now.getSeconds())
+                + ".txt"
+            );
+        }
+
+        function downloadLog() {
+            var errorLine = document.getElementById("logDownloadError");
+            if (errorLine) {
+                errorLine.hidden = true;
+            }
+            fetch("/api/log", { cache: "no-store" }).then(function (response) {
+                return response.text().then(function (text) {
+                    if (!response.ok) {
+                        throw new Error("HTTP " + response.status);
+                    }
+                    var blob = new Blob([text || ""], { type: "text/plain;charset=utf-8" });
+                    var objectUrl = URL.createObjectURL(blob);
+                    var link = document.createElement("a");
+                    link.href = objectUrl;
+                    link.download = logDownloadFileName();
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+                    URL.revokeObjectURL(objectUrl);
+                });
+            }).catch(function (error) {
+                if (errorLine) {
+                    errorLine.hidden = false;
+                    errorLine.textContent = error && error.message ? error.message : "Log download failed";
+                }
             });
         }
 
@@ -374,6 +520,429 @@
             xhr.send(formData);
         }
 
+        var foundPollTimer = null;
+        var selectedFoundIeee = "";
+        var selectedRegisteredIeee = "";
+        var mqttBaseTopicCache = "";
+        var topicsTouched = false;
+        var registeredDeviceRows = [];
+        var searchRunning = false;
+
+        function topicSlug(name) {
+            return String(name || "")
+                .toLowerCase()
+                .replace(/[^a-z0-9]+/g, "_")
+                .replace(/^_|_$/g, "");
+        }
+
+        function defaultDeviceTopics(name) {
+            var base = mqttBaseTopicCache || "z2m";
+            var slug = topicSlug(name) || "device";
+            return {
+                state: base + "/" + slug + "/state",
+                command: base + "/" + slug + "/set",
+                availability: base + "/" + slug + "/availability"
+            };
+        }
+
+        function refreshMqttBaseTopic() {
+            fetch("/api/mqtt", { cache: "no-store" }).then(function (response) {
+                return response.json();
+            }).then(function (mqttSettings) {
+                mqttBaseTopicCache = mqttSettings.baseTopic || "z2m";
+            }).catch(function () {
+            });
+        }
+
+        function stopFoundPolling() {
+            if (foundPollTimer != null) {
+                window.clearInterval(foundPollTimer);
+                foundPollTimer = null;
+            }
+        }
+
+        function startFoundPolling() {
+            refreshFoundDevices();
+            if (foundPollTimer != null) {
+                return;
+            }
+            foundPollTimer = window.setInterval(refreshFoundDevices, 1000);
+        }
+
+        function findRegisteredDevice(ieee) {
+            var index;
+            for (index = 0; index < registeredDeviceRows.length; index++) {
+                if (registeredDeviceRows[index].ieee == ieee) {
+                    return registeredDeviceRows[index];
+                }
+            }
+            return null;
+        }
+
+        function updateDeviceActionButtons() {
+            var hasSelection = selectedRegisteredIeee.length > 0 && findRegisteredDevice(selectedRegisteredIeee) != null;
+            var editButton = document.getElementById("deviceEditBtn");
+            var deleteButton = document.getElementById("deviceDeleteBtn");
+            if (editButton) {
+                editButton.disabled = !hasSelection;
+            }
+            if (deleteButton) {
+                deleteButton.disabled = !hasSelection;
+            }
+        }
+
+        function selectRegisteredIeee(ieee) {
+            selectedRegisteredIeee = ieee || "";
+            var body = document.getElementById("deviceTableBody");
+            if (body) {
+                var allRows = body.querySelectorAll("tr");
+                var rowIndex;
+                for (rowIndex = 0; rowIndex < allRows.length; rowIndex++) {
+                    if (allRows[rowIndex].getAttribute("data-ieee") == selectedRegisteredIeee) {
+                        allRows[rowIndex].classList.add("selected");
+                    } else {
+                        allRows[rowIndex].classList.remove("selected");
+                    }
+                }
+            }
+            updateDeviceActionButtons();
+        }
+
+        function renderDeviceTable(rows) {
+            var body = document.getElementById("deviceTableBody");
+            if (!body) {
+                return;
+            }
+            registeredDeviceRows = rows;
+            body.innerHTML = "";
+            var stillSelected = false;
+            var index;
+            for (index = 0; index < rows.length; index++) {
+                var row = document.createElement("tr");
+                var ieee = rows[index].ieee || "";
+                row.setAttribute("data-ieee", ieee);
+                if (selectedRegisteredIeee && selectedRegisteredIeee == ieee) {
+                    row.className = "selected";
+                    stillSelected = true;
+                }
+                row.onclick = function () {
+                    selectRegisteredIeee(this.getAttribute("data-ieee") || "");
+                };
+                var ieeeCell = document.createElement("td");
+                ieeeCell.textContent = ieee;
+                var nameCell = document.createElement("td");
+                nameCell.textContent = rows[index].name || rows[index].friendlyName || "";
+                row.appendChild(ieeeCell);
+                row.appendChild(nameCell);
+                body.appendChild(row);
+            }
+            if (!stillSelected) {
+                selectedRegisteredIeee = "";
+            }
+            updateDeviceActionButtons();
+        }
+
+        function loadDevices() {
+            var saveError = document.getElementById("devicesSaveError");
+            fetch("/api/devices", { cache: "no-store" }).then(function (response) {
+                return response.text().then(function (text) {
+                    if (!response.ok) {
+                        throw new Error("HTTP " + response.status);
+                    }
+                    return JSON.parse(text);
+                });
+            }).then(function (rows) {
+                if (saveError) {
+                    saveError.hidden = true;
+                }
+                renderDeviceTable(Array.isArray(rows) ? rows : []);
+            }).catch(function () {
+                if (saveError) {
+                    saveError.hidden = false;
+                    saveError.textContent = "Failed to load devices";
+                }
+            });
+        }
+
+        function renderFoundTable(rows) {
+            var body = document.getElementById("foundTableBody");
+            if (!body) {
+                return;
+            }
+            body.innerHTML = "";
+            var foundCount = rows.length;
+            var selectionStillPresent = false;
+            var index;
+            for (index = 0; index < rows.length; index++) {
+                if (selectedFoundIeee && selectedFoundIeee == rows[index].ieee) {
+                    selectionStillPresent = true;
+                }
+            }
+            if (!selectionStillPresent) {
+                selectedFoundIeee = foundCount == 1 ? (rows[0].ieee || "") : "";
+            }
+            for (index = 0; index < rows.length; index++) {
+                var row = document.createElement("tr");
+                row.setAttribute("data-ieee", rows[index].ieee || "");
+                if (selectedFoundIeee && selectedFoundIeee == rows[index].ieee) {
+                    row.className = "selected";
+                }
+                row.onclick = function () {
+                    selectedFoundIeee = this.getAttribute("data-ieee") || "";
+                    var allRows = body.querySelectorAll("tr");
+                    var rowIndex;
+                    for (rowIndex = 0; rowIndex < allRows.length; rowIndex++) {
+                        if (allRows[rowIndex] == this) {
+                            allRows[rowIndex].classList.add("selected");
+                        } else {
+                            allRows[rowIndex].classList.remove("selected");
+                        }
+                    }
+                    document.getElementById("foundAddBtn").disabled = selectedFoundIeee.length == 0;
+                };
+                var ieeeCell = document.createElement("td");
+                ieeeCell.textContent = rows[index].ieee || "";
+                var modelCell = document.createElement("td");
+                modelCell.textContent = (rows[index].manufacturer || "") + " " + (rows[index].model || "");
+                row.appendChild(ieeeCell);
+                row.appendChild(modelCell);
+                body.appendChild(row);
+            }
+            document.getElementById("foundAddBtn").disabled = selectedFoundIeee.length == 0;
+            var statusLine = document.getElementById("searchDialogStatus");
+            if (statusLine && searchRunning) {
+                if (foundCount > 1) {
+                    statusLine.textContent = "Select one found device, then click Add.";
+                } else if (foundCount == 1) {
+                    statusLine.textContent = "One device found. Click Add, or click the row to confirm the choice.";
+                }
+            }
+        }
+
+        function setSearchRunning(running) {
+            searchRunning = running;
+            var searchButton = document.getElementById("searchStartBtn");
+            var label = document.getElementById("searchStartLabel");
+            var spinner = document.getElementById("searchStartSpinner");
+            if (!searchButton) {
+                return;
+            }
+            searchButton.disabled = running;
+            if (running) {
+                searchButton.classList.add("is-busy");
+            } else {
+                searchButton.classList.remove("is-busy");
+            }
+            if (label) {
+                label.textContent = running ? "Searching" : "Search";
+            }
+            if (spinner) {
+                spinner.hidden = !running;
+            }
+        }
+
+        function refreshFoundDevices() {
+            fetch("/api/devices/found", { cache: "no-store" }).then(function (response) {
+                return response.json();
+            }).then(function (rows) {
+                renderFoundTable(Array.isArray(rows) ? rows : []);
+            }).catch(function () {
+            });
+        }
+
+        function openSearchDialog() {
+            selectedFoundIeee = "";
+            setSearchRunning(false);
+            document.getElementById("foundAddBtn").disabled = true;
+            document.getElementById("searchDialogError").hidden = true;
+            document.getElementById("searchDialogStatus").textContent =
+                "Click Search to open pairing. If several devices appear, select one row and click Add.";
+            document.getElementById("searchDialog").hidden = false;
+            startFoundPolling();
+        }
+
+        function closeSearchDialog(sendStop) {
+            document.getElementById("searchDialog").hidden = true;
+            stopFoundPolling();
+            setSearchRunning(false);
+            if (sendStop !== false) {
+                fetch("/api/devices/search/stop", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: "{}"
+                }).catch(function () {
+                });
+            }
+        }
+
+        function startSearch() {
+            var errorLine = document.getElementById("searchDialogError");
+            var statusLine = document.getElementById("searchDialogStatus");
+            errorLine.hidden = true;
+            setSearchRunning(true);
+            if (statusLine) {
+                statusLine.textContent = "Searching… put the device in join mode.";
+            }
+            fetch("/api/devices/search", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: "{}"
+            }).then(function (response) {
+                return response.text().then(function (text) {
+                    if (!response.ok) {
+                        throw new Error(text || ("HTTP " + response.status));
+                    }
+                    if (statusLine) {
+                        statusLine.textContent = "Searching… put the device in join mode. Select a row to add.";
+                    }
+                    startFoundPolling();
+                });
+            }).catch(function (error) {
+                setSearchRunning(false);
+                errorLine.hidden = false;
+                errorLine.textContent = error && error.message ? error.message : "Search start failed";
+                if (statusLine) {
+                    statusLine.textContent = "Click Search to open pairing. If several devices appear, select one row and click Add.";
+                }
+            });
+        }
+
+        function fillParameterDialog(device, title) {
+            var heading = document.getElementById("parameterDialogTitle");
+            if (heading) {
+                heading.textContent = title;
+            }
+            document.getElementById("deviceIeee").value = device.ieee || "";
+            document.getElementById("deviceName").value = device.name || device.friendlyName || "";
+            document.getElementById("deviceStateTopic").value = device.state || "";
+            document.getElementById("deviceCommandTopic").value = device.command || "";
+            document.getElementById("deviceAvailabilityTopic").value = device.availability || "";
+            document.getElementById("parameterDialogError").hidden = true;
+            document.getElementById("parameterDialog").hidden = false;
+        }
+
+        function openParameterDialog() {
+            if (!selectedFoundIeee) {
+                return;
+            }
+            closeSearchDialog(true);
+            topicsTouched = false;
+            refreshMqttBaseTopic();
+            fillParameterDialog({ ieee: selectedFoundIeee }, "Device parameters");
+        }
+
+        function openEditSelectedDevice() {
+            var device = findRegisteredDevice(selectedRegisteredIeee);
+            if (!device || !device.ieee) {
+                return;
+            }
+            topicsTouched = true;
+            refreshMqttBaseTopic();
+            fillParameterDialog(device, "Edit device");
+        }
+
+        function openDeleteConfirmDialog() {
+            var device = findRegisteredDevice(selectedRegisteredIeee);
+            if (!device || !device.ieee) {
+                return;
+            }
+            var detail = document.getElementById("deleteConfirmDetail");
+            if (detail) {
+                var name = device.name || device.friendlyName || "";
+                detail.textContent = name
+                    ? ("Delete \"" + name + "\" (" + device.ieee + ")?")
+                    : ("Delete device " + device.ieee + "?");
+            }
+            document.getElementById("deleteConfirmDialog").hidden = false;
+        }
+
+        function closeDeleteConfirmDialog() {
+            document.getElementById("deleteConfirmDialog").hidden = true;
+        }
+
+        function deleteSelectedDevice() {
+            openDeleteConfirmDialog();
+        }
+
+        function confirmDeleteSelectedDevice() {
+            var saveError = document.getElementById("devicesSaveError");
+            if (!selectedRegisteredIeee) {
+                closeDeleteConfirmDialog();
+                return;
+            }
+            if (saveError) {
+                saveError.hidden = true;
+            }
+            closeDeleteConfirmDialog();
+            fetch("/api/devices", {
+                method: "DELETE",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ ieee: selectedRegisteredIeee })
+            }).then(function (response) {
+                return response.text().then(function (text) {
+                    if (!response.ok) {
+                        throw new Error(text || ("HTTP " + response.status));
+                    }
+                    selectedRegisteredIeee = "";
+                    loadDevices();
+                });
+            }).catch(function (error) {
+                if (saveError) {
+                    saveError.hidden = false;
+                    saveError.textContent = error && error.message ? error.message : "Delete failed";
+                }
+            });
+        }
+
+        function closeParameterDialog() {
+            document.getElementById("parameterDialog").hidden = true;
+        }
+
+        function onDeviceNameInput() {
+            if (topicsTouched) {
+                return;
+            }
+            var topics = defaultDeviceTopics(document.getElementById("deviceName").value);
+            document.getElementById("deviceStateTopic").value = topics.state;
+            document.getElementById("deviceCommandTopic").value = topics.command;
+            document.getElementById("deviceAvailabilityTopic").value = topics.availability;
+        }
+
+        function saveDeviceParameters() {
+            var errorLine = document.getElementById("parameterDialogError");
+            errorLine.hidden = true;
+            var name = document.getElementById("deviceName").value;
+            if (!name) {
+                errorLine.hidden = false;
+                errorLine.textContent = "Friendly name is required";
+                return;
+            }
+            var body = {
+                ieee: document.getElementById("deviceIeee").value,
+                name: name,
+                friendlyName: name,
+                state: document.getElementById("deviceStateTopic").value,
+                command: document.getElementById("deviceCommandTopic").value,
+                availability: document.getElementById("deviceAvailabilityTopic").value
+            };
+            fetch("/api/devices", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body)
+            }).then(function (response) {
+                return response.text().then(function (text) {
+                    if (!response.ok) {
+                        throw new Error(text || ("HTTP " + response.status));
+                    }
+                    closeParameterDialog();
+                    loadDevices();
+                });
+            }).catch(function (error) {
+                errorLine.hidden = false;
+                errorLine.textContent = error && error.message ? error.message : "Save failed";
+            });
+        }
+
         function updateApIpVisibility() {
             var apIpField = document.getElementById("wifiApIpField");
             if (!apIpField) {
@@ -390,6 +959,7 @@
             loadMqtt();
             loadZigbee();
             loadVersion();
+            refreshMqttBaseTopic();
         };
     </script>
 </head>
@@ -536,14 +1106,104 @@
             </div>
         </section>
 
-        <section id="section-devices" class="section-panel" aria-label="Devices">
+        <section id="section-devices" class="section-panel settings-card" aria-label="Devices">
             <h2 class="section-title">Devices</h2>
+            <p id="devicesSaveError" class="save-error" hidden></p>
+            <div class="settings-scroll">
+                <table class="data-table selectable">
+                    <thead>
+                        <tr>
+                            <th>IEEE</th>
+                            <th>Name</th>
+                        </tr>
+                    </thead>
+                    <tbody id="deviceTableBody"></tbody>
+                </table>
+            </div>
+            <div class="page-footer">
+                <div class="page-footer-inner">
+                    <button type="button" class="btn btn-primary" onclick="openSearchDialog()">Add device</button>
+                    <button type="button" id="deviceEditBtn" class="btn btn-secondary" onclick="openEditSelectedDevice()" disabled>Edit</button>
+                    <button type="button" id="deviceDeleteBtn" class="btn btn-secondary" onclick="openDeleteConfirmDialog()" disabled>Delete</button>
+                </div>
+            </div>
         </section>
+
+        <div id="searchDialog" class="dialog-overlay" hidden>
+            <div class="dialog-panel" role="dialog" aria-label="Search devices">
+                <h3 class="upload-title">Search devices</h3>
+                <p id="searchDialogError" class="save-error" hidden></p>
+                <p id="searchDialogStatus" class="field-hint">Click Search to open pairing. If several devices appear, select one row and click Add.</p>
+                <div class="dialog-scroll">
+                    <table class="data-table selectable">
+                        <thead>
+                            <tr>
+                                <th>IEEE</th>
+                                <th>Model</th>
+                            </tr>
+                        </thead>
+                        <tbody id="foundTableBody"></tbody>
+                    </table>
+                </div>
+                <div class="dialog-actions">
+                    <button type="button" id="searchStartBtn" class="btn btn-primary btn-with-spinner" onclick="startSearch()">
+                        <span id="searchStartSpinner" class="btn-spinner" hidden></span>
+                        <span id="searchStartLabel">Search</span>
+                    </button>
+                    <button type="button" id="foundAddBtn" class="btn btn-primary" onclick="openParameterDialog()" disabled>Add</button>
+                    <button type="button" class="btn btn-secondary" onclick="closeSearchDialog(true)">Close</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="parameterDialog" class="dialog-overlay" hidden>
+            <div class="dialog-panel" role="dialog" aria-label="Device parameters">
+                <h3 id="parameterDialogTitle" class="upload-title">Device parameters</h3>
+                <p id="parameterDialogError" class="save-error" hidden></p>
+                <div class="field">
+                    <label for="deviceIeee">IEEE</label>
+                    <input id="deviceIeee" type="text" readonly>
+                </div>
+                <div class="field">
+                    <label for="deviceName">NAME</label>
+                    <input id="deviceName" type="text" autocomplete="off" oninput="onDeviceNameInput()">
+                </div>
+                <div class="field">
+                    <label for="deviceStateTopic">STATE</label>
+                    <input id="deviceStateTopic" type="text" autocomplete="off" oninput="topicsTouched = true">
+                </div>
+                <div class="field">
+                    <label for="deviceCommandTopic">COMMAND</label>
+                    <input id="deviceCommandTopic" type="text" autocomplete="off" oninput="topicsTouched = true">
+                </div>
+                <div class="field">
+                    <label for="deviceAvailabilityTopic">AVAILABILITY</label>
+                    <input id="deviceAvailabilityTopic" type="text" autocomplete="off" oninput="topicsTouched = true">
+                </div>
+                <div class="dialog-actions">
+                    <button type="button" class="btn btn-primary" onclick="saveDeviceParameters()">Save</button>
+                    <button type="button" class="btn btn-secondary" onclick="closeParameterDialog()">Cancel</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="deleteConfirmDialog" class="dialog-overlay" hidden>
+            <div class="dialog-panel" role="dialog" aria-label="Confirm delete">
+                <h3 class="upload-title">Delete device</h3>
+                <p id="deleteConfirmDetail" class="field-hint">Are you sure you want to delete this device?</p>
+                <div class="dialog-actions">
+                    <button type="button" class="btn btn-primary" onclick="confirmDeleteSelectedDevice()">Delete</button>
+                    <button type="button" class="btn btn-secondary" onclick="closeDeleteConfirmDialog()">Cancel</button>
+                </div>
+            </div>
+        </div>
 
         <section id="section-system" class="section-panel" aria-label="System">
             <h2 class="section-title">System</h2>
             <nav class="tabs system-tabs" role="tablist" aria-label="System groups">
                 <button type="button" class="system-tab-btn tab-btn active" data-tab="update" role="tab" onclick="showSystemTab('update')">Update</button>
+                <button type="button" class="system-tab-btn tab-btn" data-tab="hardware" role="tab" onclick="showSystemTab('hardware')">Hardware</button>
+                <button type="button" class="system-tab-btn tab-btn" data-tab="devices-json" role="tab" onclick="showSystemTab('devices-json')">devices.json</button>
                 <button type="button" class="system-tab-btn tab-btn" data-tab="log" role="tab" onclick="showSystemTab('log')">Log</button>
             </nav>
             <div class="tab-content">
@@ -566,12 +1226,48 @@
                         <button type="button" class="btn btn-primary btn-inline" onclick="uploadFilesystem()">Upload filesystem</button>
                     </div>
                 </div>
+                <div id="system-tab-hardware" class="system-tab-panel tab-panel" role="tabpanel">
+                    <p id="hardwareSaveError" class="save-error" hidden></p>
+                    <p id="hardwareSaveSuccess" class="save-success" hidden></p>
+                    <div class="field">
+                        <label for="spiSpeedHz">SPI SPEED</label>
+                        <select id="spiSpeedHz">
+                            <option value="100000">100 kHz</option>
+                            <option value="250000">250 kHz</option>
+                            <option value="500000">500 kHz</option>
+                            <option value="1000000">1 MHz</option>
+                            <option value="2000000">2 MHz</option>
+                            <option value="4000000">4 MHz</option>
+                            <option value="8000000">8 MHz</option>
+                            <option value="10000000">10 MHz</option>
+                            <option value="20000000">20 MHz</option>
+                            <option value="40000000">40 MHz</option>
+                        </select>
+                        <p class="field-hint">Host SPI clock to the Zigbee slave. Maximum 40 MHz. Applied on Save without restart. Default 500 kHz.</p>
+                    </div>
+                    <div class="dialog-actions">
+                        <button type="button" class="btn btn-primary" onclick="saveHardware()">Save</button>
+                        <button type="button" class="btn btn-secondary" onclick="loadHardware()">Reset</button>
+                    </div>
+                </div>
+                <div id="system-tab-devices-json" class="system-tab-panel tab-panel" role="tabpanel">
+                    <div class="upload-card log-card">
+                        <h3 class="upload-title">LittleFS /devices.json</h3>
+                        <p class="field-hint">Registered device config stored on the host filesystem. Not written to EEPROM.</p>
+                        <textarea id="devicesJsonViewer" class="log-viewer" readonly></textarea>
+                        <button type="button" class="btn btn-secondary btn-inline" onclick="refreshDevicesJson()">Refresh</button>
+                    </div>
+                </div>
                 <div id="system-tab-log" class="system-tab-panel tab-panel" role="tabpanel">
                     <div class="upload-card log-card">
                         <h3 class="upload-title">Log</h3>
                         <p class="field-hint">In-memory firmware log (oldest lines drop when the ring is full).</p>
                         <textarea id="memoryLogViewer" class="log-viewer" readonly></textarea>
-                        <button type="button" class="btn btn-secondary btn-inline" onclick="refreshLog()">Refresh</button>
+                        <p id="logDownloadError" class="save-error" hidden></p>
+                        <div class="dialog-actions">
+                            <button type="button" class="btn btn-secondary btn-inline" onclick="refreshLog()">Refresh</button>
+                            <button type="button" class="btn btn-primary btn-inline" onclick="downloadLog()">Download</button>
+                        </div>
                     </div>
                 </div>
             </div>

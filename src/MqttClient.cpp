@@ -1,9 +1,12 @@
 #include "MqttClient.h"
 #include "Logger.h"
 
+#include <string.h>
+
 MqttClient::MqttClient(SettingsManager *settingsManager, DeviceTopicMap *topicMap)
     : settingsManager(settingsManager), topicMap(topicMap), client(nullptr) {
     client = new PubSubClient(wifiClient);
+    memset(subscribedCommandTopics, 0, sizeof(subscribedCommandTopics));
 }
 
 MqttClient::~MqttClient() {
@@ -54,17 +57,74 @@ void MqttClient::subscribeBridge() {
     subscribeDeviceCommands();
 }
 
+void MqttClient::clearCommandSubscriptions() {
+    memset(subscribedCommandTopics, 0, sizeof(subscribedCommandTopics));
+}
+
+int MqttClient::findCommandSubscription(const char *topic) const {
+    if (topic == nullptr || topic[0] == '\0') {
+        return -1;
+    }
+    for (int i = 0; i < DEVICE_MAP_SLOTS; i++) {
+        if (subscribedCommandTopics[i][0] != '\0' && strcmp(subscribedCommandTopics[i], topic) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+int MqttClient::nextFreeCommandSubscription() const {
+    for (int i = 0; i < DEVICE_MAP_SLOTS; i++) {
+        if (subscribedCommandTopics[i][0] == '\0') {
+            return i;
+        }
+    }
+    return -1;
+}
+
 void MqttClient::subscribeDeviceCommands() {
-    if (!isConnected()) {
+    if (!isConnected() || topicMap == nullptr) {
         return;
     }
-    GlobalSettings *settings = settingsManager->getSettings();
-    for (int i = 0; i < DEVICE_MAP_SLOTS; i++) {
-        DeviceTopicEntry *entry = &settings->devices[i];
-        if (entry->used && entry->commandTopic[0] != '\0') {
-            client->subscribe(entry->commandTopic);
-            LOGGER.info("MQTT subscribe " + String(entry->commandTopic));
+
+    bool keepSubscription[DEVICE_MAP_SLOTS];
+    memset(keepSubscription, 0, sizeof(keepSubscription));
+
+    for (int slotIndex = 0; slotIndex < DEVICE_MAP_SLOTS; slotIndex++) {
+        DeviceTopicEntry *entry = topicMap->slotAt(slotIndex);
+        if (entry == nullptr || !entry->used || entry->commandTopic[0] == '\0') {
+            continue;
         }
+
+        const int existing = findCommandSubscription(entry->commandTopic);
+        if (existing >= 0) {
+            keepSubscription[existing] = true;
+            continue;
+        }
+
+        if (!client->subscribe(entry->commandTopic)) {
+            LOGGER.warning("MQTT subscribe failed topic=" + String(entry->commandTopic));
+            continue;
+        }
+
+        const int freeIndex = nextFreeCommandSubscription();
+        if (freeIndex < 0) {
+            LOGGER.warning("MQTT subscribe table full topic=" + String(entry->commandTopic));
+            continue;
+        }
+        strncpy(subscribedCommandTopics[freeIndex], entry->commandTopic, sizeof(subscribedCommandTopics[freeIndex]) - 1);
+        subscribedCommandTopics[freeIndex][sizeof(subscribedCommandTopics[freeIndex]) - 1] = '\0';
+        keepSubscription[freeIndex] = true;
+        LOGGER.info("MQTT subscribe topic=" + String(entry->commandTopic));
+    }
+
+    for (int i = 0; i < DEVICE_MAP_SLOTS; i++) {
+        if (subscribedCommandTopics[i][0] == '\0' || keepSubscription[i]) {
+            continue;
+        }
+        client->unsubscribe(subscribedCommandTopics[i]);
+        LOGGER.info("MQTT unsubscribe topic=" + String(subscribedCommandTopics[i]));
+        subscribedCommandTopics[i][0] = '\0';
     }
 }
 
@@ -82,6 +142,8 @@ void MqttClient::reconnect() {
     }
 
     reconnectBackoffMs = 0;
+    lastDevicesJson = "";
+    clearCommandSubscriptions();
     LOGGER.info("MQTT connected");
     subscribeBridge();
     publishStatus("online");
@@ -107,23 +169,36 @@ void MqttClient::dispatch(bool staConnected) {
     reconnect();
 }
 
-void MqttClient::publishStatus(const char *payload) {
-    if (!isConnected()) {
-        return;
+bool MqttClient::publishMessage(const char *topic, const char *payload, bool retained) {
+    if (!isConnected() || topic == nullptr || topic[0] == '\0') {
+        return false;
     }
-    client->publish(topicStatus.c_str(), payload, true);
+    const char *data = payload != nullptr ? payload : "";
+    const bool sent = client->publish(topic, data, retained);
+    if (sent) {
+        LOGGER.info(String("MQTT send topic=") + topic + " data=" + data);
+    } else {
+        LOGGER.warning(String("MQTT send failed topic=") + topic + " data=" + data);
+    }
+    return sent;
+}
+
+void MqttClient::publishStatus(const char *payload) {
+    publishMessage(topicStatus.c_str(), payload, true);
 }
 
 void MqttClient::publishDevices(const String &json) {
-    if (!isConnected()) {
+    if (json == lastDevicesJson) {
         return;
     }
-    client->publish(topicDevices.c_str(), json.c_str(), false);
+    if (publishMessage(topicDevices.c_str(), json.c_str(), false)) {
+        lastDevicesJson = json;
+    }
 }
 
 void MqttClient::publishDeviceState(const DeviceTopicEntry *entry, bool on) {
-    if (!isConnected() || entry == nullptr || entry->stateTopic[0] == '\0') {
+    if (entry == nullptr || entry->stateTopic[0] == '\0') {
         return;
     }
-    client->publish(entry->stateTopic, on ? "ON" : "OFF", true);
+    publishMessage(entry->stateTopic, on ? "ON" : "OFF", true);
 }

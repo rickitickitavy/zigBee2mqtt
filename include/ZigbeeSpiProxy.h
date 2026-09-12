@@ -10,11 +10,15 @@ public:
 
     void begin();
     void onSpiEvent(const SpiFrame &frame);
-    void permitJoin(uint8_t seconds);
-    void closeJoin();
+    bool permitJoin(uint8_t seconds);
+    bool closeJoin();
     bool controlOnOff(const uint8_t ieee[8], const char *command);
+    void startRegistrySync(DeviceTopicMap *topicMap, bool allowEmptyReplace = false);
+    void requestRegistryPull(DeviceTopicMap *topicMap);
+    void pumpRegistrySync();
     String devicesJson(DeviceTopicMap *topicMap);
     void setLightStateHandler(LightStateFn handler);
+    void setRegistryPullDoneHandler(void (*handler)());
     bool commandsAllowed() const;
 
 private:
@@ -31,9 +35,23 @@ private:
 
     CachedDevice devices[kMaxDevices]{};
     LightStateFn lightStateHandler = nullptr;
+    DeviceTopicMap *registryMap = nullptr;
+    int registryScanIndex = 0;
+    bool registrySyncActive = false;
+    bool registryResetSent = false;
+    bool registryAllowEmptyReplace = false;
+    bool registryPullRequested = false;
+    bool registryPullActive = false;
+    bool registryPullCleared = false;
+    int registryPullCount = 0;
+    void (*registryPullDone)() = nullptr;
 
     CachedDevice *findByIeee(const uint8_t ieee[8]);
     CachedDevice *allocSlot(const uint8_t ieee[8]);
+    int nextUsedSlot(int startIndex) const;
+    bool enqueueRegistryFrame(uint8_t flags, const DeviceTopicEntry *entry);
+    void applyPulledRegistry(const SpiFrame &frame);
+    void finishRegistryPull();
 };
 
 extern ZigbeeSpiProxy ZIGBEE_SPI_PROXY;

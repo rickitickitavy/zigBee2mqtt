@@ -37,8 +37,14 @@ private:
     String topicDevices;
     String topicPermitJoin;
     String topicConfigDevice;
+    String lastDevicesJson;
+    char subscribedCommandTopics[DEVICE_MAP_SLOTS][64];
 
     void rebuildTopics();
     void reconnect();
     void subscribeBridge();
+    void clearCommandSubscriptions();
+    int findCommandSubscription(const char *topic) const;
+    int nextFreeCommandSubscription() const;
+    bool publishMessage(const char *topic, const char *payload, bool retained);
 };

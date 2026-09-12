@@ -2,12 +2,14 @@
 
 #include <Arduino.h>
 #include "SpiProtocol.h"
+#include "DeviceTopicMap.h"
 
 class InterChipSlave {
 public:
     using SettingsFn = void (*)(uint8_t channel, uint8_t permitJoinSec, uint32_t unixSec);
-    using PermitJoinFn = void (*)(uint8_t seconds);
+    using PermitJoinFn = bool (*)(uint8_t seconds);
     using OnOffFn = void (*)(const uint8_t ieee[8], uint8_t action);
+    using DeviceSyncFn = void (*)(uint8_t flags, const DeviceTopicEntry *entry);
 
     void begin();
     void pump();
@@ -23,8 +25,14 @@ public:
     void setSettingsHandler(SettingsFn handler);
     void setPermitJoinHandler(PermitJoinFn handler);
     void setOnOffHandler(OnOffFn handler);
+    void setDeviceSyncHandler(DeviceSyncFn handler);
+    void setDeviceMapSource(DeviceTopicMap *deviceMap);
     void applyHostTime(uint32_t unixSec);
     void applyDeferredSettings();
+    void applyDeferredRadioCommands();
+    void pumpDeviceDump();
+    void setPumpPaused(bool paused);
+    void resumeAfterRadioPause();
 
 private:
     static constexpr int kQueue = 8;
@@ -39,12 +47,23 @@ private:
     SettingsFn settingsHandler = nullptr;
     PermitJoinFn permitJoinHandler = nullptr;
     OnOffFn onOffHandler = nullptr;
+    DeviceSyncFn deviceSyncHandler = nullptr;
+    DeviceTopicMap *deviceMapSource = nullptr;
+    bool deviceDumpPending = false;
+    bool deviceDumpResetSent = false;
+    int deviceDumpIndex = 0;
     uint8_t nextSeq = 1;
     bool readySent = false;
     bool spiReady = false;
     bool settingsPending = false;
+    bool permitJoinPending = false;
+    bool onOffPending = false;
+    bool pumpPaused = false;
     uint8_t pendingChannel = 15;
     uint8_t pendingPermitJoinSec = 0;
+    uint8_t deferredPermitSeconds = 0;
+    uint8_t deferredOnOffIeee[8]{};
+    uint8_t deferredOnOffAction = 0;
     uint32_t pendingUnixSec = 0;
 
     bool enqueueEvent(uint8_t cmd, const uint8_t *payload, uint16_t length);

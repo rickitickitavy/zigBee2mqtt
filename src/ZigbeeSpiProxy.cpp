@@ -41,13 +41,13 @@ ZigbeeSpiProxy::CachedDevice *ZigbeeSpiProxy::allocSlot(const uint8_t ieee[8]) {
     return nullptr;
 }
 
-void ZigbeeSpiProxy::permitJoin(uint8_t seconds) {
-    INTER_CHIP_HOST.tryEnqueue(SpiCmdPermitJoin, &seconds, 1);
+bool ZigbeeSpiProxy::permitJoin(uint8_t seconds) {
+    return INTER_CHIP_HOST.tryEnqueue(SpiCmdPermitJoin, &seconds, 1);
 }
 
-void ZigbeeSpiProxy::closeJoin() {
+bool ZigbeeSpiProxy::closeJoin() {
     uint8_t seconds = 0;
-    INTER_CHIP_HOST.tryEnqueue(SpiCmdPermitJoin, &seconds, 1);
+    return INTER_CHIP_HOST.tryEnqueue(SpiCmdPermitJoin, &seconds, 1);
 }
 
 bool ZigbeeSpiProxy::controlOnOff(const uint8_t ieee[8], const char *command) {
@@ -71,7 +71,165 @@ bool ZigbeeSpiProxy::controlOnOff(const uint8_t ieee[8], const char *command) {
     return INTER_CHIP_HOST.tryEnqueue(SpiCmdZclOnOff, payload, 9);
 }
 
+void ZigbeeSpiProxy::setRegistryPullDoneHandler(void (*handler)()) {
+    registryPullDone = handler;
+}
+
+void ZigbeeSpiProxy::startRegistrySync(DeviceTopicMap *topicMap, bool allowEmptyReplace) {
+    registryMap = topicMap;
+    registryScanIndex = 0;
+    registryResetSent = false;
+    registryAllowEmptyReplace = allowEmptyReplace;
+    registrySyncActive = topicMap != nullptr;
+    registryPullRequested = false;
+    registryPullActive = false;
+}
+
+void ZigbeeSpiProxy::requestRegistryPull(DeviceTopicMap *topicMap) {
+    registryMap = topicMap;
+    registryPullRequested = topicMap != nullptr;
+    registryPullActive = false;
+    registryPullCleared = false;
+    registryPullCount = 0;
+    registrySyncActive = false;
+}
+
+int ZigbeeSpiProxy::nextUsedSlot(int startIndex) const {
+    if (registryMap == nullptr) {
+        return -1;
+    }
+    return registryMap->nextUsedIndex(startIndex);
+}
+
+bool ZigbeeSpiProxy::enqueueRegistryFrame(uint8_t flags, const DeviceTopicEntry *entry) {
+    uint8_t payload[SPI_DEVICE_SYNC_ENTRY_LEN];
+    const size_t length = DeviceTopicMap::packSyncPayload(payload, sizeof(payload), flags, entry);
+    if (length == 0) {
+        return false;
+    }
+    return INTER_CHIP_HOST.tryEnqueue(SpiCmdSetDevice, payload, (uint16_t)length);
+}
+
+void ZigbeeSpiProxy::applyPulledRegistry(const SpiFrame &frame) {
+    if (!registryPullActive || registryMap == nullptr) {
+        return;
+    }
+    uint8_t flags = 0;
+    DeviceTopicEntry entry;
+    if (!DeviceTopicMap::unpackSyncPayload(frame.payload, frame.length, &flags, &entry)) {
+        return;
+    }
+    if ((flags & SPI_DEVICE_SYNC_ENTRY) != 0) {
+        if (!registryPullCleared) {
+            registryMap->clearAll();
+            registryPullCleared = true;
+        }
+        registryMap->upsert(
+            entry.ieee,
+            entry.friendlyName,
+            entry.stateTopic,
+            entry.commandTopic,
+            entry.availabilityTopic
+        );
+        registryPullCount++;
+    }
+    if ((flags & SPI_DEVICE_SYNC_LAST) != 0) {
+        finishRegistryPull();
+    }
+}
+
+void ZigbeeSpiProxy::finishRegistryPull() {
+    registryPullActive = false;
+    registryPullRequested = false;
+    if (registryPullCount == 0 && registryMap != nullptr && registryMap->usedCount() > 0) {
+        LOGGER.info("Slave device store empty; migrating host cache to slave");
+        startRegistrySync(registryMap);
+        return;
+    }
+    LOGGER.info("Pulled " + String(registryPullCount) + " device(s) from slave");
+    if (registryPullDone != nullptr) {
+        registryPullDone();
+    }
+}
+
+void ZigbeeSpiProxy::pumpRegistrySync() {
+    if (registryPullRequested && commandsAllowed()) {
+        if (INTER_CHIP_HOST.tryEnqueue(SpiCmdGetDevices, nullptr, 0)) {
+            registryPullRequested = false;
+            registryPullActive = true;
+            registryPullCleared = false;
+            registryPullCount = 0;
+            LOGGER.info("Requesting device registry from slave");
+        }
+        return;
+    }
+
+    if (!registrySyncActive || registryMap == nullptr || !commandsAllowed()) {
+        return;
+    }
+
+    if (!registryResetSent) {
+        const int firstIndex = nextUsedSlot(0);
+        uint8_t flags = SPI_DEVICE_SYNC_RESET;
+        DeviceTopicEntry *entry = nullptr;
+        if (firstIndex < 0) {
+            if (!registryAllowEmptyReplace) {
+                registrySyncActive = false;
+                LOGGER.warning("Refusing to push empty device registry to slave");
+                return;
+            }
+            flags |= SPI_DEVICE_SYNC_LAST | SPI_DEVICE_SYNC_ALLOW_EMPTY;
+            if (enqueueRegistryFrame(flags, nullptr)) {
+                registrySyncActive = false;
+                LOGGER.info("Pushed empty device registry to slave");
+            }
+            return;
+        }
+        flags |= SPI_DEVICE_SYNC_ENTRY;
+        entry = registryMap->slotAt(firstIndex);
+        if (nextUsedSlot(firstIndex + 1) < 0) {
+            flags |= SPI_DEVICE_SYNC_LAST;
+        }
+        if (!enqueueRegistryFrame(flags, entry)) {
+            return;
+        }
+        registryResetSent = true;
+        registryScanIndex = firstIndex + 1;
+        if ((flags & SPI_DEVICE_SYNC_LAST) != 0) {
+            registrySyncActive = false;
+            LOGGER.info("Pushed device registry to slave");
+        }
+        return;
+    }
+
+    const int slotIndex = nextUsedSlot(registryScanIndex);
+    if (slotIndex < 0) {
+        if (enqueueRegistryFrame(SPI_DEVICE_SYNC_LAST, nullptr)) {
+            registrySyncActive = false;
+            LOGGER.info("Pushed device registry to slave");
+        }
+        return;
+    }
+    uint8_t flags = SPI_DEVICE_SYNC_ENTRY;
+    if (nextUsedSlot(slotIndex + 1) < 0) {
+        flags |= SPI_DEVICE_SYNC_LAST;
+    }
+    DeviceTopicEntry *entry = registryMap->slotAt(slotIndex);
+    if (!enqueueRegistryFrame(flags, entry)) {
+        return;
+    }
+    registryScanIndex = slotIndex + 1;
+    if ((flags & SPI_DEVICE_SYNC_LAST) != 0) {
+        registrySyncActive = false;
+        LOGGER.info("Pushed device registry to slave");
+    }
+}
+
 void ZigbeeSpiProxy::onSpiEvent(const SpiFrame &frame) {
+    if (frame.cmd == SpiEvtDeviceMap) {
+        applyPulledRegistry(frame);
+        return;
+    }
     if (frame.cmd == SpiEvtAttrReport && frame.length >= 12) {
         uint8_t ieee[8];
         memcpy(ieee, frame.payload, 8);

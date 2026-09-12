@@ -18,6 +18,12 @@
 #include "InterChipHost.h"
 #include "InterChipSlave.h"
 #include "ZigbeeSpiProxy.h"
+#include "FoundDeviceList.h"
+#include "DeviceStore.h"
+
+#include <stddef.h>
+#include <stdlib.h>
+#include <string.h>
 
 #ifndef ZIGBEE_MODE_ZCZR
 #error "Zigbee coordinator mode is not selected (ZIGBEE_MODE_ZCZR)"
@@ -36,8 +42,11 @@ static MqttClient *mqttClient = nullptr;
 static ZigbeeCoordinator *zigbeeCoordinator = nullptr;
 static SerialCli *serialCli = nullptr;
 static WebConsole *webConsole = nullptr;
+static FoundDeviceList *foundDevices = nullptr;
+static DeviceStore *deviceStore = nullptr;
 static bool ntpStarted = false;
 static bool slaveZigbeeStarted = false;
+static bool slaveZigbeeStarting = false;
 
 static BoardRole readBoardRole() {
     pinMode(PIN_BOARD_ROLE, INPUT);
@@ -74,20 +83,23 @@ static void applyDeviceConfigPayload(const char *payload) {
         LOGGER.error("Bad IEEE in config/device");
         return;
     }
-    if (topicMap->upsert(
-            ieee,
-            friendlyName.c_str(),
-            stateTopic.c_str(),
-            commandTopic.c_str(),
-            availability.c_str()
-        )
-        == nullptr) {
+    DeviceTopicEntry *entry = topicMap->upsert(
+        ieee,
+        friendlyName.c_str(),
+        stateTopic.c_str(),
+        commandTopic.c_str(),
+        availability.c_str()
+    );
+    if (entry == nullptr) {
         LOGGER.error("Device map full");
         return;
     }
-    settingsManager->saveSetting(false);
+    if (!settingsManager->saveDeviceSlot(topicMap->slotIndex(entry))) {
+        LOGGER.error("Device store failed");
+        return;
+    }
     mqttClient->subscribeDeviceCommands();
-    mqttClient->publishDevices(ZIGBEE_SPI_PROXY.devicesJson(topicMap));
+    ZIGBEE_SPI_PROXY.startRegistrySync(topicMap);
     LOGGER.info("Configured topics for " + ieeeText);
 }
 
@@ -123,6 +135,7 @@ static void onMqttLogicalMessage(const char *topic, const char *payload) {
 
     DeviceTopicEntry *entry = topicMap->findByCommandTopic(topic);
     if (entry != nullptr) {
+        LOGGER.info(String("MQTT recv topic=") + topic + " data=" + payload);
         ZIGBEE_SPI_PROXY.controlOnOff(entry->ieee, payload);
     }
 }
@@ -133,7 +146,10 @@ static void onLightState(bool on, const uint8_t ieee[8], uint8_t endpoint, uint1
     DeviceTopicEntry *entry = topicMap->findByIeee(ieee);
     if (entry == nullptr) {
         LOGGER.info("Unmapped device state; assign topics via map or MQTT bridge/config/device");
-        mqttClient->publishDevices(ZIGBEE_SPI_PROXY.devicesJson(topicMap));
+        return;
+    }
+    if (entry->stateTopic[0] == '\0') {
+        LOGGER.info("Device has no state topic configured");
         return;
     }
     mqttClient->publishDeviceState(entry, on);
@@ -141,9 +157,133 @@ static void onLightState(bool on, const uint8_t ieee[8], uint8_t endpoint, uint1
 
 static void onHostSpiEvent(const SpiFrame &frame) {
     ZIGBEE_SPI_PROXY.onSpiEvent(frame);
-    if (frame.cmd == SpiEvtDeviceJoin && mqttClient != nullptr && topicMap != nullptr) {
-        mqttClient->publishDevices(ZIGBEE_SPI_PROXY.devicesJson(topicMap));
+    if (frame.cmd == SpiEvtDeviceJoin && foundDevices != nullptr && topicMap != nullptr) {
+        foundDevices->noteJoin(frame, topicMap);
     }
+    if (frame.cmd == SpiEvtSettingsOk && topicMap != nullptr) {
+        ZIGBEE_SPI_PROXY.requestRegistryPull(topicMap);
+    }
+}
+
+static bool startDeviceSearch() {
+    if (settingsManager == nullptr) {
+        return false;
+    }
+    if (!ZIGBEE_SPI_PROXY.commandsAllowed()) {
+        LOGGER.warning("Search skipped: slave SPI not ready");
+        return false;
+    }
+    uint8_t seconds = settingsManager->getSettings()->zigbee.permitJoinOnBootSec;
+    if (seconds == 0) {
+        seconds = DEFAULT_PERMIT_JOIN_SEC;
+    }
+    LOGGER.info("Search permit join " + String(seconds) + "s");
+    return ZIGBEE_SPI_PROXY.permitJoin(seconds);
+}
+
+static void stopDeviceSearch() {
+    ZIGBEE_SPI_PROXY.closeJoin();
+    if (foundDevices != nullptr) {
+        foundDevices->clear();
+    }
+}
+
+static void onDeviceMapSaved() {
+    if (topicMap == nullptr) {
+        return;
+    }
+    if (mqttClient != nullptr) {
+        mqttClient->subscribeDeviceCommands();
+    }
+    ZIGBEE_SPI_PROXY.startRegistrySync(topicMap, topicMap->usedCount() == 0);
+}
+
+static void runDeviceRegistryFixtures() {
+    LOGGER.info(
+        "Settings v5 main " + String((int)sizeof(GlobalSettings))
+        + " reserved@ " + String((int)offsetof(GlobalSettings, reserved))
+        + " slots " + String(DEVICE_MAP_SLOTS)
+    );
+    if (sizeof(GlobalSettings) > 4096 || (offsetof(GlobalSettings, reserved) % 128u) != 0
+        || DEVICE_MAP_SLOTS != 128) {
+        LOGGER.error("Settings layout fixture failed");
+    } else {
+        LOGGER.info("Settings layout fixture ok");
+    }
+
+    if (!settingsManager->mainEqualsCommitted()) {
+        LOGGER.error("Main snapshot fixture failed before device save");
+    } else if (!settingsManager->saveDeviceSlot(0)) {
+        LOGGER.error("Device slot save fixture failed");
+    } else if (!settingsManager->mainEqualsCommitted()) {
+        LOGGER.error("Device save dirtied main-block snapshot");
+    } else {
+        LOGGER.info("Device slot save leaves main snapshot clean");
+    }
+
+    if (foundDevices == nullptr || topicMap == nullptr) {
+        return;
+    }
+    foundDevices->clear();
+    SpiFrame joinFrame;
+    memset(&joinFrame, 0, sizeof(joinFrame));
+    joinFrame.cmd = SpiEvtDeviceJoin;
+    joinFrame.length = 75;
+    joinFrame.payload[0] = 0xAA;
+    strncpy((char *)joinFrame.payload + 11, "Acme", 31);
+    strncpy((char *)joinFrame.payload + 43, "Plug", 31);
+    foundDevices->noteJoin(joinFrame, topicMap);
+    String foundJson = foundDevices->listJson(topicMap);
+    if (foundJson.indexOf("AA") < 0) {
+        LOGGER.error("Found-join fixture failed");
+    } else {
+        LOGGER.info("Found-join fixture ok");
+    }
+
+    uint8_t registeredIeee[8];
+    memset(registeredIeee, 0, sizeof(registeredIeee));
+    registeredIeee[0] = 0xBB;
+    DeviceTopicEntry *probe = topicMap->findByIeee(registeredIeee);
+    const bool createdProbe = probe == nullptr;
+    if (createdProbe) {
+        probe = topicMap->upsert(registeredIeee, "fixture", "", "", "");
+    }
+    foundDevices->clear();
+    joinFrame.payload[0] = 0xBB;
+    foundDevices->noteJoin(joinFrame, topicMap);
+    foundJson = foundDevices->listJson(topicMap);
+    if (foundJson.indexOf("BB") >= 0) {
+        LOGGER.error("Registered join leaked into found list");
+    } else {
+        LOGGER.info("Registered join skipped found list");
+    }
+    if (createdProbe && probe != nullptr) {
+        memset(probe, 0, sizeof(DeviceTopicEntry));
+    }
+    foundDevices->clear();
+
+    DeviceTopicEntry *backup = (DeviceTopicEntry *)malloc(sizeof(DeviceTopicEntry) * DEVICE_MAP_SLOTS);
+    if (backup == nullptr) {
+        LOGGER.error("Device map full fixture alloc failed");
+        return;
+    }
+    memcpy(backup, settingsManager->devices(), sizeof(DeviceTopicEntry) * DEVICE_MAP_SLOTS);
+    for (int i = 0; i < DEVICE_MAP_SLOTS; i++) {
+        DeviceTopicEntry *slot = topicMap->slotAt(i);
+        if (slot != nullptr && !slot->used) {
+            slot->used = 1;
+            slot->ieee[0] = (uint8_t)(i + 1);
+        }
+    }
+    uint8_t extraIeee[8];
+    memset(extraIeee, 0xCC, sizeof(extraIeee));
+    if (topicMap->upsert(extraIeee, "overflow", "", "", "") != nullptr) {
+        LOGGER.error("Full map fixture did not reject 129th device");
+    } else {
+        LOGGER.info("Full map fixture rejected 129th device");
+    }
+    memcpy(settingsManager->devices(), backup, sizeof(DeviceTopicEntry) * DEVICE_MAP_SLOTS);
+    free(backup);
 }
 
 static void onWiFiArduinoEvent(arduino_event_id_t event, arduino_event_info_t info) {
@@ -174,57 +314,127 @@ static void maybeStartNtp() {
     LOGGER.info("NTP started");
 }
 
+static void startZigbeeOnOwnTask(uint8_t channel, uint8_t permitJoinSec) {
+    struct StartArgs {
+        uint8_t channel;
+        uint8_t permitJoinSec;
+    };
+    StartArgs *args = new StartArgs{channel, permitJoinSec};
+    const BaseType_t created = xTaskCreate(
+        [](void *context) {
+            StartArgs *startArgs = static_cast<StartArgs *>(context);
+            INTER_CHIP_SLAVE.setPumpPaused(true);
+            vTaskDelay(pdMS_TO_TICKS(40));
+            bool started = false;
+            if (zigbeeCoordinator != nullptr) {
+                started = zigbeeCoordinator->begin(startArgs->channel, startArgs->permitJoinSec);
+            }
+            if (!started) {
+                LOGGER.error("Zigbee start failed — check ZCZR partition / erase flash");
+                slaveZigbeeStarting = false;
+            } else {
+                slaveZigbeeStarted = true;
+                slaveZigbeeStarting = false;
+            }
+            INTER_CHIP_SLAVE.resumeAfterRadioPause();
+            delete startArgs;
+            vTaskDelete(nullptr);
+        },
+        "zbStart",
+        16384,
+        args,
+        1,
+        nullptr
+    );
+    if (created != pdPASS) {
+        delete args;
+        slaveZigbeeStarting = false;
+        LOGGER.error("Zigbee start task failed");
+        INTER_CHIP_SLAVE.setPumpPaused(false);
+    }
+}
+
+static void createSlaveCoordinator() {
+    if (zigbeeCoordinator != nullptr) {
+        return;
+    }
+    zigbeeCoordinator = new ZigbeeCoordinator();
+    zigbeeCoordinator->setDeviceBoundHandler(
+        [](const BoundZigbeeDevice *device) {
+            if (device == nullptr) {
+                return;
+            }
+            INTER_CHIP_SLAVE.enqueueDeviceJoin(
+                device->ieee,
+                device->shortAddr,
+                device->endpoint,
+                device->manufacturer,
+                device->model
+            );
+        }
+    );
+    zigbeeCoordinator->setLightStateHandler(
+        [](bool on, const uint8_t ieee[8], uint8_t endpoint, uint16_t shortAddr) {
+            INTER_CHIP_SLAVE.enqueueAttrReport(on, ieee, endpoint, shortAddr);
+        }
+    );
+    zigbeeCoordinator->attachLibraryCallbacks(
+        [](bool on, uint8_t endpoint, esp_zb_zcl_addr_t source) {
+            if (zigbeeCoordinator != nullptr) {
+                zigbeeCoordinator->handleLightStateWithSource(on, endpoint, source);
+            }
+        }
+    );
+}
+
 static void onSlaveSettings(uint8_t channel, uint8_t permitJoinSec, uint32_t unixSec) {
     (void)unixSec;
-    if (slaveZigbeeStarted) {
+    createSlaveCoordinator();
+    if (slaveZigbeeStarted || slaveZigbeeStarting) {
         LOGGER.info("Settings again; coordinator already started");
         return;
     }
-    if (zigbeeCoordinator == nullptr) {
-        zigbeeCoordinator = new ZigbeeCoordinator();
-        zigbeeCoordinator->setDeviceBoundHandler(
-            [](const BoundZigbeeDevice *device) {
-                if (device == nullptr) {
-                    return;
-                }
-                INTER_CHIP_SLAVE.enqueueDeviceJoin(
-                    device->ieee,
-                    device->shortAddr,
-                    device->endpoint,
-                    device->manufacturer,
-                    device->model
-                );
-            }
-        );
-        zigbeeCoordinator->setLightStateHandler(
-            [](bool on, const uint8_t ieee[8], uint8_t endpoint, uint16_t shortAddr) {
-                INTER_CHIP_SLAVE.enqueueAttrReport(on, ieee, endpoint, shortAddr);
-            }
-        );
-        zigbeeCoordinator->attachLibraryCallbacks(
-            [](bool on, uint8_t endpoint, esp_zb_zcl_addr_t source) {
-                if (zigbeeCoordinator != nullptr) {
-                    zigbeeCoordinator->handleLightStateWithSource(on, endpoint, source);
-                }
-            }
-        );
-    }
-    if (!zigbeeCoordinator->begin(channel, permitJoinSec)) {
-        LOGGER.error("Zigbee start failed — check ZCZR partition / erase flash");
-        return;
-    }
-    slaveZigbeeStarted = true;
+    slaveZigbeeStarting = true;
+    startZigbeeOnOwnTask(channel, permitJoinSec);
 }
 
-static void onSlavePermitJoin(uint8_t seconds) {
-    if (zigbeeCoordinator == nullptr) {
-        return;
+static bool onSlavePermitJoin(uint8_t seconds) {
+    if (zigbeeCoordinator == nullptr || !zigbeeCoordinator->isStarted()) {
+        return false;
     }
     if (seconds == 0) {
         zigbeeCoordinator->closeJoin();
-        return;
+        return true;
     }
     zigbeeCoordinator->permitJoin(seconds);
+    return true;
+}
+
+static void onSlaveDeviceSync(uint8_t flags, const DeviceTopicEntry *entry) {
+    if (zigbeeCoordinator == nullptr) {
+        return;
+    }
+    if ((flags & SPI_DEVICE_SYNC_RESET) != 0) {
+        zigbeeCoordinator->clearRegisteredDevices();
+    }
+    if ((flags & SPI_DEVICE_SYNC_ENTRY) != 0) {
+        zigbeeCoordinator->upsertRegisteredDevice(entry);
+    }
+    if ((flags & SPI_DEVICE_SYNC_LAST) != 0) {
+        zigbeeCoordinator->markRegistryReady();
+        if (deviceStore != nullptr) {
+            const bool allowEmpty = (flags & SPI_DEVICE_SYNC_ALLOW_EMPTY) != 0;
+            if (deviceStore->deviceMap()->usedCount() == 0 && !allowEmpty) {
+                deviceStore->reloadFromFile();
+                if (zigbeeCoordinator != nullptr) {
+                    zigbeeCoordinator->setRegisteredMap(deviceStore->deviceMap());
+                    zigbeeCoordinator->markRegistryReady();
+                }
+            } else {
+                deviceStore->requestPersist(allowEmpty);
+            }
+        }
+    }
 }
 
 static void onSlaveOnOff(const uint8_t ieee[8], uint8_t action) {
@@ -279,11 +489,14 @@ static void setupHost() {
     }
 
     settingsManager = new SettingsManager();
-    topicMap = new DeviceTopicMap(settingsManager->getSettings());
+    topicMap = settingsManager->deviceMap();
+    foundDevices = new FoundDeviceList();
     wifiController = new WiFiController(settingsManager, forceAp);
     mqttClient = new MqttClient(settingsManager, topicMap);
     serialCli = new SerialCli(settingsManager);
     webConsole = new WebConsole(settingsManager);
+    webConsole->setDeviceServices(foundDevices, startDeviceSearch, stopDeviceSearch, onDeviceMapSaved);
+    webConsole->setHardwareApplyHandler([](uint32_t speedHz) { INTER_CHIP_HOST.setClockHz(speedHz); });
     webConsole->begin();
     wifiController->setInterfaceReadyHandler([]() {
         if (webConsole != nullptr) {
@@ -295,11 +508,21 @@ static void setupHost() {
     mqttClient->begin(onMqttRawMessage);
     ZIGBEE_SPI_PROXY.begin();
     ZIGBEE_SPI_PROXY.setLightStateHandler(onLightState);
+    ZIGBEE_SPI_PROXY.setRegistryPullDoneHandler([]() {
+        if (settingsManager != nullptr) {
+            settingsManager->saveDevicesJson();
+        }
+        if (mqttClient != nullptr && topicMap != nullptr) {
+            mqttClient->subscribeDeviceCommands();
+        }
+    });
 
     GlobalSettings *settings = settingsManager->getSettings();
     INTER_CHIP_HOST.setSettingsSource(settings->zigbee.channel, settings->zigbee.permitJoinOnBootSec);
+    INTER_CHIP_HOST.setClockHz(settingsManager->spiSpeedHz());
     INTER_CHIP_HOST.setEventHandler(onHostSpiEvent);
     INTER_CHIP_HOST.begin();
+    runDeviceRegistryFixtures();
     LOGGER.info("Host SPI ready; Zigbee radio stays on the slave");
     LOGGER.info("USB CLI ready. Type help");
 }
@@ -311,12 +534,23 @@ static void setupSlave() {
     INTER_CHIP_SLAVE.setSettingsHandler(onSlaveSettings);
     INTER_CHIP_SLAVE.setPermitJoinHandler(onSlavePermitJoin);
     INTER_CHIP_SLAVE.setOnOffHandler(onSlaveOnOff);
+    INTER_CHIP_SLAVE.setDeviceSyncHandler(onSlaveDeviceSync);
+    deviceStore = new DeviceStore();
+    deviceStore->begin();
+    createSlaveCoordinator();
+    if (zigbeeCoordinator != nullptr) {
+        zigbeeCoordinator->setRegisteredMap(deviceStore->deviceMap());
+        if (deviceStore->deviceMap()->usedCount() > 0) {
+            zigbeeCoordinator->markRegistryReady();
+        }
+    }
+    INTER_CHIP_SLAVE.setDeviceMapSource(deviceStore->deviceMap());
     INTER_CHIP_SLAVE.begin();
     LOGGER.setLineHook(interChipSlaveLogHook);
     LOGGER.info("role=slave");
     LOGGER.info("z2m-gateway " FIRMWARE_VERSION " slave");
     LOGGER.info("Reset " + String((int)esp_reset_reason()));
-    LOGGER.info("No Wi-Fi / settings store on slave");
+    LOGGER.info("Device store on slave LittleFS; no Wi-Fi on slave");
 }
 
 void setup() {
@@ -338,11 +572,17 @@ void loop() {
         maybeStartNtp();
         mqttClient->dispatch(wifiController->isStaConnected());
         serialCli->dispatch();
+        ZIGBEE_SPI_PROXY.pumpRegistrySync();
         delay(5);
         return;
     }
 
     INTER_CHIP_SLAVE.applyDeferredSettings();
+    INTER_CHIP_SLAVE.applyDeferredRadioCommands();
+    INTER_CHIP_SLAVE.pumpDeviceDump();
+    if (deviceStore != nullptr) {
+        deviceStore->persistIfDue();
+    }
     if (zigbeeCoordinator != nullptr) {
         zigbeeCoordinator->dispatch();
     }

@@ -21,8 +21,20 @@ enum SpiCommand : uint8_t {
     SpiCmdLeave = 0x07,
     SpiCmdZclOnOff = 0x08,
     SpiCmdResetRadio = 0x09,
+    SpiCmdSetDevice = 0x0A,
+    SpiCmdGetDevices = 0x0B,
     SpiCmdReadEvent = 0x10
 };
+
+constexpr uint8_t SPI_DEVICE_SYNC_RESET = 0x01;
+constexpr uint8_t SPI_DEVICE_SYNC_LAST = 0x02;
+constexpr uint8_t SPI_DEVICE_SYNC_ENTRY = 0x04;
+constexpr uint8_t SPI_DEVICE_SYNC_ALLOW_EMPTY = 0x08;
+constexpr size_t SPI_DEVICE_SYNC_NAME_LEN = 24;
+constexpr size_t SPI_DEVICE_SYNC_TOPIC_LEN = 64;
+constexpr size_t SPI_DEVICE_SYNC_ENTRY_LEN =
+    1 + 8 + SPI_DEVICE_SYNC_NAME_LEN + (SPI_DEVICE_SYNC_TOPIC_LEN * 3);
+static_assert(SPI_DEVICE_SYNC_ENTRY_LEN <= SPI_MAX_PAYLOAD, "device sync frame must fit SPI payload");
 
 enum SpiEvent : uint8_t {
     SpiEvtPong = 0x81,
@@ -34,6 +46,7 @@ enum SpiEvent : uint8_t {
     SpiEvtDeviceLeave = 0x87,
     SpiEvtAttrReport = 0x88,
     SpiEvtCmdResult = 0x89,
+    SpiEvtDeviceMap = 0x8A,
     SpiEvtErr = 0x8E,
     SpiEvtTimeout = 0x8F
 };

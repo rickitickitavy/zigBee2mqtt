@@ -1,58 +1,78 @@
 #include "SettingsManager.h"
 #include "Logger.h"
 #include "Defines.h"
+#include "JsonField.h"
 
 #include <EEPROM.h>
+#include <LittleFS.h>
+#include <stdlib.h>
 #include <string.h>
 #include <WiFi.h>
 
-static_assert(sizeof(GlobalSettings) <= 4096, "GlobalSettings must fit in EEPROM");
-
-SettingsManager::SettingsManager() {
+SettingsManager::SettingsManager() : topicMap(deviceSlots) {
+    memset(deviceSlots, 0, sizeof(deviceSlots));
     EEPROM.begin(4096);
     LOGGER.info("Load settings...");
-    readSettings();
 
-    if ((settings.initMarker[0] != GLOBAL_SETTINGS_MARKER_0)
-        || (settings.initMarker[1] != GLOBAL_SETTINGS_MARKER_1)
-        || (settings.initMarker[2] != GLOBAL_SETTINGS_MARKER_2)
-        || (settings.initMarker[3] != GLOBAL_SETTINGS_MARKER_3)) {
+    char marker[4];
+    for (int i = 0; i < 4; i++) {
+        marker[i] = (char)EEPROM.read(i);
+    }
+    const bool haveMarker = marker[0] == (char)GLOBAL_SETTINGS_MARKER_0
+        && marker[1] == (char)GLOBAL_SETTINGS_MARKER_1
+        && marker[2] == (char)GLOBAL_SETTINGS_MARKER_2
+        && marker[3] == (char)GLOBAL_SETTINGS_MARKER_3;
+    if (!haveMarker) {
         LOGGER.warning("Settings uninitialized; writing defaults");
         applyDefaults();
-        saveSetting(true);
-    } else {
-        LOGGER.info("Settings loaded. Version " + String(settings.version));
-        if (settings.version != GLOBAL_CURRENT_SETTINGS_VERSION) {
-            applyDefaults();
-            settings.version = GLOBAL_CURRENT_SETTINGS_VERSION;
-            saveSetting(false);
-        }
-        clampMqttClientTimeout(settings.mqtt.clientTimeoutMs);
-        clampZigbeeChannel(settings.zigbee.channel);
-        if (settings.wifi.mode != WifiSettingsModeAp && settings.wifi.mode != WifiSettingsModeSta) {
-            settings.wifi.mode = WifiSettingsModeAp;
-        }
-        {
-            uint8_t rawOtg = 0;
-            memcpy(&rawOtg, &settings.wifi.otgEnabled, sizeof(rawOtg));
-            if (rawOtg > 1) {
-                settings.wifi.otgEnabled = false;
-            }
-        }
-        {
-            uint8_t rawMqtt = 0;
-            memcpy(&rawMqtt, &settings.mqtt.enabled, sizeof(rawMqtt));
-            if (rawMqtt > 1) {
-                settings.mqtt.enabled = true;
-            }
-        }
+        createEmptyDeviceFile();
+        saveMain(true);
+        memcpy(&committedMain, &settings, sizeof(settings));
+        logSettings();
+        return;
     }
 
+    const unsigned char storedVersion = (unsigned char)EEPROM.read(offsetof(GlobalSettings, version));
+    LOGGER.info("Settings loaded. Version " + String(storedVersion));
+    if (storedVersion == 4) {
+        upgradeLegacyMainFromEeprom();
+        saveMain(false);
+        loadDeviceFile();
+    } else if (storedVersion == GLOBAL_CURRENT_SETTINGS_VERSION) {
+        readSettings();
+        loadDeviceFile();
+    } else {
+        applyDefaults();
+        createEmptyDeviceFile();
+        saveMain(false);
+    }
+
+    clampMqttClientTimeout(settings.mqtt.clientTimeoutMs);
+    clampZigbeeChannel(settings.zigbee.channel);
+    if (settings.wifi.mode != WifiSettingsModeAp && settings.wifi.mode != WifiSettingsModeSta) {
+        settings.wifi.mode = WifiSettingsModeAp;
+    }
+    {
+        uint8_t rawOtg = 0;
+        memcpy(&rawOtg, &settings.wifi.otgEnabled, sizeof(rawOtg));
+        if (rawOtg > 1) {
+            settings.wifi.otgEnabled = false;
+        }
+    }
+    {
+        uint8_t rawMqtt = 0;
+        memcpy(&rawMqtt, &settings.mqtt.enabled, sizeof(rawMqtt));
+        if (rawMqtt > 1) {
+            settings.mqtt.enabled = true;
+        }
+    }
+    memcpy(&committedMain, &settings, sizeof(settings));
     logSettings();
 }
 
 void SettingsManager::applyDefaults() {
     memset(&settings, 0, sizeof(settings));
+    memset(deviceSlots, 0, sizeof(deviceSlots));
     settings.initMarker[0] = GLOBAL_SETTINGS_MARKER_0;
     settings.initMarker[1] = GLOBAL_SETTINGS_MARKER_1;
     settings.initMarker[2] = GLOBAL_SETTINGS_MARKER_2;
@@ -71,6 +91,24 @@ void SettingsManager::applyDefaults() {
 
     settings.zigbee.channel = DEFAULT_ZIGBEE_CHANNEL;
     settings.zigbee.permitJoinOnBootSec = DEFAULT_PERMIT_JOIN_SEC;
+    setSpiSpeedHz(DEFAULT_SPI_SPEED_HZ);
+}
+
+void SettingsManager::upgradeLegacyMainFromEeprom() {
+    memset(&settings, 0, sizeof(settings));
+    uint8_t *mainBytes = (uint8_t *)&settings;
+    for (size_t i = 0; i < kSettingsMainUsed; i++) {
+        mainBytes[i] = EEPROM.read(i);
+    }
+    settings.version = GLOBAL_CURRENT_SETTINGS_VERSION;
+    memset(settings.alignPad, 0, sizeof(settings.alignPad));
+    memset(settings.reserved, 0, sizeof(settings.reserved));
+    memset(deviceSlots, 0, sizeof(deviceSlots));
+    LOGGER.info("Legacy EEPROM main upgraded; devices stay in LittleFS JSON");
+}
+
+bool SettingsManager::mainEqualsCommitted() const {
+    return memcmp(&settings, &committedMain, sizeof(settings)) == 0;
 }
 
 void SettingsManager::resetWiFi() {
@@ -88,6 +126,24 @@ void SettingsManager::clampMqttClientTimeout(int &timeoutMs) {
     }
 }
 
+uint32_t SettingsManager::clampSpiSpeedHz(uint32_t speedHz) {
+    if (speedHz < SPI_SPEED_HZ_MIN || speedHz > SPI_SPEED_HZ_MAX) {
+        return DEFAULT_SPI_SPEED_HZ;
+    }
+    return speedHz;
+}
+
+uint32_t SettingsManager::spiSpeedHz() const {
+    uint32_t speedHz = 0;
+    memcpy(&speedHz, settings.reserved, sizeof(speedHz));
+    return clampSpiSpeedHz(speedHz);
+}
+
+void SettingsManager::setSpiSpeedHz(uint32_t speedHz) {
+    const uint32_t clamped = clampSpiSpeedHz(speedHz);
+    memcpy(settings.reserved, &clamped, sizeof(clamped));
+}
+
 void SettingsManager::clampZigbeeChannel(uint8_t &channel) {
     if (channel < 11 || channel > 26) {
         channel = DEFAULT_ZIGBEE_CHANNEL;
@@ -95,8 +151,8 @@ void SettingsManager::clampZigbeeChannel(uint8_t &channel) {
 }
 
 void SettingsManager::readSettings(GlobalSettings *destination) {
-    char *buffer = (char *)destination;
-    LOGGER.info("Loading " + String((int)sizeof(GlobalSettings)) + " bytes");
+    uint8_t *buffer = (uint8_t *)destination;
+    LOGGER.info("Loading " + String((int)sizeof(GlobalSettings)) + " main bytes");
     for (size_t i = 0; i < sizeof(GlobalSettings); i++) {
         buffer[i] = EEPROM.read(i);
     }
@@ -106,22 +162,88 @@ void SettingsManager::readSettings() {
     readSettings(&settings);
 }
 
+void SettingsManager::createEmptyDeviceFile() {
+    File file = LittleFS.open(DEVICES_STORE_PATH, "w");
+    if (!file) {
+        LOGGER.error("Cannot create device store");
+        return;
+    }
+    file.print("[]");
+    file.close();
+}
+
+void SettingsManager::parseDevicesJson(const String &json) {
+    topicMap.replaceFromJson(json);
+}
+
+void SettingsManager::loadDeviceFile() {
+    if (!topicMap.loadFromFile(DEVICES_STORE_PATH)) {
+        LOGGER.warning("Host device cache missing or invalid; starting empty");
+        memset(deviceSlots, 0, sizeof(deviceSlots));
+        createEmptyDeviceFile();
+        return;
+    }
+}
+
+String SettingsManager::devicesJsonFile() {
+    File file = LittleFS.open(DEVICES_STORE_PATH, "r");
+    if (!file) {
+        return topicMap.listJson();
+    }
+    String json = file.readString();
+    file.close();
+    json.trim();
+    if (json.length() == 0) {
+        return topicMap.listJson();
+    }
+    return json;
+}
+
+bool SettingsManager::saveDevicesJson() {
+    if (!topicMap.saveToFile(DEVICES_STORE_PATH)) {
+        LOGGER.error("Cannot write device JSON");
+        return false;
+    }
+    return true;
+}
+
+void SettingsManager::writeEepromDirty(
+    const uint8_t *nextImage,
+    const uint8_t *previousImage,
+    size_t length
+) {
+    for (size_t addr = 0; addr < length; addr++) {
+        if (nextImage[addr] != previousImage[addr]) {
+            EEPROM.write(addr, nextImage[addr]);
+        }
+    }
+}
+
 void SettingsManager::requestRestart() {
     pendingRestart = true;
     restartRequestedMs = millis();
     LOGGER.warning("Restart scheduled");
 }
 
-void SettingsManager::saveSetting(bool restart) {
-    LOGGER.info("Saving settings...");
-    char *dataPtr = (char *)&settings;
-    for (size_t addr = 0; addr < sizeof(GlobalSettings); addr++) {
-        EEPROM.write(addr, dataPtr[addr]);
-    }
+void SettingsManager::saveMain(bool restart) {
+    LOGGER.info("Saving main settings...");
+    writeEepromDirty((const uint8_t *)&settings, (const uint8_t *)&committedMain, sizeof(settings));
     EEPROM.commit();
+    memcpy(&committedMain, &settings, sizeof(settings));
     if (restart) {
         requestRestart();
     }
+}
+
+void SettingsManager::saveSetting(bool restart) {
+    saveMain(restart);
+}
+
+bool SettingsManager::saveDeviceSlot(int slotIndex) {
+    if (slotIndex < 0 || slotIndex >= DEVICE_MAP_SLOTS) {
+        return false;
+    }
+    return saveDevicesJson();
 }
 
 bool SettingsManager::handlePendingRestart(unsigned long delayMs) {
@@ -145,6 +267,14 @@ GlobalSettings *SettingsManager::getSettings() {
     return &settings;
 }
 
+DeviceTopicMap *SettingsManager::deviceMap() {
+    return &topicMap;
+}
+
+DeviceTopicEntry *SettingsManager::devices() {
+    return deviceSlots;
+}
+
 void SettingsManager::logSettings() {
     LOGGER.info("----- SETTINGS ----");
     LOGGER.info("  wifi bssid: " + String(settings.wifi.bssid));
@@ -159,4 +289,6 @@ void SettingsManager::logSettings() {
     LOGGER.info("  mqtt base: " + String(settings.mqtt.baseTopic));
     LOGGER.info("  zigbee channel: " + String(settings.zigbee.channel));
     LOGGER.info("  zigbee permitJoinOnBootSec: " + String(settings.zigbee.permitJoinOnBootSec));
+    LOGGER.info("  devices used: " + String(topicMap.usedCount()) + "/" + String(DEVICE_MAP_SLOTS));
+    LOGGER.info("  spi speed Hz: " + String((unsigned long)spiSpeedHz()));
 }
