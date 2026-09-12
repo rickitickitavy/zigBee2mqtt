@@ -305,22 +305,23 @@ static void setupHost() {
 }
 
 static void setupSlave() {
+    rgbLedWrite(PIN_STATUS_RGB, 0, 0, 0);
     LOGGER.setRoleLabel("slave");
     LOGGER.setStoreRing(false);
+    INTER_CHIP_SLAVE.setSettingsHandler(onSlaveSettings);
+    INTER_CHIP_SLAVE.setPermitJoinHandler(onSlavePermitJoin);
+    INTER_CHIP_SLAVE.setOnOffHandler(onSlaveOnOff);
+    INTER_CHIP_SLAVE.begin();
     LOGGER.setLineHook(interChipSlaveLogHook);
     LOGGER.info("role=slave");
     LOGGER.info("z2m-gateway " FIRMWARE_VERSION " slave");
     LOGGER.info("Reset " + String((int)esp_reset_reason()));
     LOGGER.info("No Wi-Fi / settings store on slave");
-
-    INTER_CHIP_SLAVE.setSettingsHandler(onSlaveSettings);
-    INTER_CHIP_SLAVE.setPermitJoinHandler(onSlavePermitJoin);
-    INTER_CHIP_SLAVE.setOnOffHandler(onSlaveOnOff);
-    INTER_CHIP_SLAVE.begin();
 }
 
 void setup() {
     Serial.begin(115200);
+    Serial.setTxTimeoutMs(20);
     delay(400);
     boardRole = readBoardRole();
     if (boardRole == BoardRoleHost) {

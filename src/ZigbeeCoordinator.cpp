@@ -1,6 +1,7 @@
 #include "ZigbeeCoordinator.h"
 #include "Logger.h"
 #include "Defines.h"
+#include "pins.h"
 
 #include <string.h>
 
@@ -43,6 +44,9 @@ bool ZigbeeCoordinator::begin(uint8_t channel, uint8_t permitJoinSec) {
 
     started = true;
     LOGGER.info("Zigbee coordinator started");
+    if (permitJoinSec > 0) {
+        startPairingWindow(permitJoinSec);
+    }
     return true;
 }
 
@@ -57,6 +61,7 @@ void ZigbeeCoordinator::permitJoin(uint8_t seconds) {
     }
     LOGGER.info("Permit join " + String(seconds) + "s");
     Zigbee.openNetwork(seconds);
+    startPairingWindow(seconds);
 }
 
 void ZigbeeCoordinator::closeJoin() {
@@ -65,6 +70,43 @@ void ZigbeeCoordinator::closeJoin() {
     }
     LOGGER.info("Closing join window");
     Zigbee.closeNetwork();
+    stopPairingWindow();
+}
+
+void ZigbeeCoordinator::startPairingWindow(uint8_t seconds) {
+    if (seconds == 0) {
+        stopPairingWindow();
+        return;
+    }
+    pairingUntilMs = millis() + (unsigned long)seconds * 1000UL;
+    pairingLedToggleMs = 0;
+    pairingLedOn = false;
+}
+
+void ZigbeeCoordinator::stopPairingWindow() {
+    pairingUntilMs = 0;
+    pairingLedOn = false;
+    rgbLedWrite(PIN_STATUS_RGB, 0, 0, 0);
+}
+
+void ZigbeeCoordinator::updatePairingLed() {
+    if (pairingUntilMs == 0) {
+        return;
+    }
+    if ((long)(millis() - pairingUntilMs) >= 0) {
+        stopPairingWindow();
+        return;
+    }
+    if ((millis() - pairingLedToggleMs) < 250) {
+        return;
+    }
+    pairingLedToggleMs = millis();
+    pairingLedOn = !pairingLedOn;
+    if (pairingLedOn) {
+        rgbLedWrite(PIN_STATUS_RGB, 0, 0, 48);
+    } else {
+        rgbLedWrite(PIN_STATUS_RGB, 0, 0, 0);
+    }
 }
 
 void ZigbeeCoordinator::storeBoundDevice(zb_device_params_t *device) {
@@ -113,6 +155,7 @@ void ZigbeeCoordinator::refreshBoundDevices() {
 }
 
 void ZigbeeCoordinator::dispatch() {
+    updatePairingLed();
     if (!started) {
         return;
     }

@@ -47,8 +47,14 @@ private:
     LightStateFn lightStateHandler = nullptr;
     DeviceBoundFn deviceBoundHandler = nullptr;
     unsigned long lastRefreshMs = 0;
+    unsigned long pairingUntilMs = 0;
+    unsigned long pairingLedToggleMs = 0;
+    bool pairingLedOn = false;
     bool started = false;
 
+    void startPairingWindow(uint8_t seconds);
+    void stopPairingWindow();
+    void updatePairingLed();
     void storeBoundDevice(zb_device_params_t *device);
     void resolveIeeeFromSource(esp_zb_zcl_addr_t source, uint8_t ieee[8], uint16_t *shortAddr);
 };

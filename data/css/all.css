@@ -1,0 +1,566 @@
+:root {
+    --accent: #290682;
+    --accent-soft: #ede8f8;
+    --bg: #e8e8e8;
+    --surface: #ffffff;
+    --border: #c8c8c8;
+    --text: #1a1a1a;
+    --muted: #5a5a5a;
+    --radius: 8px;
+    --gap: 0.75rem;
+    --sidebar-width: 9.5rem;
+}
+
+*,
+*::before,
+*::after {
+    box-sizing: border-box;
+}
+
+html, body {
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    background-color: var(--bg);
+    color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-size: 16px;
+    line-height: 1.4;
+    -webkit-text-size-adjust: 100%;
+}
+
+.app-shell {
+    display: flex;
+    width: 100%;
+    height: 100%;
+    max-width: none;
+    margin: 0;
+    padding: 2cm 0.5cm 1cm 2cm;
+    gap: 0;
+    box-sizing: border-box;
+    overflow: hidden;
+}
+
+.sidebar-nav {
+    flex: 0 0 var(--sidebar-width);
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    padding: 2.5rem 0 0 0;
+    background: transparent;
+}
+
+.sidebar-title {
+    margin: 0 0 1rem;
+    padding: 0 0.5rem;
+    font-size: 1.125rem;
+    font-weight: 700;
+    color: var(--accent);
+    text-align: left;
+}
+
+/* Vertical tab strip (main nav) */
+.sidebar-btn {
+    position: relative;
+    min-height: 44px;
+    padding: 0.65rem 0.85rem;
+    border: 1px solid var(--border);
+    border-right: none;
+    border-radius: 0;
+    margin-top: -1px;
+    background: #dcdcdc;
+    color: var(--muted);
+    font-size: 0.9375rem;
+    font-weight: 600;
+    font-family: inherit;
+    cursor: pointer;
+    text-align: left;
+    z-index: 1;
+}
+
+.sidebar-btn:first-of-type {
+    margin-top: 0;
+    border-radius: var(--radius) 0 0 0;
+}
+
+.sidebar-btn:last-of-type {
+    border-radius: 0 0 0 var(--radius);
+}
+
+.sidebar-btn:hover:not(.active) {
+    color: var(--accent);
+    background: var(--accent-soft);
+}
+
+.sidebar-btn.active {
+    color: var(--accent);
+    background: var(--surface);
+    border-color: var(--border);
+    border-right: 1px solid var(--surface);
+    z-index: 2;
+    font-weight: 700;
+}
+
+.main-panel {
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    padding: 0.5rem 0.75rem 0.75rem 0.5rem;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 0 var(--radius) var(--radius) var(--radius);
+}
+
+.section-panel {
+    display: none;
+    flex-direction: column;
+    gap: var(--gap);
+}
+
+.section-panel.active {
+    display: flex;
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+}
+
+.settings-card.section-panel.active {
+    overflow: hidden;
+}
+
+.settings-scroll {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    display: flex;
+    flex-direction: column;
+    gap: var(--gap);
+}
+
+.section-title {
+    margin: 0 0 0.5rem;
+    font-size: 1.25rem;
+    font-weight: 700;
+    color: var(--accent);
+    flex-shrink: 0;
+}
+
+.status-value {
+    margin: 0;
+    font-size: 1.125rem;
+    font-weight: 600;
+}
+
+.save-error {
+    margin: 0 0 1rem;
+    padding: 0.75rem 1rem;
+    border: 1px solid #b00020;
+    border-radius: var(--radius);
+    background: #fdecea;
+    color: #b00020;
+    font-size: 0.9375rem;
+    font-weight: 600;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.save-success {
+    margin: 0 0 1rem;
+    padding: 0.75rem 1rem;
+    border: 1px solid #1b5e20;
+    border-radius: var(--radius);
+    background: #e8f5e9;
+    color: #1b5e20;
+    font-size: 0.9375rem;
+    font-weight: 600;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0;
+    margin: 0 0 -1px;
+    padding: 0;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+}
+
+.tab-btn {
+    flex: 0 1 auto;
+    min-height: 44px;
+    padding: 0.55rem 1rem;
+    border: 1px solid transparent;
+    border-bottom: none;
+    border-radius: var(--radius) var(--radius) 0 0;
+    margin-right: 2px;
+    margin-bottom: -1px;
+    background: #dcdcdc;
+    color: var(--muted);
+    font-size: 0.9375rem;
+    font-weight: 600;
+    cursor: pointer;
+    font-family: inherit;
+    position: relative;
+    z-index: 1;
+}
+
+.tab-btn:hover:not(.active) {
+    color: var(--accent);
+    background: var(--accent-soft);
+}
+
+.tab-btn.active {
+    color: var(--accent);
+    background: var(--surface);
+    border-color: var(--border);
+    border-bottom: 1px solid var(--surface);
+    z-index: 2;
+    font-weight: 700;
+}
+
+.tab-btn.is-hidden,
+.tab-panel.is-hidden {
+    display: none !important;
+}
+
+.tab-content {
+    display: flex;
+    flex-direction: column;
+    gap: var(--gap);
+    padding: 1rem 0 0;
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+}
+
+#section-system.section-panel.active {
+    overflow: hidden;
+}
+
+#system-tab-update.tab-panel.active {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+}
+
+#system-tab-log.tab-panel.active {
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+}
+
+.log-card {
+    flex: 1;
+    min-height: 0;
+}
+
+.tab-panel {
+    display: none;
+    flex-direction: column;
+    gap: var(--gap);
+}
+
+.tab-panel.active {
+    display: flex;
+}
+
+.field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 0.75rem 0.85rem;
+}
+
+.field label {
+    font-size: 0.875rem;
+    font-weight: 600;
+    color: var(--text);
+}
+
+.field-hint {
+    margin: 0;
+    font-size: 0.75rem;
+    color: var(--muted);
+}
+
+.field input[type="text"],
+.field input[type="password"],
+.field input[type="number"],
+.field input[type="file"] {
+    width: 100%;
+    min-height: 44px;
+    padding: 0.5rem 0.75rem;
+    font-size: 1rem;
+    font-family: inherit;
+    color: var(--text);
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+}
+
+.field input:focus {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+    border-color: var(--accent);
+}
+
+.password-row {
+    display: flex;
+    gap: 0.5rem;
+    align-items: stretch;
+}
+
+.password-row input {
+    flex: 1;
+}
+
+.password-toggle {
+    min-height: 44px;
+    min-width: 44px;
+    padding: 0 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--accent);
+    font-size: 0.875rem;
+    font-weight: 600;
+    font-family: inherit;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.password-toggle:hover {
+    background: var(--accent-soft);
+}
+
+.field-check {
+    flex-direction: row;
+    align-items: center;
+    gap: 0.75rem;
+    min-height: 44px;
+}
+
+.field-check input[type="checkbox"] {
+    width: 1.35rem;
+    height: 1.35rem;
+    flex-shrink: 0;
+    accent-color: var(--accent);
+    cursor: pointer;
+}
+
+.field-check label {
+    flex: 1;
+    cursor: pointer;
+    font-weight: 600;
+}
+
+.upload-card {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1rem;
+}
+
+.upload-title {
+    margin: 0;
+    font-size: 1rem;
+    font-weight: 700;
+    color: var(--accent);
+}
+
+.upload-status {
+    margin: 0;
+    font-size: 0.875rem;
+    color: var(--muted);
+    min-height: 1.25rem;
+}
+
+.progress-bar {
+    width: 100%;
+    height: 0.75rem;
+}
+
+.log-viewer {
+    width: 100%;
+    flex: 1;
+    min-height: 0;
+    height: auto;
+    box-sizing: border-box;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    font-size: 0.8125rem;
+    line-height: 1.4;
+    white-space: pre;
+    overflow: auto;
+    resize: vertical;
+    padding: 0.6rem 0.7rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    color: var(--text);
+}
+
+.page-footer {
+    flex: 0 0 auto;
+    display: flex;
+    justify-content: center;
+    gap: 0.75rem;
+    padding: 0.75rem 0 0.25rem;
+    margin-top: 0;
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+}
+
+.page-footer-inner {
+    display: flex;
+    gap: 0.75rem;
+    width: 100%;
+}
+
+.btn {
+    flex: 1;
+    min-height: 44px;
+    padding: 0.6rem 1rem;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    font-size: 1rem;
+    font-weight: 600;
+    font-family: inherit;
+    cursor: pointer;
+}
+
+.btn-primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+}
+
+.btn-primary:hover {
+    filter: brightness(1.08);
+}
+
+.btn-secondary {
+    background: var(--surface);
+    color: var(--text);
+}
+
+.btn-secondary:hover {
+    background: var(--accent-soft);
+}
+
+.upload-card .btn,
+.btn-inline {
+    flex: 0 0 auto;
+    width: auto;
+    align-self: flex-start;
+}
+
+@media (max-width: 600px) {
+    .app-shell {
+        flex-direction: column;
+        padding: 2cm 0.5cm 1rem 2cm;
+    }
+
+    .sidebar-nav {
+        flex: none;
+        flex-direction: row;
+        flex-wrap: nowrap;
+        padding: 0;
+        overflow-x: auto;
+    }
+
+    .sidebar-title {
+        display: none;
+    }
+
+    .sidebar-btn {
+        flex: 1 1 0;
+        min-width: 5.5rem;
+        margin-top: 0;
+        margin-right: -1px;
+        border: 1px solid var(--border);
+        border-bottom: none;
+        border-radius: var(--radius) var(--radius) 0 0;
+        text-align: center;
+    }
+
+    .sidebar-btn:first-of-type {
+        border-radius: var(--radius) 0 0 0;
+    }
+
+    .sidebar-btn:last-of-type {
+        border-radius: 0 var(--radius) 0 0;
+        margin-right: 0;
+    }
+
+    .sidebar-btn.active {
+        border-bottom: 1px solid var(--surface);
+        border-right: 1px solid var(--border);
+    }
+
+    .main-panel {
+        padding: 1rem;
+        border-radius: 0 0 var(--radius) var(--radius);
+        border-top: none;
+    }
+
+    .tabs {
+        overflow-x: auto;
+        flex-wrap: nowrap;
+    }
+
+    .tab-btn {
+        flex: 0 0 auto;
+        white-space: nowrap;
+    }
+}
+
+.field select {
+    width: 100%;
+    min-height: 44px;
+    padding: 0.5rem 0.75rem;
+    font-size: 1rem;
+    font-family: inherit;
+    color: var(--text);
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+}
+
+.group-title {
+    margin: 0.5rem 0 0;
+    font-size: 1rem;
+    font-weight: 700;
+    color: var(--accent);
+}
+
+.form-section {
+    display: flex;
+    flex-direction: column;
+    gap: var(--gap);
+    width: 100%;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 0.85rem;
+    background: var(--surface);
+}
+
+.form-section .form-section {
+    background: var(--bg);
+}
+
+.formHeader2 {
+    margin: 0.25rem 0 0;
+    font-size: 1rem;

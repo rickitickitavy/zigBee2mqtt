@@ -3,6 +3,27 @@
 #include <Arduino.h>
 #include <string.h>
 
+inline void appendJsonEscaped(String &json, const char *value, size_t maxLength = 128) {
+    if (value == nullptr) {
+        return;
+    }
+    for (size_t index = 0; index < maxLength; index++) {
+        const unsigned char character = (unsigned char)value[index];
+        if (character == '\0' || character == 0xFF) {
+            break;
+        }
+        if (character == '"' || character == '\\') {
+            json += '\\';
+            json += (char)character;
+            continue;
+        }
+        if (character < 32 || character >= 127) {
+            continue;
+        }
+        json += (char)character;
+    }
+}
+
 inline bool extractJsonString(const char *json, const char *key, String &out) {
     String pattern = String("\"") + key + "\"";
     const char *found = strstr(json, pattern.c_str());

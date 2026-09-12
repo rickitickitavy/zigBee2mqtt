@@ -35,6 +35,15 @@
             } else {
                 stopLogPolling();
             }
+            if (name == "mqtt") {
+                loadMqtt();
+            }
+            if (name == "wifi") {
+                loadWifi();
+            }
+            if (name == "zigbee") {
+                loadZigbee();
+            }
         }
 
         function showSystemTab(name) {
@@ -112,9 +121,16 @@
         }
 
         function loadWifi() {
-            fetch("/api/wifi").then(function (response) {
+            var saveError = document.getElementById("wifiSaveError");
+            fetch("/api/wifi", { cache: "no-store" }).then(function (response) {
+                if (!response.ok) {
+                    throw new Error("HTTP " + response.status);
+                }
                 return response.json();
             }).then(function (wifiSettings) {
+                if (saveError) {
+                    saveError.hidden = true;
+                }
                 document.getElementById("wifiBssid").value = wifiSettings.bssid || wifiSettings.bsid || "";
                 document.getElementById("wifiPassword").value = wifiSettings.password || "";
                 document.getElementById("wifiDeviceName").value = wifiSettings.deviceName || "";
@@ -123,13 +139,26 @@
                 document.getElementById("wifiOtgEnabled").checked = !!wifiSettings.otgEnabled;
                 updateApIpVisibility();
             }).catch(function () {
+                if (saveError) {
+                    saveError.hidden = false;
+                    saveError.textContent = "Failed to load Wi-Fi settings";
+                }
             });
         }
 
         function loadMqtt() {
-            fetch("/api/mqtt").then(function (response) {
-                return response.json();
+            var saveError = document.getElementById("mqttSaveError");
+            fetch("/api/mqtt", { cache: "no-store" }).then(function (response) {
+                return response.text().then(function (text) {
+                    if (!response.ok) {
+                        throw new Error("HTTP " + response.status + (text ? ": " + text.slice(0, 80) : ""));
+                    }
+                    return JSON.parse(text);
+                });
             }).then(function (mqttSettings) {
+                if (saveError) {
+                    saveError.hidden = true;
+                }
                 document.getElementById("mqttEnabled").checked = !!mqttSettings.enabled;
                 document.getElementById("mqttServer").value = mqttSettings.server || "";
                 document.getElementById("mqttPort").value = mqttSettings.port || 1883;
@@ -139,7 +168,68 @@
                 document.getElementById("mqttBaseTopic").value = mqttSettings.baseTopic || "";
                 document.getElementById("mqttReconnectIntervalMs").value = mqttSettings.reconnectIntervalMs || 3000;
                 document.getElementById("mqttClientTimeoutMs").value = mqttSettings.clientTimeoutMs || 200;
+            }).catch(function (error) {
+                if (saveError) {
+                    saveError.hidden = false;
+                    saveError.textContent = "Failed to load MQTT settings"
+                        + (error && error.message ? " (" + error.message + ")" : "");
+                }
+            });
+        }
+
+        function loadZigbee() {
+            var saveError = document.getElementById("zigbeeSaveError");
+            fetch("/api/zigbee", { cache: "no-store" }).then(function (response) {
+                return response.text().then(function (text) {
+                    if (!response.ok) {
+                        throw new Error("HTTP " + response.status + (text ? ": " + text.slice(0, 80) : ""));
+                    }
+                    return JSON.parse(text);
+                });
+            }).then(function (zigbeeSettings) {
+                if (saveError) {
+                    saveError.hidden = true;
+                }
+                document.getElementById("zigbeeChannel").value = zigbeeSettings.channel || 15;
+                document.getElementById("zigbeePermitJoinOnBootSec").value =
+                    (zigbeeSettings.permitJoinOnBootSec === 0 || zigbeeSettings.permitJoinOnBootSec)
+                        ? zigbeeSettings.permitJoinOnBootSec
+                        : 180;
+            }).catch(function (error) {
+                if (saveError) {
+                    saveError.hidden = false;
+                    saveError.textContent = "Failed to load ZigBee settings"
+                        + (error && error.message ? " (" + error.message + ")" : "");
+                }
+            });
+        }
+
+        function saveZigbee() {
+            var saveError = document.getElementById("zigbeeSaveError");
+            var saveSuccess = document.getElementById("zigbeeSaveSuccess");
+            saveError.hidden = true;
+            saveSuccess.hidden = true;
+            var body = {
+                channel: parseInt(document.getElementById("zigbeeChannel").value, 10),
+                permitJoinOnBootSec: parseInt(document.getElementById("zigbeePermitJoinOnBootSec").value, 10)
+            };
+            fetch("/api/zigbee", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body)
+            }).then(function (response) {
+                return response.text().then(function (text) {
+                    if (response.ok) {
+                        saveSuccess.hidden = false;
+                        saveSuccess.textContent = text || "Saved. Device will apply ZigBee settings.";
+                    } else {
+                        saveError.hidden = false;
+                        saveError.textContent = text || ("Save failed (HTTP " + response.status + ")");
+                    }
+                });
             }).catch(function () {
+                saveError.hidden = false;
+                saveError.textContent = "Save failed (network error)";
             });
         }
 
@@ -254,6 +344,36 @@
             xhr.send(formData);
         }
 
+        function uploadFilesystem() {
+            var fileInput = document.getElementById("updateDataFile");
+            var progressBar = document.getElementById("updateDataProgress");
+            var statusLine = document.getElementById("updateDataStatus");
+            if (!fileInput.files || fileInput.files.length == 0) {
+                statusLine.textContent = "Choose a LittleFS image first (pio run -t buildfs).";
+                return;
+            }
+            var formData = new FormData();
+            formData.append("filesystem", fileInput.files[0], fileInput.files[0].name);
+            var xhr = new XMLHttpRequest();
+            xhr.open("POST", "/update/data", true);
+            progressBar.hidden = false;
+            progressBar.value = 0;
+            xhr.upload.onprogress = function (event) {
+                if (event.lengthComputable) {
+                    progressBar.value = (event.loaded / event.total) * 100;
+                }
+            };
+            xhr.onload = function () {
+                statusLine.textContent = xhr.status === 200
+                    ? (xhr.responseText || "Filesystem written. Device will restart.")
+                    : (xhr.responseText || ("Filesystem update failed (HTTP " + xhr.status + ")"));
+            };
+            xhr.onerror = function () {
+                statusLine.textContent = "Filesystem update failed (network error)";
+            };
+            xhr.send(formData);
+        }
+
         function updateApIpVisibility() {
             var apIpField = document.getElementById("wifiApIpField");
             if (!apIpField) {
@@ -268,6 +388,7 @@
             document.getElementById("wifiMode").onchange = updateApIpVisibility;
             loadWifi();
             loadMqtt();
+            loadZigbee();
             loadVersion();
         };
     </script>
@@ -288,10 +409,11 @@
             <h2 class="section-title">Status</h2>
         </section>
 
-        <section id="section-wifi" class="section-panel" aria-label="WiFi">
+        <section id="section-wifi" class="section-panel settings-card" aria-label="WiFi">
             <h2 class="section-title">WiFi</h2>
             <p id="wifiSaveError" class="save-error" hidden></p>
             <p id="wifiSaveSuccess" class="save-success" hidden></p>
+            <div class="settings-scroll">
             <div class="field">
                 <label for="wifiBssid">BSSID</label>
                 <input id="wifiBssid" type="text" autocomplete="off">
@@ -325,18 +447,20 @@
                 <input id="wifiOtgEnabled" type="checkbox">
                 <label for="wifiOtgEnabled">OTG_ENABLED</label>
             </div>
+            </div>
             <div class="page-footer">
                 <div class="page-footer-inner">
                     <button type="button" class="btn btn-primary" onclick="saveWifi()">Save</button>
-                    <button type="button" class="btn btn-secondary" onclick="window.location='/'">Reload</button>
+                    <button type="button" class="btn btn-secondary" onclick="loadWifi()">Reset</button>
                 </div>
             </div>
         </section>
 
-        <section id="section-mqtt" class="section-panel" aria-label="MQTT">
+        <section id="section-mqtt" class="section-panel settings-card" aria-label="MQTT">
             <h2 class="section-title">MQTT</h2>
             <p id="mqttSaveError" class="save-error" hidden></p>
             <p id="mqttSaveSuccess" class="save-success" hidden></p>
+            <div class="settings-scroll">
             <div class="field field-check">
                 <input id="mqttEnabled" type="checkbox">
                 <label for="mqttEnabled">ENABLED</label>
@@ -379,16 +503,37 @@
                 <input id="mqttClientTimeoutMs" type="number" min="50" max="1500" autocomplete="off">
                 <p class="field-hint">Clamped to 50–1500 ms.</p>
             </div>
+            </div>
             <div class="page-footer">
                 <div class="page-footer-inner">
                     <button type="button" class="btn btn-primary" onclick="saveMqtt()">Save</button>
-                    <button type="button" class="btn btn-secondary" onclick="window.location='/'">Reload</button>
+                    <button type="button" class="btn btn-secondary" onclick="loadMqtt()">Reset</button>
                 </div>
             </div>
         </section>
 
-        <section id="section-zigbee" class="section-panel" aria-label="ZigBee">
+        <section id="section-zigbee" class="section-panel settings-card" aria-label="ZigBee">
             <h2 class="section-title">ZigBee</h2>
+            <p id="zigbeeSaveError" class="save-error" hidden></p>
+            <p id="zigbeeSaveSuccess" class="save-success" hidden></p>
+            <div class="settings-scroll">
+            <div class="field">
+                <label for="zigbeeChannel">CHANNEL</label>
+                <input id="zigbeeChannel" type="number" min="11" max="26" autocomplete="off">
+                <p class="field-hint">2.4 GHz Zigbee channel 11–26. Applied on the radio slave after restart.</p>
+            </div>
+            <div class="field">
+                <label for="zigbeePermitJoinOnBootSec">PERMIT_JOIN_ON_BOOT_SEC</label>
+                <input id="zigbeePermitJoinOnBootSec" type="number" min="0" max="254" autocomplete="off">
+                <p class="field-hint">Seconds the coordinator allows joins after it starts. 0 keeps the network closed.</p>
+            </div>
+            </div>
+            <div class="page-footer">
+                <div class="page-footer-inner">
+                    <button type="button" class="btn btn-primary" onclick="saveZigbee()">Save</button>
+                    <button type="button" class="btn btn-secondary" onclick="loadZigbee()">Reset</button>
+                </div>
+            </div>
         </section>
 
         <section id="section-devices" class="section-panel" aria-label="Devices">
@@ -410,15 +555,23 @@
                         <input id="updateCodeFile" type="file" accept=".bin,application/octet-stream">
                         <progress id="updateCodeProgress" class="progress-bar" max="100" value="0" hidden></progress>
                         <p id="updateCodeStatus" class="upload-status"></p>
-                        <button type="button" class="btn btn-primary" onclick="uploadFirmware()">Upload firmware</button>
+                        <button type="button" class="btn btn-primary btn-inline" onclick="uploadFirmware()">Upload firmware</button>
+                    </div>
+                    <div class="upload-card">
+                        <h3 class="upload-title">Filesystem (LittleFS)</h3>
+                        <p class="field-hint">Web UI files. PlatformIO: <code>pio run -t buildfs</code> then upload <code>.pio/build/esp32-c6-devkitc-1/littlefs.bin</code></p>
+                        <input id="updateDataFile" type="file" accept=".bin,application/octet-stream">
+                        <progress id="updateDataProgress" class="progress-bar" max="100" value="0" hidden></progress>
+                        <p id="updateDataStatus" class="upload-status"></p>
+                        <button type="button" class="btn btn-primary btn-inline" onclick="uploadFilesystem()">Upload filesystem</button>
                     </div>
                 </div>
                 <div id="system-tab-log" class="system-tab-panel tab-panel" role="tabpanel">
-                    <div class="upload-card">
+                    <div class="upload-card log-card">
                         <h3 class="upload-title">Log</h3>
                         <p class="field-hint">In-memory firmware log (oldest lines drop when the ring is full).</p>
                         <textarea id="memoryLogViewer" class="log-viewer" readonly></textarea>
-                        <button type="button" class="btn btn-secondary" onclick="refreshLog()">Refresh</button>
+                        <button type="button" class="btn btn-secondary btn-inline" onclick="refreshLog()">Refresh</button>
                     </div>
                 </div>
             </div>

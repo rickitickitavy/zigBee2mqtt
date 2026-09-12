@@ -20,11 +20,11 @@ public:
 private:
     static constexpr int kOutQueue = 8;
     static constexpr unsigned long kReadyTimeoutMs = 10000UL;
-    static constexpr unsigned long kReplyTimeoutMs = 2000UL;
-    static constexpr unsigned long kPollMs = 200UL;
-    static constexpr unsigned long kPingPeriodMs = 5000UL;
+    static constexpr unsigned long kReplyTimeoutMs = 3000UL;
+    static constexpr unsigned long kPollMs = 50UL;
+    static constexpr unsigned long kPingPeriodMs = 10000UL;
     static constexpr unsigned long kTimeSyncMs = 30000UL;
-    static constexpr unsigned long kSilentWatchdogMs = 15000UL;
+    static constexpr unsigned long kMinTransferGapUs = 2000UL;
     static constexpr unsigned long kRstPulseMs = 15UL;
 
     struct QueuedFrame {

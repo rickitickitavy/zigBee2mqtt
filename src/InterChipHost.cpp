@@ -12,7 +12,7 @@ static void hostSpiTask(void *arg) {
     (void)arg;
     for (;;) {
         INTER_CHIP_HOST.pump();
-        vTaskDelay(pdMS_TO_TICKS(5));
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 
@@ -148,11 +148,9 @@ void InterChipHost::maybePushSettings() {
 }
 
 void InterChipHost::handleInbound(const SpiFrame &frame) {
+    lastPongMs = millis();
     if (hasPending && frame.seq == pendingSeq) {
         hasPending = false;
-    }
-    if (frame.cmd == SpiEvtPong) {
-        lastPongMs = millis();
     }
     if (frame.cmd == SpiEvtSlaveReady && state == HostBringupWaitReady) {
         LOGGER.info("SLAVE_READY");
@@ -184,7 +182,7 @@ void InterChipHost::emitLocalTimeout() {
     timeoutFrame.seq = pendingSeq;
     timeoutFrame.length = 1;
     timeoutFrame.payload[0] = pendingCmd;
-    LOGGER.warning("SPI slave reply timeout");
+    LOGGER.warning("SPI slave reply timeout cmd=" + String(pendingCmd));
     if (eventHandler != nullptr) {
         eventHandler(timeoutFrame);
     }
@@ -224,12 +222,13 @@ void InterChipHost::transferOnce(const SpiFrame *hostFrame) {
         return;
     }
 
-    SPI.beginTransaction(SPISettings(4000000, MSBFIRST, SPI_MODE0));
+    SPI.beginTransaction(SPISettings(500000, MSBFIRST, SPI_MODE0));
     digitalWrite(PIN_SPI_CS, LOW);
-    delayMicroseconds(5);
+    delayMicroseconds(50);
     SPI.transferBytes(tx, rx, SPI_MAX_FRAME);
     digitalWrite(PIN_SPI_CS, HIGH);
     SPI.endTransaction();
+    delayMicroseconds(kMinTransferGapUs);
 
     SpiFrame inbound;
     if (spiDecodeFrame(rx, SPI_MAX_FRAME, inbound)) {
@@ -252,10 +251,6 @@ void InterChipHost::pump() {
     }
 
     if (state == HostBringupNormal) {
-        if ((millis() - lastPongMs) >= kSilentWatchdogMs && lastPongMs != 0) {
-            LOGGER.warning("Slave silent, resetting");
-            enterReset();
-        }
         if ((millis() - lastPingMs) >= kPingPeriodMs) {
             lastPingMs = millis();
             enqueueInternal(SpiCmdPing, nullptr, 0, true);
@@ -282,7 +277,7 @@ void InterChipHost::pump() {
 
     const bool irqHigh = digitalRead(PIN_SPI_IRQ) == HIGH;
     const bool pollDue = (millis() - lastPollMs) >= kPollMs;
-    if (nextOut == nullptr && !hasPending && !irqHigh && !pollDue) {
+    if (nextOut == nullptr && !irqHigh && !pollDue) {
         return;
     }
     lastPollMs = millis();

@@ -3,6 +3,8 @@
 #include "Logger.h"
 
 #include <driver/spi_slave.h>
+#include <esp_attr.h>
+#include <esp_intr_alloc.h>
 #include <string.h>
 #include <time.h>
 #include <sys/time.h>
@@ -15,20 +17,20 @@ static void slaveSpiTask(void *arg) {
     (void)arg;
     for (;;) {
         INTER_CHIP_SLAVE.pump();
-        vTaskDelay(pdMS_TO_TICKS(5));
     }
 }
 
-static uint8_t dmaTx[SPI_MAX_FRAME] __attribute__((aligned(4)));
-static uint8_t dmaRx[SPI_MAX_FRAME] __attribute__((aligned(4)));
-static spi_slave_transaction_t slaveTransDesc;
-static bool transQueued = false;
+static DMA_ATTR uint8_t dmaTx[2][SPI_MAX_FRAME] __attribute__((aligned(4)));
+static DMA_ATTR uint8_t dmaRx[2][SPI_MAX_FRAME] __attribute__((aligned(4)));
+static spi_slave_transaction_t slaveTransDesc[2];
+static int fillSlot = 0;
+static int hardwareQueued = 0;
 
 void interChipSlaveLogHook(const char *line) {
     INTER_CHIP_SLAVE.enqueueLogLine(line);
 }
 
-void InterChipSlave::begin() {
+bool InterChipSlave::initializeBus() {
     pinMode(PIN_SPI_IRQ, OUTPUT);
     digitalWrite(PIN_SPI_IRQ, LOW);
 
@@ -39,6 +41,7 @@ void InterChipSlave::begin() {
     busConfig.quadwp_io_num = -1;
     busConfig.quadhd_io_num = -1;
     busConfig.max_transfer_sz = SPI_MAX_FRAME;
+    busConfig.intr_flags = ESP_INTR_FLAG_LEVEL3;
 
     spi_slave_interface_config_t slaveConfig = {};
     slaveConfig.spics_io_num = PIN_SPI_CS;
@@ -46,15 +49,27 @@ void InterChipSlave::begin() {
     slaveConfig.queue_size = 3;
     slaveConfig.mode = 0;
 
+    // Frames are larger than the 64-byte CPU SPI buffer, so DMA is required.
+    // Re-init after Zigbee.begin() so the radio cannot keep a dead DMA channel.
     const esp_err_t err = spi_slave_initialize(SPI2_HOST, &busConfig, &slaveConfig, SPI_DMA_CH_AUTO);
     if (err != ESP_OK) {
         LOGGER.error("SPI slave init failed");
-        return;
+        spiReady = false;
+        return false;
     }
     spiReady = true;
+    fillSlot = 0;
+    hardwareQueued = 0;
     memset(dmaTx, 0, sizeof(dmaTx));
     memset(dmaRx, 0, sizeof(dmaRx));
-    xTaskCreate(slaveSpiTask, "slaveSpi", 4096, nullptr, 1, nullptr);
+    return true;
+}
+
+void InterChipSlave::begin() {
+    if (!initializeBus()) {
+        return;
+    }
+    xTaskCreate(slaveSpiTask, "slaveSpi", 4096, nullptr, 10, nullptr);
 }
 
 void InterChipSlave::setSettingsHandler(SettingsFn handler) {
@@ -83,7 +98,7 @@ bool InterChipSlave::enqueueEvent(uint8_t cmd, const uint8_t *payload, uint16_t 
     return enqueueReply(cmd, 0, payload, length);
 }
 
-bool InterChipSlave::enqueueReply(uint8_t cmd, uint8_t seq, const uint8_t *payload, uint16_t length) {
+bool InterChipSlave::tryEnqueue(uint8_t cmd, uint8_t seq, const uint8_t *payload, uint16_t length) {
     if (length > SPI_MAX_PAYLOAD) {
         return false;
     }
@@ -109,6 +124,24 @@ bool InterChipSlave::enqueueReply(uint8_t cmd, uint8_t seq, const uint8_t *paylo
         return true;
     }
     return false;
+}
+
+void InterChipSlave::dropOldestLogRecord() {
+    for (int i = 0; i < kQueue; i++) {
+        if (outbound[i].used && outbound[i].frame.cmd == SpiEvtLogRecord) {
+            outbound[i].used = false;
+            updateIrq();
+            return;
+        }
+    }
+}
+
+bool InterChipSlave::enqueueReply(uint8_t cmd, uint8_t seq, const uint8_t *payload, uint16_t length) {
+    if (tryEnqueue(cmd, seq, payload, length)) {
+        return true;
+    }
+    dropOldestLogRecord();
+    return tryEnqueue(cmd, seq, payload, length);
 }
 
 void InterChipSlave::enqueueLogLine(const char *line) {
@@ -170,6 +203,7 @@ void InterChipSlave::updateIrq() {
             break;
         }
     }
+    pinMode(PIN_SPI_IRQ, OUTPUT);
     digitalWrite(PIN_SPI_IRQ, hasEvent ? HIGH : LOW);
 }
 
@@ -229,36 +263,48 @@ void InterChipSlave::handleHostFrame(const SpiFrame &frame) {
     }
 }
 
-void InterChipSlave::serviceSpi() {
-    if (!spiReady) {
-        return;
-    }
-    if (!transQueued) {
-        memset(dmaTx, 0, sizeof(dmaTx));
-        memset(dmaRx, 0, sizeof(dmaRx));
+void InterChipSlave::fillHardwareQueue() {
+    while (hardwareQueued < kHwSlots) {
+        const int slot = fillSlot;
+        memset(dmaTx[slot], 0, SPI_MAX_FRAME);
+        memset(dmaRx[slot], 0, SPI_MAX_FRAME);
         SpiFrame outgoing;
         if (takeOutbound(outgoing)) {
-            spiEncodeFrame(outgoing, dmaTx, sizeof(dmaTx));
+            spiEncodeFrame(outgoing, dmaTx[slot], SPI_MAX_FRAME);
         }
-        memset(&slaveTransDesc, 0, sizeof(slaveTransDesc));
-        slaveTransDesc.length = SPI_MAX_FRAME * 8;
-        slaveTransDesc.tx_buffer = dmaTx;
-        slaveTransDesc.rx_buffer = dmaRx;
-        if (spi_slave_queue_trans(SPI2_HOST, &slaveTransDesc, 0) == ESP_OK) {
-            transQueued = true;
+        memset(&slaveTransDesc[slot], 0, sizeof(slaveTransDesc[slot]));
+        slaveTransDesc[slot].length = SPI_MAX_FRAME * 8;
+        slaveTransDesc[slot].tx_buffer = dmaTx[slot];
+        slaveTransDesc[slot].rx_buffer = dmaRx[slot];
+        if (spi_slave_queue_trans(SPI2_HOST, &slaveTransDesc[slot], 0) != ESP_OK) {
+            return;
         }
+        fillSlot = (fillSlot + 1) % kHwSlots;
+        hardwareQueued++;
+    }
+}
+
+void InterChipSlave::serviceSpi() {
+    if (!spiReady) {
+        vTaskDelay(pdMS_TO_TICKS(5));
         return;
     }
+    fillHardwareQueue();
 
     spi_slave_transaction_t *done = nullptr;
-    if (spi_slave_get_trans_result(SPI2_HOST, &done, 0) != ESP_OK) {
+    if (spi_slave_get_trans_result(SPI2_HOST, &done, pdMS_TO_TICKS(20)) != ESP_OK) {
         return;
     }
-    transQueued = false;
-    SpiFrame inbound;
-    if (spiDecodeFrame(dmaRx, SPI_MAX_FRAME, inbound)) {
-        handleHostFrame(inbound);
+    if (hardwareQueued > 0) {
+        hardwareQueued--;
     }
+    if (done != nullptr && done->rx_buffer != nullptr) {
+        SpiFrame inbound;
+        if (spiDecodeFrame((const uint8_t *)done->rx_buffer, SPI_MAX_FRAME, inbound)) {
+            handleHostFrame(inbound);
+        }
+    }
+    fillHardwareQueue();
 }
 
 void InterChipSlave::applyDeferredSettings() {

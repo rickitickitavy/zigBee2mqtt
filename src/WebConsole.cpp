@@ -28,12 +28,7 @@ void WebConsole::begin() {
         [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
             (void)request;
             (void)total;
-            if (index == 0) {
-                requestBody = "";
-            }
-            for (size_t byteIndex = 0; byteIndex < len; byteIndex++) {
-                requestBody += (char)data[byteIndex];
-            }
+            appendRequestBody(data, len, index);
         }
     );
 
@@ -46,12 +41,20 @@ void WebConsole::begin() {
         [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
             (void)request;
             (void)total;
-            if (index == 0) {
-                requestBody = "";
-            }
-            for (size_t byteIndex = 0; byteIndex < len; byteIndex++) {
-                requestBody += (char)data[byteIndex];
-            }
+            appendRequestBody(data, len, index);
+        }
+    );
+
+    server.on("/api/zigbee", HTTP_GET, [this](AsyncWebServerRequest *request) { handleZigbeeGet(request); });
+    server.on(
+        "/api/zigbee",
+        HTTP_POST,
+        [this](AsyncWebServerRequest *request) { handleZigbeePost(request); },
+        nullptr,
+        [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+            (void)request;
+            (void)total;
+            appendRequestBody(data, len, index);
         }
     );
 
@@ -69,7 +72,28 @@ void WebConsole::begin() {
             uint8_t *data,
             size_t len,
             bool final
-        ) { handleOtaUpload(request, filename, index, data, len, final); }
+        ) { handleOtaUpload(request, filename, index, data, len, final, U_FLASH); }
+    );
+
+    server.on(
+        "/update/data",
+        HTTP_POST,
+        [this](AsyncWebServerRequest *request) { handleOtaDone(request); },
+        [this](
+            AsyncWebServerRequest *request,
+            const String &filename,
+            size_t index,
+            uint8_t *data,
+            size_t len,
+            bool final
+        ) {
+#ifdef U_FS
+            const int filesystemCommand = U_FS;
+#else
+            const int filesystemCommand = U_SPIFFS;
+#endif
+            handleOtaUpload(request, filename, index, data, len, final, filesystemCommand);
+        }
     );
 
     server.begin();
@@ -96,19 +120,21 @@ void WebConsole::handleWifiGet(AsyncWebServerRequest *request) {
     GlobalSettings *settings = settingsManager->getSettings();
     String json = "{";
     json += "\"bssid\":\"";
-    json += settings->wifi.bssid;
+    appendJsonEscaped(json, settings->wifi.bssid, sizeof(settings->wifi.bssid));
     json += "\",\"password\":\"";
-    json += settings->wifi.password;
+    appendJsonEscaped(json, settings->wifi.password, sizeof(settings->wifi.password));
     json += "\",\"deviceName\":\"";
-    json += settings->wifi.deviceName;
+    appendJsonEscaped(json, settings->wifi.deviceName, sizeof(settings->wifi.deviceName));
     json += "\",\"apIp\":\"";
-    json += settings->wifi.apIp;
+    appendJsonEscaped(json, settings->wifi.apIp, sizeof(settings->wifi.apIp));
     json += "\",\"mode\":\"";
     json += settings->wifi.mode == WifiSettingsModeSta ? "STA" : "AP";
     json += "\",\"otgEnabled\":";
     json += settings->wifi.otgEnabled ? "true" : "false";
     json += "}";
-    request->send(200, "application/json", json);
+    AsyncWebServerResponse *response = request->beginResponse(200, "application/json", json);
+    response->addHeader("Cache-Control", "no-store");
+    request->send(response);
 }
 
 void WebConsole::handleWifiPost(AsyncWebServerRequest *request) {
@@ -172,23 +198,25 @@ void WebConsole::handleMqttGet(AsyncWebServerRequest *request) {
     json += "\"enabled\":";
     json += settings->mqtt.enabled ? "true" : "false";
     json += ",\"server\":\"";
-    json += settings->mqtt.server;
+    appendJsonEscaped(json, settings->mqtt.server, sizeof(settings->mqtt.server));
     json += "\",\"port\":";
     json += String(settings->mqtt.port);
     json += ",\"username\":\"";
-    json += settings->mqtt.username;
+    appendJsonEscaped(json, settings->mqtt.username, sizeof(settings->mqtt.username));
     json += "\",\"password\":\"";
-    json += settings->mqtt.password;
+    appendJsonEscaped(json, settings->mqtt.password, sizeof(settings->mqtt.password));
     json += "\",\"clientId\":\"";
-    json += settings->mqtt.clientId;
+    appendJsonEscaped(json, settings->mqtt.clientId, sizeof(settings->mqtt.clientId));
     json += "\",\"baseTopic\":\"";
-    json += settings->mqtt.baseTopic;
+    appendJsonEscaped(json, settings->mqtt.baseTopic, sizeof(settings->mqtt.baseTopic));
     json += "\",\"reconnectIntervalMs\":";
     json += String((long)settings->mqtt.reconnectIntervalMs);
     json += ",\"clientTimeoutMs\":";
     json += String(settings->mqtt.clientTimeoutMs);
     json += "}";
-    request->send(200, "application/json", json);
+    AsyncWebServerResponse *response = request->beginResponse(200, "application/json", json);
+    response->addHeader("Cache-Control", "no-store");
+    request->send(response);
 }
 
 void WebConsole::handleMqttPost(AsyncWebServerRequest *request) {
@@ -253,6 +281,51 @@ void WebConsole::handleMqttPost(AsyncWebServerRequest *request) {
     request->send(200, "text/plain", "Saved. Device will restart to apply MQTT.");
 }
 
+void WebConsole::appendRequestBody(uint8_t *data, size_t len, size_t index) {
+    if (index == 0) {
+        requestBody = "";
+    }
+    for (size_t byteIndex = 0; byteIndex < len; byteIndex++) {
+        requestBody += (char)data[byteIndex];
+    }
+}
+
+void WebConsole::handleZigbeeGet(AsyncWebServerRequest *request) {
+    GlobalSettings *settings = settingsManager->getSettings();
+    String json = "{";
+    json += "\"channel\":";
+    json += String(settings->zigbee.channel);
+    json += ",\"permitJoinOnBootSec\":";
+    json += String(settings->zigbee.permitJoinOnBootSec);
+    json += "}";
+    AsyncWebServerResponse *response = request->beginResponse(200, "application/json", json);
+    response->addHeader("Cache-Control", "no-store");
+    request->send(response);
+}
+
+void WebConsole::handleZigbeePost(AsyncWebServerRequest *request) {
+    int channel = DEFAULT_ZIGBEE_CHANNEL;
+    int permitJoinOnBootSec = DEFAULT_PERMIT_JOIN_SEC;
+    if (!extractJsonInt(requestBody.c_str(), "channel", channel)
+        || !extractJsonInt(requestBody.c_str(), "permitJoinOnBootSec", permitJoinOnBootSec)) {
+        request->send(400, "text/plain", "Need channel, permitJoinOnBootSec");
+        return;
+    }
+    if (channel < 11 || channel > 26) {
+        request->send(400, "text/plain", "channel must be 11-26");
+        return;
+    }
+    if (permitJoinOnBootSec < 0 || permitJoinOnBootSec > 254) {
+        request->send(400, "text/plain", "permitJoinOnBootSec must be 0-254");
+        return;
+    }
+    GlobalSettings *settings = settingsManager->getSettings();
+    settings->zigbee.channel = (uint8_t)channel;
+    settings->zigbee.permitJoinOnBootSec = (uint8_t)permitJoinOnBootSec;
+    settingsManager->saveSetting(true);
+    request->send(200, "text/plain", "Saved. Device will restart to apply ZigBee.");
+}
+
 void WebConsole::handleLogGet(AsyncWebServerRequest *request) {
     String logText;
     LOGGER.copyRing(logText);
@@ -272,15 +345,17 @@ void WebConsole::handleOtaUpload(
     size_t index,
     uint8_t *data,
     size_t len,
-    bool final
+    bool final,
+    int command
 ) {
     (void)request;
     (void)filename;
     if (index == 0) {
         otaStarted = true;
         otaFailed = false;
-        LOGGER.info("HTTP OTA start");
-        if (!Update.begin(UPDATE_SIZE_UNKNOWN, U_FLASH)) {
+        otaCommand = command;
+        LOGGER.info(command == U_FLASH ? "HTTP OTA firmware start" : "HTTP OTA filesystem start");
+        if (!Update.begin(UPDATE_SIZE_UNKNOWN, command)) {
             LOGGER.error("HTTP OTA begin failed");
             otaFailed = true;
             return;
@@ -312,8 +387,13 @@ void WebConsole::handleOtaDone(AsyncWebServerRequest *request) {
         request->send(500, "text/plain", errorMessage);
         return;
     }
-    LOGGER.info("HTTP OTA finished");
+    LOGGER.info(otaCommand == U_FLASH ? "HTTP OTA firmware finished" : "HTTP OTA filesystem finished");
     otaStarted = false;
-    request->send(200, "text/plain", "Update written. Device will restart.");
+    request->send(
+        200,
+        "text/plain",
+        otaCommand == U_FLASH ? "Firmware written. Device will restart."
+                              : "Filesystem written. Device will restart."
+    );
     settingsManager->requestRestart();
 }

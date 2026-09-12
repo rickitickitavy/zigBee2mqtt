@@ -158,4 +158,5 @@ void SettingsManager::logSettings() {
     LOGGER.info("  mqtt server: " + String(settings.mqtt.server) + ":" + String(settings.mqtt.port));
     LOGGER.info("  mqtt base: " + String(settings.mqtt.baseTopic));
     LOGGER.info("  zigbee channel: " + String(settings.zigbee.channel));
+    LOGGER.info("  zigbee permitJoinOnBootSec: " + String(settings.zigbee.permitJoinOnBootSec));
 }

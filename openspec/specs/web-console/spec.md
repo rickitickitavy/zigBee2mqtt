@@ -27,7 +27,7 @@ The firmware MUST serve an HTTP web console on port 80 whenever Wi-Fi AP or STA 
 
 ### Requirement: Main navigation uses sidebar sections
 
-The console MUST present five main sections labeled Status, WiFi, ZigBee, Devices, and System as a left sidebar strip (horizontal folder strip on a narrow viewport). Selecting a main section MUST show that section’s panel and hide the others without a full page reload. Status, ZigBee, and Devices MUST render as empty placeholder panels in this change.
+The console MUST present six main sections labeled Status, WiFi, MQTT, ZigBee, Devices, and System as a left sidebar strip (horizontal folder strip on a narrow viewport). Selecting a main section MUST show that section’s panel and hide the others without a full page reload. Status and Devices MUST render as empty placeholder panels until those cards are implemented.
 
 #### Scenario: Switch main section
 
@@ -36,8 +36,22 @@ The console MUST present five main sections labeled Status, WiFi, ZigBee, Device
 
 #### Scenario: Placeholder tabs have no forms
 
-- **WHEN** the operator opens Status, ZigBee, or Devices
+- **WHEN** the operator opens Status or Devices
 - **THEN** the panel has no configuration controls and does not change device settings
+
+### Requirement: ZigBee tab edits the Zigbee group
+
+The ZigBee tab MUST show and allow saving CHANNEL and PERMIT_JOIN_ON_BOOT_SEC from the Zigbee group record. CHANNEL MUST be 11–26. PERMIT_JOIN_ON_BOOT_SEC MUST be 0–254. The page MUST load those values from `GET /api/zigbee` when the tab opens and on first page load, and MUST persist them with `POST /api/zigbee`. Saving MUST write EEPROM and restart so the host pushes settings to the radio slave. Reset MUST reload stored values and MUST NOT write settings.
+
+#### Scenario: Load Zigbee settings
+
+- **WHEN** the operator opens the ZigBee section
+- **THEN** CHANNEL and PERMIT_JOIN_ON_BOOT_SEC show the values stored on the host
+
+#### Scenario: Save Zigbee settings
+
+- **WHEN** the operator sets a valid channel and permit-join duration and saves
+- **THEN** the Zigbee group is persisted and the device restarts to apply the radio settings
 
 ### Requirement: Settings are stored in groups
 
@@ -114,9 +128,46 @@ The Update tab MUST show the running firmware version and accept a firmware bina
 - **WHEN** the upload is aborted or the image is rejected
 - **THEN** the currently running firmware remains unchanged and the page reports the failure
 
+### Requirement: Update tab can flash the web filesystem
+
+The System → Update tab SHALL offer a filesystem upload (LittleFS image) in addition to the firmware binary upload. A successful filesystem write SHALL replace the on-device web files and SHALL NOT replace the application firmware slot.
+
+#### Scenario: Filesystem form present
+
+- **WHEN** the operator opens System → Update
+- **THEN** the page shows a filesystem upload control as well as the firmware upload control
+
+#### Scenario: Successful filesystem upload
+
+- **WHEN** the operator uploads a valid LittleFS image from that form
+- **THEN** the device stores that image as the web filesystem and the console HTML/CSS update is what the next page load uses
+
+### Requirement: MQTT card shows stored settings
+
+When the operator opens the MQTT section, each MQTT field SHALL display the value currently stored on the host. Empty stored fields MAY stay empty; the form SHALL NOT stay blank when the device has MQTT settings.
+
+#### Scenario: Open MQTT with saved server
+
+- **WHEN** the host has a stored MQTT server and the operator opens the MQTT card
+- **THEN** the server field (and the other MQTT fields) show the stored values
+
+### Requirement: WiFi card scrolls and keeps Save and Reset reachable
+
+The WiFi section SHALL scroll when its fields do not fit the main panel. Save and Reset SHALL remain usable (visible after scroll or pinned at the bottom of the card). Reset SHALL reload the form from the device without writing new settings.
+
+#### Scenario: Tall WiFi card
+
+- **WHEN** the WiFi fields do not fit the viewport
+- **THEN** the operator can scroll the WiFi card and reach Save and Reset
+
+#### Scenario: Reset reloads WiFi
+
+- **WHEN** the operator changes a WiFi field and then clicks Reset
+- **THEN** the fields return to the last stored values from the device
+
 ### Requirement: Log tab shows recent firmware logs
 
-The Log tab MUST display recent firmware log lines that are also emitted on USB when console logging is enabled. The page MUST be able to refresh that list without leaving the Log tab. Older lines MAY drop when the in-memory buffer is full.
+The Log tab MUST display recent firmware log lines that are also emitted on USB when console logging is enabled. The page MUST be able to refresh that list without leaving the Log tab. Older lines MAY drop when the in-memory buffer is full. The Refresh control MUST stay visible without a second page scroller hiding it, MUST be left-aligned, and MUST use a compact content width (not a full-width bar).
 
 #### Scenario: New log line appears
 
@@ -127,3 +178,8 @@ The Log tab MUST display recent firmware log lines that are also emitted on USB 
 
 - **WHEN** a log line is emitted
 - **THEN** it still appears on the USB serial console when USB debug logging is enabled
+
+#### Scenario: Refresh stays visible
+
+- **WHEN** the operator opens System → Log
+- **THEN** Refresh is visible, left-aligned, and not stretched across the card

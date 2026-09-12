@@ -16,12 +16,16 @@ private:
     String requestBody;
     bool otaStarted = false;
     bool otaFailed = false;
+    int otaCommand = 0;
 
     void handleRoot(AsyncWebServerRequest *request);
     void handleWifiGet(AsyncWebServerRequest *request);
     void handleWifiPost(AsyncWebServerRequest *request);
     void handleMqttGet(AsyncWebServerRequest *request);
     void handleMqttPost(AsyncWebServerRequest *request);
+    void handleZigbeeGet(AsyncWebServerRequest *request);
+    void handleZigbeePost(AsyncWebServerRequest *request);
+    void appendRequestBody(uint8_t *data, size_t len, size_t index);
     void handleLogGet(AsyncWebServerRequest *request);
     void handleVersionGet(AsyncWebServerRequest *request);
     void handleOtaUpload(
@@ -30,7 +34,8 @@ private:
         size_t index,
         uint8_t *data,
         size_t len,
-        bool final
+        bool final,
+        int command
     );
     void handleOtaDone(AsyncWebServerRequest *request);
 };
