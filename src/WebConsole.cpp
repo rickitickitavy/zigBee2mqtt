@@ -58,6 +58,76 @@ void WebConsole::begin() {
         }
     );
 
+    server.on(
+        "/api/hardware",
+        HTTP_GET,
+        [this](AsyncWebServerRequest *request) { handleHardwareGet(request); }
+    );
+    server.on(
+        "/api/hardware",
+        HTTP_POST,
+        [this](AsyncWebServerRequest *request) { handleHardwarePost(request); },
+        nullptr,
+        [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+            (void)request;
+            (void)total;
+            appendRequestBody(data, len, index);
+        }
+    );
+    server.on(
+        "/api/hw",
+        HTTP_GET,
+        [this](AsyncWebServerRequest *request) { handleHardwareGet(request); }
+    );
+
+    server.on("/api/devices/store", HTTP_GET, [this](AsyncWebServerRequest *request) { handleDevicesStoreGet(request); });
+    server.on("/api/devices/found", HTTP_GET, [this](AsyncWebServerRequest *request) { handleDevicesFoundGet(request); });
+    server.on(
+        "/api/devices/search/stop",
+        HTTP_POST,
+        [this](AsyncWebServerRequest *request) { handleDevicesSearchStopPost(request); },
+        nullptr,
+        [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+            (void)request;
+            (void)total;
+            appendRequestBody(data, len, index);
+        }
+    );
+    server.on(
+        "/api/devices/search",
+        HTTP_POST,
+        [this](AsyncWebServerRequest *request) { handleDevicesSearchPost(request); },
+        nullptr,
+        [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+            (void)request;
+            (void)total;
+            appendRequestBody(data, len, index);
+        }
+    );
+    server.on("/api/devices", HTTP_GET, [this](AsyncWebServerRequest *request) { handleDevicesGet(request); });
+    server.on(
+        "/api/devices",
+        HTTP_POST,
+        [this](AsyncWebServerRequest *request) { handleDevicesPost(request); },
+        nullptr,
+        [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+            (void)request;
+            (void)total;
+            appendRequestBody(data, len, index);
+        }
+    );
+    server.on(
+        "/api/devices",
+        HTTP_DELETE,
+        [this](AsyncWebServerRequest *request) { handleDevicesDelete(request); },
+        nullptr,
+        [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+            (void)request;
+            (void)total;
+            appendRequestBody(data, len, index);
+        }
+    );
+
     server.on("/api/log", HTTP_GET, [this](AsyncWebServerRequest *request) { handleLogGet(request); });
     server.on("/api/version", HTTP_GET, [this](AsyncWebServerRequest *request) { handleVersionGet(request); });
 
@@ -188,7 +258,7 @@ void WebConsole::handleWifiPost(AsyncWebServerRequest *request) {
     settings->wifi.apIp[sizeof(settings->wifi.apIp) - 1] = '\0';
     settings->wifi.mode = modeText == "STA" ? WifiSettingsModeSta : WifiSettingsModeAp;
     settings->wifi.otgEnabled = otgEnabled;
-    settingsManager->saveSetting(true);
+    settingsManager->saveMain(true);
     request->send(200, "text/plain", "Saved. Device will restart to apply Wi-Fi.");
 }
 
@@ -277,7 +347,7 @@ void WebConsole::handleMqttPost(AsyncWebServerRequest *request) {
     settings->mqtt.clientId[sizeof(settings->mqtt.clientId) - 1] = '\0';
     strncpy(settings->mqtt.baseTopic, baseTopic.c_str(), sizeof(settings->mqtt.baseTopic) - 1);
     settings->mqtt.baseTopic[sizeof(settings->mqtt.baseTopic) - 1] = '\0';
-    settingsManager->saveSetting(true);
+    settingsManager->saveMain(true);
     request->send(200, "text/plain", "Saved. Device will restart to apply MQTT.");
 }
 
@@ -322,8 +392,179 @@ void WebConsole::handleZigbeePost(AsyncWebServerRequest *request) {
     GlobalSettings *settings = settingsManager->getSettings();
     settings->zigbee.channel = (uint8_t)channel;
     settings->zigbee.permitJoinOnBootSec = (uint8_t)permitJoinOnBootSec;
-    settingsManager->saveSetting(true);
+    settingsManager->saveMain(true);
     request->send(200, "text/plain", "Saved. Device will restart to apply ZigBee.");
+}
+
+void WebConsole::setDeviceOnlineHandler(WebConsole::DeviceOnlineFn handler) {
+    isDeviceOnline = handler;
+}
+
+void WebConsole::setDevicesFileHandler(WebConsole::DevicesFileFn handler) {
+    devicesFileJson = handler;
+}
+
+void WebConsole::setHardwareApplyHandler(WebConsole::HardwareApplyFn handler) {
+    applyHardware = handler;
+}
+
+void WebConsole::handleHardwareGet(AsyncWebServerRequest *request) {
+    const uint32_t speedHz = settingsManager->spiSpeedHz();
+    LOGGER.info("Hardware GET spiSpeedHz=" + String((unsigned long)speedHz));
+    String json = "{\"spiSpeedHz\":";
+    json += String((unsigned long)speedHz);
+    json += "}";
+    request->send(200, "application/json", json);
+}
+
+void WebConsole::handleHardwarePost(AsyncWebServerRequest *request) {
+    int spiSpeedHz = DEFAULT_SPI_SPEED_HZ;
+    if (!extractJsonInt(requestBody.c_str(), "spiSpeedHz", spiSpeedHz)) {
+        request->send(400, "text/plain", "Need spiSpeedHz");
+        return;
+    }
+    const uint32_t clamped = SettingsManager::clampSpiSpeedHz((uint32_t)spiSpeedHz);
+    if (clamped != (uint32_t)spiSpeedHz) {
+        request->send(400, "text/plain", "spiSpeedHz must be 100000-40000000");
+        return;
+    }
+    settingsManager->setSpiSpeedHz(clamped);
+    settingsManager->saveMain(false);
+    if (applyHardware != nullptr) {
+        applyHardware(clamped);
+    }
+    request->send(200, "text/plain", "Saved. SPI speed is active now.");
+}
+
+void WebConsole::setDeviceServices(
+    FoundDeviceList *foundList,
+    WebConsole::SearchStartFn startSearchFn,
+    WebConsole::SearchStopFn stopSearchFn,
+    WebConsole::DeviceUpsertedFn upserted,
+    WebConsole::DeviceRemovedFn removed
+) {
+    foundDevices = foundList;
+    startSearch = startSearchFn;
+    stopSearch = stopSearchFn;
+    onDeviceUpserted = upserted;
+    onDeviceRemoved = removed;
+}
+
+void WebConsole::handleDevicesGet(AsyncWebServerRequest *request) {
+    DeviceTopicMap *deviceMap = settingsManager->deviceMap();
+    String json = deviceMap->listJson(isDeviceOnline);
+    AsyncWebServerResponse *response = request->beginResponse(200, "application/json", json);
+    response->addHeader("Cache-Control", "no-store");
+    request->send(response);
+}
+
+void WebConsole::handleDevicesPost(AsyncWebServerRequest *request) {
+    String ieeeText;
+    String friendlyName;
+    String stateTopic;
+    String commandTopic;
+    String availability;
+    if (!extractJsonString(requestBody.c_str(), "ieee", ieeeText)) {
+        request->send(400, "text/plain", "Need ieee");
+        return;
+    }
+    extractJsonString(requestBody.c_str(), "name", friendlyName);
+    extractJsonString(requestBody.c_str(), "friendlyName", friendlyName);
+    extractJsonString(requestBody.c_str(), "state", stateTopic);
+    extractJsonString(requestBody.c_str(), "command", commandTopic);
+    extractJsonString(requestBody.c_str(), "availability", availability);
+    int parsedChannels = DEVICE_CHANNEL_COUNT_DEFAULT;
+    if (!extractJsonInt(requestBody.c_str(), "channels", parsedChannels)) {
+        parsedChannels = DEVICE_CHANNEL_COUNT_DEFAULT;
+    }
+    if (friendlyName.length() == 0) {
+        request->send(400, "text/plain", "Need friendly name");
+        return;
+    }
+    uint8_t ieee[8];
+    DeviceTopicMap *deviceMap = settingsManager->deviceMap();
+    if (!deviceMap->parseIeee(ieeeText.c_str(), ieee)) {
+        request->send(400, "text/plain", "Bad IEEE");
+        return;
+    }
+    DeviceTopicEntry *entry = deviceMap->upsert(
+        ieee,
+        friendlyName.c_str(),
+        stateTopic.c_str(),
+        commandTopic.c_str(),
+        availability.c_str(),
+        DeviceTopicMap::normalizeChannelCount(parsedChannels)
+    );
+    if (entry == nullptr) {
+        request->send(400, "text/plain", "Device map full");
+        return;
+    }
+    if (foundDevices != nullptr) {
+        foundDevices->removeIeee(ieee);
+    }
+    if (onDeviceUpserted != nullptr && !onDeviceUpserted(entry)) {
+        request->send(503, "text/plain", "Slave is not ready to store the device");
+        return;
+    }
+    request->send(200, "text/plain", "Saved");
+}
+
+void WebConsole::handleDevicesDelete(AsyncWebServerRequest *request) {
+    String ieeeText;
+    if (!extractJsonString(requestBody.c_str(), "ieee", ieeeText)) {
+        request->send(400, "text/plain", "Need ieee");
+        return;
+    }
+    uint8_t ieee[8];
+    DeviceTopicMap *deviceMap = settingsManager->deviceMap();
+    if (!deviceMap->parseIeee(ieeeText.c_str(), ieee)) {
+        request->send(400, "text/plain", "Bad IEEE");
+        return;
+    }
+    if (!deviceMap->removeByIeee(ieee)) {
+        request->send(404, "text/plain", "Device not found");
+        return;
+    }
+    if (onDeviceRemoved != nullptr && !onDeviceRemoved(ieee)) {
+        request->send(503, "text/plain", "Slave is not ready to store the device");
+        return;
+    }
+    request->send(200, "text/plain", "Deleted");
+}
+
+void WebConsole::handleDevicesFoundGet(AsyncWebServerRequest *request) {
+    if (foundDevices == nullptr) {
+        request->send(200, "application/json", "[]");
+        return;
+    }
+    String json = foundDevices->listJson(settingsManager->deviceMap());
+    AsyncWebServerResponse *response = request->beginResponse(200, "application/json", json);
+    response->addHeader("Cache-Control", "no-store");
+    request->send(response);
+}
+
+void WebConsole::handleDevicesSearchPost(AsyncWebServerRequest *request) {
+    if (startSearch == nullptr || !startSearch()) {
+        LOGGER.warning("Device search did not start");
+        request->send(500, "text/plain", "Slave is not ready for pairing");
+        return;
+    }
+    LOGGER.info("Device search started");
+    request->send(200, "text/plain", "Search started");
+}
+
+void WebConsole::handleDevicesStoreGet(AsyncWebServerRequest *request) {
+    String json = devicesFileJson != nullptr ? devicesFileJson() : String("[]");
+    AsyncWebServerResponse *response = request->beginResponse(200, "application/json", json);
+    response->addHeader("Cache-Control", "no-store");
+    request->send(response);
+}
+
+void WebConsole::handleDevicesSearchStopPost(AsyncWebServerRequest *request) {
+    if (stopSearch != nullptr) {
+        stopSearch();
+    }
+    request->send(200, "text/plain", "Search stopped");
 }
 
 void WebConsole::handleLogGet(AsyncWebServerRequest *request) {

@@ -54,7 +54,7 @@ void SerialCli::handleLine(const String &line) {
         return;
     }
     if (trimmed == "save") {
-        settingsManager->saveSetting(true);
+        settingsManager->saveMain(true);
         return;
     }
     if (trimmed == "log") {

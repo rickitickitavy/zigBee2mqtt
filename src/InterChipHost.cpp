@@ -38,6 +38,18 @@ void InterChipHost::setSettingsSource(uint8_t channel, uint8_t permitJoinSecValu
     permitJoinSec = permitJoinSecValue;
 }
 
+void InterChipHost::setClockHz(uint32_t speedHz) {
+    if (speedHz < SPI_SPEED_HZ_MIN || speedHz > SPI_SPEED_HZ_MAX) {
+        speedHz = DEFAULT_SPI_SPEED_HZ;
+    }
+    spiClockHz = speedHz;
+    LOGGER.info("SPI clock " + String((unsigned long)spiClockHz) + " Hz");
+}
+
+uint32_t InterChipHost::clockHz() const {
+    return spiClockHz;
+}
+
 void InterChipHost::setEventHandler(EventFn handler) {
     eventHandler = handler;
 }
@@ -55,8 +67,7 @@ bool InterChipHost::tryEnqueue(uint8_t cmd, const uint8_t *payload, uint16_t len
         && cmd != SpiCmdGetStatus && cmd != SpiCmdReadEvent) {
         return false;
     }
-    enqueueInternal(cmd, payload, length, commandExpectsReply(cmd));
-    return true;
+    return enqueueInternal(cmd, payload, length, commandExpectsReply(cmd));
 }
 
 void InterChipHost::requestTimeSync() {
@@ -73,9 +84,9 @@ void InterChipHost::requestTimeSync() {
     enqueueInternal(SpiCmdTimeSync, payload, 4, true);
 }
 
-void InterChipHost::enqueueInternal(uint8_t cmd, const uint8_t *payload, uint16_t length, bool expectReply) {
+bool InterChipHost::enqueueInternal(uint8_t cmd, const uint8_t *payload, uint16_t length, bool expectReply) {
     if (length > SPI_MAX_PAYLOAD) {
-        return;
+        return false;
     }
     for (int i = 0; i < kOutQueue; i++) {
         if (outbound[i].used) {
@@ -92,9 +103,10 @@ void InterChipHost::enqueueInternal(uint8_t cmd, const uint8_t *payload, uint16_
         if (length > 0 && payload != nullptr) {
             memcpy(outbound[i].frame.payload, payload, length);
         }
-        return;
+        return true;
     }
     LOGGER.warning("SPI host outbound queue full");
+    return false;
 }
 
 void InterChipHost::enterReset() {
@@ -102,6 +114,7 @@ void InterChipHost::enterReset() {
     settingsQueued = false;
     settingsRetries = 0;
     hasPending = false;
+    pingTimeouts = 0;
     pulseResetStart();
 }
 
@@ -149,17 +162,27 @@ void InterChipHost::maybePushSettings() {
 
 void InterChipHost::handleInbound(const SpiFrame &frame) {
     lastPongMs = millis();
+    pingTimeouts = 0;
     if (hasPending && frame.seq == pendingSeq) {
         hasPending = false;
     }
-    if (frame.cmd == SpiEvtSlaveReady && state == HostBringupWaitReady) {
+    if (frame.cmd == SpiEvtSlaveReady) {
         LOGGER.info("SLAVE_READY");
-        maybePushSettings();
+        if (state == HostBringupWaitReady) {
+            maybePushSettings();
+        } else if (state == HostBringupNormal && lastSettingsOkMs != 0
+            && (millis() - lastSettingsOkMs) >= 8000UL) {
+            LOGGER.warning("Slave ready after drop; re-pushing settings");
+            settingsQueued = false;
+            hasPending = false;
+            maybePushSettings();
+        }
     }
     if (frame.cmd == SpiEvtSettingsOk) {
         state = HostBringupNormal;
         lastPongMs = millis();
         lastPingMs = millis();
+        lastSettingsOkMs = millis();
         LOGGER.info("Slave settings applied, normal work");
     }
     if (frame.cmd == SpiEvtLogRecord && frame.length > 0) {
@@ -199,6 +222,15 @@ void InterChipHost::emitLocalTimeout() {
     }
     if (state == HostBringupWaitReady) {
         enterReset();
+        return;
+    }
+    if (state == HostBringupNormal && pendingCmd == SpiCmdPing) {
+        pingTimeouts++;
+        if (pingTimeouts >= 3) {
+            LOGGER.warning("SPI ping lost, resetting slave");
+            pingTimeouts = 0;
+            enterReset();
+        }
     }
 }
 
@@ -222,7 +254,7 @@ void InterChipHost::transferOnce(const SpiFrame *hostFrame) {
         return;
     }
 
-    SPI.beginTransaction(SPISettings(500000, MSBFIRST, SPI_MODE0));
+    SPI.beginTransaction(SPISettings((int)spiClockHz, MSBFIRST, SPI_MODE0));
     digitalWrite(PIN_SPI_CS, LOW);
     delayMicroseconds(50);
     SPI.transferBytes(tx, rx, SPI_MAX_FRAME);

@@ -1,9 +1,10 @@
 #pragma once
 
 #include "Defines.h"
+#include <stddef.h>
 #include <stdint.h>
 
-#define GLOBAL_CURRENT_SETTINGS_VERSION 4
+#define GLOBAL_CURRENT_SETTINGS_VERSION 5
 #define GLOBAL_SETTINGS_MARKER_0 0x5A
 #define GLOBAL_SETTINGS_MARKER_1 0x32
 #define GLOBAL_SETTINGS_MARKER_2 0x4D
@@ -46,8 +47,21 @@ struct DeviceTopicEntry {
     char stateTopic[64];
     char commandTopic[64];
     char availabilityTopic[64];
+    uint8_t channelCount;
     uint8_t used;
 };
+
+struct SettingsMainCore {
+    char initMarker[4];
+    unsigned char version;
+    WifiSettings wifi;
+    MqttSettings mqtt;
+    ZigbeeSettings zigbee;
+};
+
+constexpr size_t kSettingsMainUsed =
+    offsetof(SettingsMainCore, zigbee) + sizeof(ZigbeeSettings);
+constexpr size_t kSettingsAlignPad = (128u - (kSettingsMainUsed % 128u)) % 128u;
 
 struct GlobalSettings {
     char initMarker[4];
@@ -55,5 +69,10 @@ struct GlobalSettings {
     WifiSettings wifi;
     MqttSettings mqtt;
     ZigbeeSettings zigbee;
-    DeviceTopicEntry devices[DEVICE_MAP_SLOTS];
+    uint8_t alignPad[kSettingsAlignPad];
+    uint8_t reserved[256];
 };
+
+static_assert(sizeof(GlobalSettings) <= 4096, "GlobalSettings main block must fit in EEPROM");
+static_assert(offsetof(GlobalSettings, reserved) % 128u == 0, "reserved must start on a 128-byte boundary");
+static_assert(DEVICE_MAP_SLOTS == 128, "device list must provide 128 slots");

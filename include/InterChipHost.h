@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include "Defines.h"
 #include "SpiProtocol.h"
 #include "DeviceTopicMap.h"
 
@@ -14,6 +15,8 @@ public:
     bool isNormal() const;
     HostBringupState bringupState() const;
     void setSettingsSource(uint8_t channel, uint8_t permitJoinSec);
+    void setClockHz(uint32_t speedHz);
+    uint32_t clockHz() const;
     void setEventHandler(EventFn handler);
     void requestTimeSync();
 
@@ -40,12 +43,14 @@ private:
     uint8_t nextSeq = 1;
     uint8_t zigbeeChannel = 15;
     uint8_t permitJoinSec = 0;
+    volatile uint32_t spiClockHz = DEFAULT_SPI_SPEED_HZ;
     unsigned long resetStartedMs = 0;
     unsigned long waitStartedMs = 0;
     unsigned long lastPollMs = 0;
     unsigned long lastPingMs = 0;
     unsigned long lastPongMs = 0;
     unsigned long lastTimeSyncMs = 0;
+    unsigned long lastSettingsOkMs = 0;
     bool resetAsserting = false;
     bool settingsQueued = false;
     uint8_t settingsRetries = 0;
@@ -53,10 +58,11 @@ private:
     uint8_t pendingCmd = 0;
     unsigned long pendingDeadlineMs = 0;
     bool hasPending = false;
+    uint8_t pingTimeouts = 0;
 
     void pulseResetStart();
     void pulseResetFinishIfDue();
-    void enqueueInternal(uint8_t cmd, const uint8_t *payload, uint16_t length, bool expectReply);
+    bool enqueueInternal(uint8_t cmd, const uint8_t *payload, uint16_t length, bool expectReply);
     void transferOnce(const SpiFrame *hostFrame);
     void handleInbound(const SpiFrame &frame);
     void emitLocalTimeout();

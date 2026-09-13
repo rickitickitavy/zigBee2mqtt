@@ -15,12 +15,14 @@ struct BoundZigbeeDevice {
     char manufacturer[32];
     char model[32];
     bool occupied;
+    bool pairingOffered;
 };
 
 class ZigbeeCoordinator {
 public:
-    using LightStateFn = void (*)(bool on, const uint8_t ieee[8], uint8_t endpoint, uint16_t shortAddr);
+    using LightStateFn = void (*)(const char *message, const uint8_t ieee[8], uint8_t endpoint, uint16_t shortAddr);
     using DeviceBoundFn = void (*)(const BoundZigbeeDevice *device);
+    using RegistryChangedFn = void (*)();
 
     ZigbeeCoordinator();
 
@@ -32,20 +34,71 @@ public:
     void refreshBoundDevices();
     void dispatch();
     String devicesJson(DeviceTopicMap *topicMap);
-    bool controlOnOff(const uint8_t ieee[8], const char *command);
+    bool controlOnOff(const uint8_t ieee[8], const char *command, uint8_t endpoint);
     BoundZigbeeDevice *findByIeee(const uint8_t ieee[8]);
     BoundZigbeeDevice *findByShortAddr(uint16_t shortAddr);
     void setLightStateHandler(LightStateFn handler);
     void setDeviceBoundHandler(DeviceBoundFn handler);
+    void setRegistryChangedHandler(RegistryChangedFn handler);
     void handleLightStateWithSource(bool on, uint8_t endpoint, esp_zb_zcl_addr_t source);
+    void handleIasZoneStatus(const esp_zb_zcl_ias_zone_status_change_notification_message_t *message);
+    void handleIasZoneEnroll(ZigbeeEP *endpoint, const esp_zb_zcl_ias_zone_enroll_request_message_t *message);
+    void handleAttributeReport(
+        uint16_t clusterId,
+        const esp_zb_zcl_attribute_t *attribute,
+        uint8_t srcEndpoint,
+        esp_zb_zcl_addr_t srcAddress
+    );
+    void setRegisteredMap(DeviceTopicMap *deviceMap);
+    void clearRegisteredDevices();
+    void upsertRegisteredDevice(const DeviceTopicEntry *entry);
+    void removeRegisteredDevice(const uint8_t ieee[8]);
+    void markRegistryReady();
+    bool isRegistered(const uint8_t ieee[8]) const;
+    const char *registeredName(const uint8_t ieee[8]) const;
 
     static constexpr int kMaxBoundDevices = 16;
 
 private:
-    ZigbeeSwitch zigbeeSwitch;
+    class CoordinatorSwitch : public ZigbeeSwitch {
+    public:
+        CoordinatorSwitch(uint8_t endpoint, ZigbeeCoordinator *owner);
+
+    private:
+        ZigbeeCoordinator *owner;
+        void zbIASZoneStatusChangeNotification(
+            const esp_zb_zcl_ias_zone_status_change_notification_message_t *message
+        ) override;
+        void zbIASZoneEnrollRequest(const esp_zb_zcl_ias_zone_enroll_request_message_t *message) override;
+    };
+
+    class IasCieEndpoint : public ZigbeeEP {
+    public:
+        IasCieEndpoint(uint8_t endpoint, ZigbeeCoordinator *owner);
+
+    private:
+        ZigbeeCoordinator *owner;
+        void zbAttributeRead(
+            uint16_t clusterId,
+            const esp_zb_zcl_attribute_t *attribute,
+            uint8_t srcEndpoint,
+            esp_zb_zcl_addr_t srcAddress
+        ) override;
+        void zbIASZoneStatusChangeNotification(
+            const esp_zb_zcl_ias_zone_status_change_notification_message_t *message
+        ) override;
+        void zbIASZoneEnrollRequest(const esp_zb_zcl_ias_zone_enroll_request_message_t *message) override;
+    };
+
+    CoordinatorSwitch zigbeeSwitch;
+    IasCieEndpoint iasCie;
     BoundZigbeeDevice boundDevices[kMaxBoundDevices];
+    DeviceTopicMap *registeredMap = nullptr;
+    uint8_t nextIasZoneId = 1;
     LightStateFn lightStateHandler = nullptr;
     DeviceBoundFn deviceBoundHandler = nullptr;
+    RegistryChangedFn registryChangedHandler = nullptr;
+    bool registryReady = false;
     unsigned long lastRefreshMs = 0;
     unsigned long pairingUntilMs = 0;
     unsigned long pairingLedToggleMs = 0;
@@ -56,5 +109,10 @@ private:
     void stopPairingWindow();
     void updatePairingLed();
     void storeBoundDevice(zb_device_params_t *device);
+    void refreshRegisteredShorts();
     void resolveIeeeFromSource(esp_zb_zcl_addr_t source, uint8_t ieee[8], uint16_t *shortAddr);
+    void rememberShortIeee(uint16_t shortAddr, const uint8_t ieee[8], uint8_t endpoint);
+    void adoptReportIdentity(const uint8_t ieee[8], uint16_t shortAddr, uint8_t endpoint);
+    void offerPairingIfNeeded(const uint8_t ieee[8]);
+    bool migrateRegisteredIeee(const uint8_t previousIeee[8], const uint8_t nextIeee[8]);
 };

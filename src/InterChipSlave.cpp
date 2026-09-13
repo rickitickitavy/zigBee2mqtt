@@ -65,6 +65,33 @@ bool InterChipSlave::initializeBus() {
     return true;
 }
 
+void InterChipSlave::setPumpPaused(bool paused) {
+    pumpPaused = paused;
+}
+
+void InterChipSlave::requestDeviceDump() {
+    if (deviceDumpPending) {
+        return;
+    }
+    deviceDumpPending = true;
+    deviceDumpHeaderSent = false;
+    deviceDumpIndex = 0;
+}
+
+void InterChipSlave::resumeAfterRadioPause() {
+    if (spiReady) {
+        spi_slave_transaction_t *done = nullptr;
+        while (spi_slave_get_trans_result(SPI2_HOST, &done, 0) == ESP_OK) {
+        }
+    }
+    hardwareQueued = 0;
+    fillSlot = 0;
+    pumpPaused = false;
+    requestDeviceDump();
+    const int storedCount = deviceMapSource != nullptr ? deviceMapSource->usedCount() : 0;
+    LOGGER.info("SPI slave pump resumed after radio start; sending " + String(storedCount) + " stored device(s)");
+}
+
 void InterChipSlave::begin() {
     if (!initializeBus()) {
         return;
@@ -84,6 +111,118 @@ void InterChipSlave::setOnOffHandler(OnOffFn handler) {
     onOffHandler = handler;
 }
 
+void InterChipSlave::setDeviceSyncHandler(DeviceSyncFn handler) {
+    deviceSyncHandler = handler;
+}
+
+void InterChipSlave::setDeviceMapSource(DeviceTopicMap *deviceMap) {
+    deviceMapSource = deviceMap;
+}
+
+void InterChipSlave::setDevicesFileSource(DevicesFileFn handler) {
+    devicesFileSource = handler;
+}
+
+void InterChipSlave::requestDevicesFileDump() {
+    fileDumpPending = true;
+    fileDumpStarted = false;
+    fileDumpOffset = 0;
+    fileDumpText = "";
+}
+
+void InterChipSlave::pumpDevicesFileDump() {
+    if (!fileDumpPending) {
+        return;
+    }
+    if (deviceDumpPending) {
+        return;
+    }
+    if (!fileDumpStarted) {
+        fileDumpText = devicesFileSource != nullptr ? devicesFileSource() : String("[]");
+        fileDumpOffset = 0;
+        fileDumpStarted = true;
+    }
+    uint8_t payload[SPI_MAX_PAYLOAD];
+    const int totalLength = fileDumpText.length();
+    const int remaining = totalLength - fileDumpOffset;
+    const int chunkLength = remaining > (int)SPI_FILE_CHUNK_MAX ? (int)SPI_FILE_CHUNK_MAX : remaining;
+    uint8_t flags = 0;
+    if (fileDumpOffset == 0) {
+        flags |= SPI_FILE_FIRST;
+    }
+    if (fileDumpOffset + chunkLength >= totalLength) {
+        flags |= SPI_FILE_LAST;
+    }
+    payload[0] = flags;
+    if (chunkLength > 0) {
+        memcpy(payload + 1, fileDumpText.c_str() + fileDumpOffset, (size_t)chunkLength);
+    }
+    const uint16_t frameLength = (uint16_t)(1 + chunkLength);
+    bool queued = tryEnqueue(SpiEvtDevicesFile, 0, payload, frameLength);
+    if (!queued) {
+        while (dropOldestLogRecord()) {
+            queued = tryEnqueue(SpiEvtDevicesFile, 0, payload, frameLength);
+            if (queued) {
+                break;
+            }
+        }
+    }
+    if (!queued) {
+        return;
+    }
+    fileDumpOffset += chunkLength;
+    if ((flags & SPI_FILE_LAST) != 0) {
+        fileDumpPending = false;
+        fileDumpText = "";
+    }
+}
+
+void InterChipSlave::pumpDeviceDump() {
+    if (!deviceDumpPending || deviceMapSource == nullptr) {
+        return;
+    }
+    uint8_t payload[SPI_DEVICE_SYNC_ENTRY_LEN];
+    if (!deviceDumpHeaderSent) {
+        payload[0] = SPI_DEVICE_SYNC_RESET;
+        payload[1] = (uint8_t)deviceMapSource->usedCount();
+        if (!enqueueDeviceMap(payload, 2)) {
+            return;
+        }
+        deviceDumpHeaderSent = true;
+        deviceDumpIndex = 0;
+        LOGGER.info("Dumping " + String((int)payload[1]) + " device(s) to host");
+    }
+
+    while (true) {
+        const int slotIndex = deviceMapSource->nextUsedIndex(deviceDumpIndex);
+        if (slotIndex < 0) {
+            break;
+        }
+        DeviceTopicEntry *entry = deviceMapSource->slotAt(slotIndex);
+        const size_t length = DeviceTopicMap::packSyncPayload(
+            payload,
+            sizeof(payload),
+            SPI_DEVICE_SYNC_ENTRY,
+            entry
+        );
+        if (length == 0 || !enqueueDeviceMap(payload, (uint16_t)length)) {
+            return;
+        }
+        deviceDumpIndex = slotIndex + 1;
+    }
+
+    const size_t lastLength = DeviceTopicMap::packSyncPayload(
+        payload,
+        sizeof(payload),
+        SPI_DEVICE_SYNC_LAST,
+        nullptr
+    );
+    if (lastLength == 0 || !enqueueDeviceMap(payload, (uint16_t)lastLength)) {
+        return;
+    }
+    deviceDumpPending = false;
+}
+
 void InterChipSlave::applyHostTime(uint32_t unixSec) {
     if (unixSec < 1700000000) {
         return;
@@ -98,42 +237,65 @@ bool InterChipSlave::enqueueEvent(uint8_t cmd, const uint8_t *payload, uint16_t 
     return enqueueReply(cmd, 0, payload, length);
 }
 
+void InterChipSlave::removeOutboundAt(int index) {
+    if (index < 0 || index >= outboundCount) {
+        return;
+    }
+    if (index < outboundCount - 1) {
+        memmove(
+            &outbound[index],
+            &outbound[index + 1],
+            sizeof(QueuedFrame) * (size_t)(outboundCount - index - 1)
+        );
+    }
+    outboundCount--;
+    updateIrq();
+}
+
 bool InterChipSlave::tryEnqueue(uint8_t cmd, uint8_t seq, const uint8_t *payload, uint16_t length) {
-    if (length > SPI_MAX_PAYLOAD) {
+    if (length > SPI_MAX_PAYLOAD || outboundCount >= kQueue) {
         return false;
     }
-    for (int i = 0; i < kQueue; i++) {
-        if (outbound[i].used) {
-            continue;
+    QueuedFrame *slot = &outbound[outboundCount];
+    memset(&slot->frame, 0, sizeof(slot->frame));
+    slot->frame.cmd = cmd;
+    if (seq != 0) {
+        slot->frame.seq = seq;
+    } else {
+        slot->frame.seq = nextSeq++;
+        if (nextSeq == 0) {
+            nextSeq = 1;
         }
-        outbound[i].used = true;
-        outbound[i].frame.cmd = cmd;
-        if (seq != 0) {
-            outbound[i].frame.seq = seq;
-        } else {
-            outbound[i].frame.seq = nextSeq++;
-            if (nextSeq == 0) {
-                nextSeq = 1;
-            }
+    }
+    slot->frame.length = length;
+    if (length > 0 && payload != nullptr) {
+        memcpy(slot->frame.payload, payload, length);
+    }
+    outboundCount++;
+    updateIrq();
+    return true;
+}
+
+bool InterChipSlave::dropOldestLogRecord() {
+    for (int i = 0; i < outboundCount; i++) {
+        if (outbound[i].frame.cmd == SpiEvtLogRecord) {
+            removeOutboundAt(i);
+            return true;
         }
-        outbound[i].frame.length = length;
-        if (length > 0 && payload != nullptr) {
-            memcpy(outbound[i].frame.payload, payload, length);
-        }
-        updateIrq();
-        return true;
     }
     return false;
 }
 
-void InterChipSlave::dropOldestLogRecord() {
-    for (int i = 0; i < kQueue; i++) {
-        if (outbound[i].used && outbound[i].frame.cmd == SpiEvtLogRecord) {
-            outbound[i].used = false;
-            updateIrq();
-            return;
+bool InterChipSlave::enqueueDeviceMap(const uint8_t *payload, uint16_t length) {
+    if (tryEnqueue(SpiEvtDeviceMap, 0, payload, length)) {
+        return true;
+    }
+    while (dropOldestLogRecord()) {
+        if (tryEnqueue(SpiEvtDeviceMap, 0, payload, length)) {
+            return true;
         }
     }
+    return false;
 }
 
 bool InterChipSlave::enqueueReply(uint8_t cmd, uint8_t seq, const uint8_t *payload, uint16_t length) {
@@ -153,24 +315,22 @@ void InterChipSlave::enqueueLogLine(const char *line) {
         return;
     }
     if (!enqueueEvent(SpiEvtLogRecord, (const uint8_t *)line, (uint16_t)length)) {
-        for (int i = 0; i < kQueue; i++) {
-            if (outbound[i].used && outbound[i].frame.cmd == SpiEvtLogRecord) {
-                outbound[i].used = false;
-                break;
-            }
-        }
+        dropOldestLogRecord();
         enqueueEvent(SpiEvtLogRecord, (const uint8_t *)line, (uint16_t)length);
     }
 }
 
-void InterChipSlave::enqueueAttrReport(bool on, const uint8_t ieee[8], uint8_t endpoint, uint16_t shortAddr) {
-    uint8_t payload[12];
+void InterChipSlave::enqueueAttrReport(const char *message, const uint8_t ieee[8], uint8_t endpoint, uint16_t shortAddr) {
+    uint8_t payload[11 + SPI_DEVICE_MESSAGE_MAX];
+    memset(payload, 0, sizeof(payload));
     memcpy(payload, ieee, 8);
     payload[8] = endpoint;
     payload[9] = (uint8_t)(shortAddr & 0xFF);
     payload[10] = (uint8_t)((shortAddr >> 8) & 0xFF);
-    payload[11] = on ? 1 : 0;
-    enqueueEvent(SpiEvtAttrReport, payload, 12);
+    const char *body = message != nullptr ? message : "";
+    strncpy((char *)payload + 11, body, SPI_DEVICE_MESSAGE_MAX - 1);
+    const uint16_t length = (uint16_t)(11 + strlen((char *)payload + 11) + 1);
+    enqueueEvent(SpiEvtAttrReport, payload, length);
 }
 
 void InterChipSlave::enqueueDeviceJoin(
@@ -196,28 +356,17 @@ void InterChipSlave::enqueueDeviceJoin(
 }
 
 void InterChipSlave::updateIrq() {
-    bool hasEvent = false;
-    for (int i = 0; i < kQueue; i++) {
-        if (outbound[i].used) {
-            hasEvent = true;
-            break;
-        }
-    }
     pinMode(PIN_SPI_IRQ, OUTPUT);
-    digitalWrite(PIN_SPI_IRQ, hasEvent ? HIGH : LOW);
+    digitalWrite(PIN_SPI_IRQ, outboundCount > 0 ? HIGH : LOW);
 }
 
 bool InterChipSlave::takeOutbound(SpiFrame &frame) {
-    for (int i = 0; i < kQueue; i++) {
-        if (!outbound[i].used) {
-            continue;
-        }
-        frame = outbound[i].frame;
-        outbound[i].used = false;
-        updateIrq();
-        return true;
+    if (outboundCount <= 0) {
+        return false;
     }
-    return false;
+    frame = outbound[0].frame;
+    removeOutboundAt(0);
+    return true;
 }
 
 void InterChipSlave::handleHostFrame(const SpiFrame &frame) {
@@ -249,16 +398,41 @@ void InterChipSlave::handleHostFrame(const SpiFrame &frame) {
         enqueueReply(SpiEvtPong, frame.seq, nullptr, 0);
         return;
     }
-    if (frame.cmd == SpiCmdPermitJoin && frame.length >= 1 && permitJoinHandler != nullptr) {
-        permitJoinHandler(frame.payload[0]);
+    if (frame.cmd == SpiCmdPermitJoin && frame.length >= 1) {
+        deferredPermitSeconds = frame.payload[0];
+        permitJoinPending = true;
         uint8_t ok = 1;
         enqueueEvent(SpiEvtCmdResult, &ok, 1);
         return;
     }
-    if (frame.cmd == SpiCmdZclOnOff && frame.length >= 9 && onOffHandler != nullptr) {
-        onOffHandler(frame.payload, frame.payload[8]);
+    if (frame.cmd == SpiCmdZclOnOff && frame.length >= 10) {
+        memcpy(deferredOnOffIeee, frame.payload, 8);
+        deferredOnOffEndpoint = frame.payload[8];
+        memset(deferredOnOffCommand, 0, sizeof(deferredOnOffCommand));
+        const size_t commandLength = frame.length - 9;
+        const size_t bounded =
+            commandLength >= sizeof(deferredOnOffCommand) ? sizeof(deferredOnOffCommand) - 1 : commandLength;
+        memcpy(deferredOnOffCommand, frame.payload + 9, bounded);
+        onOffPending = true;
         uint8_t ok = 1;
         enqueueEvent(SpiEvtCmdResult, &ok, 1);
+        return;
+    }
+    if (frame.cmd == SpiCmdSetDevice && frame.length >= 1 && deviceSyncHandler != nullptr) {
+        uint8_t flags = 0;
+        DeviceTopicEntry entry;
+        if (!DeviceTopicMap::unpackSyncPayload(frame.payload, frame.length, &flags, &entry)) {
+            return;
+        }
+        deviceSyncHandler(flags, &entry);
+        return;
+    }
+    if (frame.cmd == SpiCmdGetDevices) {
+        requestDeviceDump();
+        return;
+    }
+    if (frame.cmd == SpiCmdGetDevicesFile) {
+        requestDevicesFileDump();
         return;
     }
 }
@@ -317,7 +491,23 @@ void InterChipSlave::applyDeferredSettings() {
     }
 }
 
+void InterChipSlave::applyDeferredRadioCommands() {
+    if (permitJoinPending && permitJoinHandler != nullptr) {
+        if (permitJoinHandler(deferredPermitSeconds)) {
+            permitJoinPending = false;
+        }
+    }
+    if (onOffPending && onOffHandler != nullptr) {
+        onOffHandler(deferredOnOffIeee, deferredOnOffCommand, deferredOnOffEndpoint);
+        onOffPending = false;
+    }
+}
+
 void InterChipSlave::pump() {
+    if (pumpPaused) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+        return;
+    }
     if (!readySent && spiReady) {
         readySent = true;
         enqueueEvent(SpiEvtSlaveReady, nullptr, 0);

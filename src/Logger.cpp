@@ -89,9 +89,7 @@ void Logger::appendSlaveLine(const char *line) {
         return;
     }
     appendRing(String(line));
-#ifdef CON_DEBUG
     Serial.println(line);
-#endif
 }
 
 void Logger::println(const String &msg) {
@@ -99,9 +97,7 @@ void Logger::println(const String &msg) {
     formatTimestamp(timestamp, sizeof(timestamp));
     String line = String(timestamp) + " [" + roleLabel + "] " + msg;
     appendRing(line);
-#ifdef CON_DEBUG
     Serial.println(line);
-#endif
     if (lineHook != nullptr) {
         lineHook(line.c_str());
     }

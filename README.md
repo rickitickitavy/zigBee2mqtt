@@ -83,10 +83,10 @@ map AA:BB:CC:DD:EE:FF:00:11 home/kitchen/light/state home/kitchen/light/set
 | `z2m/bridge/devices` | publish | JSON list of bound devices + mapped topics |
 | `z2m/bridge/permit_join` | subscribe | `on`, `off`, or seconds (`180`) |
 | `z2m/bridge/config/device` | subscribe | `{"ieee":"...","name":"...","state":"...","command":"...","availability":"..."}` |
-| *per-device state topic* | publish | `ON` / `OFF` |
-| *per-device command topic* | subscribe | `on` / `off` / `toggle` |
+| *per-device state topic* | publish | device message as received (see channels) |
+| *per-device command topic* | subscribe | device command as published (see channels) |
 
-Assign topics per IEEE. Unmapped devices still show up in `bridge/devices`.
+Assign topics per IEEE. Device **channels**: `1` (default) uses those topics as today; `2`–`16` publish/command `{topic}/{ep}` except `ep=1` stays unsuffixed; `0` (multichannel with parsing) keeps the stored topics and uses payload `ch-<ep>##<message>`. The message body is passed through unchanged. Availability is always the stored topic. Unmapped devices still show up in `bridge/devices`.
 
 ## Zigbee + WiFi
 
