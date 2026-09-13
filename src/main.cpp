@@ -17,6 +17,7 @@
 #include "JsonField.h"
 #include "InterChipHost.h"
 #include "InterChipSlave.h"
+#include "StatusRgb.h"
 #include "ZigbeeSpiProxy.h"
 #include "FoundDeviceList.h"
 #include "DeviceStore.h"
@@ -47,6 +48,7 @@ static DeviceStore *deviceStore = nullptr;
 static bool ntpStarted = false;
 static bool slaveZigbeeStarted = false;
 static bool slaveZigbeeStarting = false;
+static bool hostPreparationLatched = false;
 
 static BoardRole readBoardRole() {
     pinMode(PIN_BOARD_ROLE, INPUT);
@@ -493,6 +495,7 @@ static void onSlaveOnOff(const uint8_t ieee[8], const char *command, uint8_t end
 }
 
 static void setupHost() {
+    STATUS_RGB.setBootHeld(true);
     LOGGER.setRoleLabel("host");
     LOGGER.setStoreRing(true);
     {
@@ -580,7 +583,7 @@ static void setupHost() {
 }
 
 static void setupSlave() {
-    rgbLedWrite(PIN_STATUS_RGB, 0, 0, 0);
+    STATUS_RGB.setBootHeld(true);
     LOGGER.setRoleLabel("slave");
     LOGGER.setStoreRing(false);
     INTER_CHIP_SLAVE.setSettingsHandler(onSlaveSettings);
@@ -628,10 +631,19 @@ void loop() {
         mqttClient->dispatch(wifiController->isStaConnected());
         serialCli->dispatch();
         ZIGBEE_SPI_PROXY.pumpRegistrySync();
+        if (!hostPreparationLatched && wifiController->hasUsableInterface() && INTER_CHIP_HOST.isNormal()) {
+            hostPreparationLatched = true;
+            STATUS_RGB.setBootHeld(false);
+        }
+        STATUS_RGB.service();
         delay(5);
         return;
     }
 
+    if (zigbeeCoordinator != nullptr && zigbeeCoordinator->isStarted()) {
+        STATUS_RGB.setBootHeld(false);
+    }
+    STATUS_RGB.service();
     INTER_CHIP_SLAVE.applyDeferredSettings();
     INTER_CHIP_SLAVE.applyDeferredRadioCommands();
     INTER_CHIP_SLAVE.pumpDeviceDump();

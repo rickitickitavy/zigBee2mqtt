@@ -1163,10 +1163,53 @@
             apIpField.hidden = document.getElementById("wifiMode").value != "AP";
         }
 
+        function dismissFrontOverlayDialog() {
+            var overlays = document.querySelectorAll(".dialog-overlay");
+            var frontOverlay = null;
+            var overlayIndex;
+            for (overlayIndex = 0; overlayIndex < overlays.length; overlayIndex++) {
+                if (!overlays[overlayIndex].hidden) {
+                    frontOverlay = overlays[overlayIndex];
+                }
+            }
+            if (!frontOverlay) {
+                return false;
+            }
+            var dialogId = frontOverlay.id;
+            if (dialogId === "searchDialog") {
+                closeSearchDialog(true);
+                return true;
+            }
+            if (dialogId === "parameterDialog") {
+                closeParameterDialog();
+                return true;
+            }
+            if (dialogId === "restoreSkippedDialog") {
+                closeRestoreSkippedDialog();
+                return true;
+            }
+            if (dialogId === "deleteConfirmDialog") {
+                closeDeleteConfirmDialog();
+                return true;
+            }
+            return false;
+        }
+
+        function onDocumentKeyDown(event) {
+            var key = event.key;
+            if (key !== "Escape" && key !== "Esc") {
+                return;
+            }
+            if (dismissFrontOverlayDialog()) {
+                event.preventDefault();
+            }
+        }
+
         window.onload = function () {
             setupPasswordToggle("wifiPassword", "wifiPasswordToggle");
             setupPasswordToggle("mqttPassword", "mqttPasswordToggle");
             document.getElementById("wifiMode").onchange = updateApIpVisibility;
+            document.addEventListener("keydown", onDocumentKeyDown);
             loadWifi();
             loadMqtt();
             loadZigbee();
