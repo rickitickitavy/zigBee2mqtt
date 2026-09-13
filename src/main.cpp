@@ -495,6 +495,7 @@ static void onSlaveOnOff(const uint8_t ieee[8], const char *command, uint8_t end
 }
 
 static void setupHost() {
+    INTER_CHIP_HOST.resetSlaveSynchronous();
     STATUS_RGB.setBootHeld(true);
     LOGGER.setRoleLabel("host");
     LOGGER.setStoreRing(true);

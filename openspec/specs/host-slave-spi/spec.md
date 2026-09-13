@@ -53,16 +53,24 @@ The host SHALL be the only store for product settings. The slave SHALL NOT write
 - **WHEN** the slave reboots and loses RAM settings
 - **THEN** it waits for a new host `SET_SETTINGS` and does not recover a local settings file
 
-### Requirement: Host resets and brings up the slave asynchronously
-The host SHALL drive a reset line (GPIO11 to the slave EN pin, active-low pulse). After releasing reset, the host SHALL wait for `SLAVE_READY` without blocking Wi-Fi, MQTT, web, or `loop`. If `SLAVE_READY` does not arrive within the ready timeout, the host SHALL pulse reset again and wait again. The host SHALL NOT use blocking delays for this wait.
+### Requirement: Host resets the slave first then brings it up
+The host SHALL drive a reset line (GPIO11 to the slave EN pin, active-low pulse). The **first** step of host role init SHALL be that pulse in **sync** mode: the host SHALL assert reset, wait the pulse width, and release reset before it starts Wi-Fi, the web console, MQTT, LittleFS, or the host SPI task. The host SHALL NOT finish that first pulse from the SPI pump task. On **every** host boot the host SHALL perform that first-step pulse. The host SHALL NOT skip it because the slave already asserts the ready line, because IRQ is already high, or because the slave still answers from a previous run. After releasing that first pulse, the host SHALL wait for `SLAVE_READY` without blocking Wi-Fi, MQTT, web, or `loop`. If `SLAVE_READY` does not arrive within the ready timeout, the host SHALL pulse reset again and wait again. Those later retries SHALL NOT use blocking delays.
 
 #### Scenario: Slave ready then configure
-- **WHEN** the host starts and pulses slave reset
+- **WHEN** the host starts and has completed the first-step slave reset
 - **THEN** it continues other host work and, when `SLAVE_READY` arrives, pushes settings and then accepts normal Zigbee operations
 
 #### Scenario: Slave silent
 - **WHEN** the ready timeout elapses with no `SLAVE_READY`
 - **THEN** the host pulses reset again and repeats the async wait
+
+#### Scenario: Host boot always resets a live slave
+- **WHEN** the host boots (including a warm restart) and the slave is still running from before
+- **THEN** the host still performs the first-step reset pulse and does not skip it because the slave already looks ready
+
+#### Scenario: Reset is the first host-init step
+- **WHEN** the chip starts in the host role
+- **THEN** the slave reset pulse is completed before Wi-Fi, the web console, MQTT, or the host SPI task start
 
 ### Requirement: Slave pushes logs immediately; host stores both
 The slave SHALL enqueue a log event to the host as soon as a line is written. That event SHALL use the **same** IRQ + SPI path as Zigbee data (`ATTR_REPORT`, join/leave, `CMD_RESULT`): same frame format, same slave outbound queue, same GPIO10 ready line, same host SPI task. No extra UART, wire, or pull API. The host SHALL append both host-origin and slave-origin lines into one in-memory log of 65536 characters with wrap (oldest overwritten). Every stored line SHALL include a date-time and a source label that marks slave lines as slave (host lines labeled host). Date-time SHALL use NTP wall clock when the host has it; otherwise the host local timer (boot-based clock). The host SHALL send time to the slave (with settings and later syncs) so the slave can stamp lines before sending; if the slave has no sync yet it SHALL stamp with its local timer and the host SHALL still store the line with a host clock time if needed to keep a date-time on the record.

@@ -496,6 +496,7 @@ void ZigbeeCoordinator::offerPairingIfNeeded(const uint8_t ieee[8]) {
     if (!isRegistered(slot->ieee)) {
         logDeviceEvent("join", slot->ieee, slot->shortAddr, slot->endpoint, registeredName(slot->ieee));
     }
+    pulseInboundDevice(slot->ieee);
     deviceBoundHandler(slot);
 }
 
@@ -606,6 +607,7 @@ void ZigbeeCoordinator::handleIasZoneStatus(
         (unsigned int)message->zone_status
     );
     logDeviceEvent(eventName, ieee, shortAddr, message->info.src_endpoint, registeredName(ieee));
+    pulseInboundDevice(ieee);
     if (lightStateHandler != nullptr) {
         lightStateHandler(alarm ? "LEAK" : "DRY", ieee, message->info.src_endpoint, shortAddr);
     }
@@ -639,6 +641,7 @@ void ZigbeeCoordinator::handleIasZoneEnroll(
         (unsigned int)zoneId
     );
     logDeviceEvent(eventName, ieee, shortAddr, message->info.src_endpoint, registeredName(ieee));
+    pulseInboundDevice(ieee);
 }
 
 void ZigbeeCoordinator::handleAttributeReport(
@@ -667,6 +670,7 @@ void ZigbeeCoordinator::handleAttributeReport(
             srcEndpoint,
             registeredName(ieee)
         );
+        pulseInboundDevice(ieee);
         if (lightStateHandler != nullptr) {
             lightStateHandler(on ? "ON" : "OFF", ieee, srcEndpoint, shortAddr);
         }
@@ -682,6 +686,7 @@ void ZigbeeCoordinator::handleAttributeReport(
         (unsigned long)value
     );
     logDeviceEvent(eventName, ieee, shortAddr, srcEndpoint, registeredName(ieee));
+    pulseInboundDevice(ieee);
     if (lightStateHandler != nullptr) {
         lightStateHandler(eventName, ieee, srcEndpoint, shortAddr);
     }
@@ -699,9 +704,22 @@ void ZigbeeCoordinator::handleLightStateWithSource(bool on, uint8_t endpoint, es
         endpoint,
         registeredName(ieee)
     );
+    pulseInboundDevice(ieee);
     if (lightStateHandler != nullptr) {
         lightStateHandler(on ? "ON" : "OFF", ieee, endpoint, shortAddr);
     }
+}
+
+void ZigbeeCoordinator::pulseInboundDevice(const uint8_t ieee[8]) {
+    if (ieee == nullptr) {
+        STATUS_RGB.pulseBlue();
+        return;
+    }
+    if (isRegistered(ieee)) {
+        STATUS_RGB.pulseRed();
+        return;
+    }
+    STATUS_RGB.pulseBlue();
 }
 
 bool ZigbeeCoordinator::controlOnOff(const uint8_t ieee[8], const char *command, uint8_t endpoint) {
@@ -748,14 +766,17 @@ bool ZigbeeCoordinator::controlOnOff(const uint8_t ieee[8], const char *command,
     );
     if (actionLower == "on" || actionLower == "1" || actionLower == "true") {
         zigbeeSwitch.lightOn(targetEndpoint, ieeeAddr);
+        STATUS_RGB.pulseGreen();
         return true;
     }
     if (actionLower == "off" || actionLower == "0" || actionLower == "false") {
         zigbeeSwitch.lightOff(targetEndpoint, ieeeAddr);
+        STATUS_RGB.pulseGreen();
         return true;
     }
     if (actionLower == "toggle") {
         zigbeeSwitch.lightToggle(targetEndpoint, ieeeAddr);
+        STATUS_RGB.pulseGreen();
         return true;
     }
     return true;

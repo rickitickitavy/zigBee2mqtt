@@ -22,6 +22,22 @@ static bool commandExpectsReply(uint8_t cmd) {
     return cmd == SpiCmdPing || cmd == SpiCmdGetStatus || cmd == SpiCmdSetSettings || cmd == SpiCmdTimeSync;
 }
 
+void InterChipHost::resetSlaveSynchronous() {
+    pinMode(PIN_SLAVE_RST, OUTPUT);
+    digitalWrite(PIN_SLAVE_RST, LOW);
+    delay(kRstPulseMs);
+    digitalWrite(PIN_SLAVE_RST, HIGH);
+    resetAsserting = false;
+    state = HostBringupWaitReady;
+    waitStartedMs = millis();
+    settingsQueued = false;
+    settingsRetries = 0;
+    hasPending = false;
+    pingTimeouts = 0;
+    bootResetCompleted = true;
+    LOGGER.info("Slave reset released (sync), waiting SLAVE_READY");
+}
+
 void InterChipHost::begin() {
     pinMode(PIN_SPI_IRQ, INPUT_PULLDOWN);
     pinMode(PIN_SLAVE_RST, OUTPUT);
@@ -29,7 +45,9 @@ void InterChipHost::begin() {
     pinMode(PIN_SPI_CS, OUTPUT);
     digitalWrite(PIN_SPI_CS, HIGH);
     SPI.begin(PIN_SPI_SCK, PIN_SPI_MISO, PIN_SPI_MOSI, -1);
-    enterReset();
+    if (!bootResetCompleted) {
+        resetSlaveSynchronous();
+    }
     xTaskCreate(hostSpiTask, "hostSpi", 4096, nullptr, 1, nullptr);
 }
 

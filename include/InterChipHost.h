@@ -10,6 +10,7 @@ public:
     using EventFn = void (*)(const SpiFrame &frame);
 
     void begin();
+    void resetSlaveSynchronous();
     void pump(); // host SPI task only
     bool tryEnqueue(uint8_t cmd, const uint8_t *payload, uint16_t length);
     bool isNormal() const;
@@ -59,6 +60,7 @@ private:
     unsigned long pendingDeadlineMs = 0;
     bool hasPending = false;
     uint8_t pingTimeouts = 0;
+    bool bootResetCompleted = false;
 
     void pulseResetStart();
     void pulseResetFinishIfDue();

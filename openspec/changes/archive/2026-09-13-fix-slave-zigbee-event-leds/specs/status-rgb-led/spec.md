@@ -1,34 +1,4 @@
-# status-rgb-led Specification
-
-## Purpose
-
-Gives each DevKitC board a single onboard RGB meaning so an operator can see boot still in progress, slave SPI application traffic, and a slave critical fault without opening the console.
-
-## Requirements
-
-### Requirement: Boot red until that chip is ready
-
-Each chip SHALL turn the onboard status RGB red as soon as that chip’s role setup starts. The host SHALL keep boot-red until it has a usable Wi-Fi interface (STA associated or SoftAP serving an address) and the slave link is in normal work after settings have been applied. The slave SHALL keep boot-red until it has applied host settings for this boot and the Zigbee coordinator is running. MQTT connection SHALL NOT be required to clear host boot-red. After that chip’s boot-red clears, the LED SHALL go dark unless another requirement in this capability holds it or flashes it.
-
-#### Scenario: Host still preparing
-
-- **WHEN** the host has started but Wi-Fi has no address yet or the slave is not yet in normal work
-- **THEN** the host status RGB stays red
-
-#### Scenario: Host preparation finished
-
-- **WHEN** the host has a usable Wi-Fi address and the slave link is in normal work
-- **THEN** the host status RGB is no longer held red for boot
-
-#### Scenario: Slave still preparing
-
-- **WHEN** the slave has started but has not yet applied host settings or started the coordinator
-- **THEN** the slave status RGB stays red
-
-#### Scenario: Slave preparation finished
-
-- **WHEN** the slave has applied host settings and the Zigbee coordinator is running, and no critical error is present
-- **THEN** the slave status RGB is no longer held red for boot
+## ADDED Requirements
 
 ### Requirement: Slave flashes for Zigbee device events
 
@@ -84,6 +54,8 @@ Gateway topics (online/status, device list), failed publishes, and broker keep-a
 - **WHEN** the host publishes gateway status or the devices list, or only keeps the broker connection alive
 - **THEN** the host status RGB does not flash for that traffic
 
+## MODIFIED Requirements
+
 ### Requirement: Slave holds red while a critical error is present
 
 The slave SHALL turn the status RGB red and keep it red for the entire time a critical error is present. A critical error is a fatal or unrecoverable fault that stops normal radio or SPI work (for example SPI slave hardware failed to start, or the Zigbee coordinator failed fatally). Transient log errors that the slave can continue after MUST NOT hold the LED. Critical-error red SHALL outrank boot-red, activity flashes, and pairing blink. When the critical error is no longer present, the LED SHALL follow the other requirements in this capability.
@@ -111,3 +83,10 @@ While pairing is open and the slave is ready with no critical error, the existin
 
 - **WHEN** pairing would start but slave boot-red is still held
 - **THEN** the status RGB stays red for boot and does not blink for pairing
+
+## REMOVED Requirements
+
+### Requirement: Slave flashes green on receive and red on send
+
+**Reason**: Flashes meant SPI application frames, which are not Zigbee device events.
+**Migration**: Use “Slave flashes for Zigbee device events” (green send, red registered receive, blue unregistered receive).
