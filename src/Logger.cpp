@@ -75,12 +75,51 @@ void Logger::appendRing(const String &msg) {
     }
 }
 
-void Logger::copyRing(String &destination) const {
-    destination = "";
-    destination.reserve(used + 1);
-    const size_t start = used < kRingSize ? 0 : writePos;
-    for (size_t i = 0; i < used; i++) {
-        destination += ring[(start + i) % kRingSize];
+void Logger::snapshotRing(size_t *start, size_t *length) const {
+    if (length != nullptr) {
+        *length = used;
+    }
+    if (start != nullptr) {
+        *start = used < kRingSize ? 0 : writePos;
+    }
+}
+
+size_t Logger::copyRingSlice(
+    size_t start,
+    size_t length,
+    size_t offset,
+    char *destination,
+    size_t maxLength
+) const {
+    if (destination == nullptr || offset >= length || maxLength == 0) {
+        return 0;
+    }
+    const size_t remaining = length - offset;
+    const size_t toCopy = remaining < maxLength ? remaining : maxLength;
+    const size_t physical = (start + offset) % kRingSize;
+    const size_t firstRun = kRingSize - physical;
+    if (toCopy <= firstRun) {
+        memcpy(destination, ring + physical, toCopy);
+        return toCopy;
+    }
+    memcpy(destination, ring + physical, firstRun);
+    memcpy(destination + firstRun, ring, toCopy - firstRun);
+    return toCopy;
+}
+
+void Logger::writeRing(Print &out) const {
+    size_t start = 0;
+    size_t length = 0;
+    snapshotRing(&start, &length);
+    char chunk[256];
+    size_t offset = 0;
+    while (offset < length) {
+        const size_t copied = copyRingSlice(start, length, offset, chunk, sizeof(chunk));
+        if (copied == 0) {
+            break;
+        }
+        out.write(reinterpret_cast<const uint8_t *>(chunk), copied);
+        offset += copied;
     }
 }
 

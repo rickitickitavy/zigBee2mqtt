@@ -259,6 +259,9 @@ static void runDeviceRegistryFixtures() {
     joinFrame.cmd = SpiEvtDeviceJoin;
     joinFrame.length = 75;
     joinFrame.payload[0] = 0xAA;
+    joinFrame.payload[8] = 0x34;
+    joinFrame.payload[9] = 0x12;
+    joinFrame.payload[10] = 1;
     strncpy((char *)joinFrame.payload + 11, "Acme", 31);
     strncpy((char *)joinFrame.payload + 43, "Plug", 31);
     foundDevices->noteJoin(joinFrame, topicMap);

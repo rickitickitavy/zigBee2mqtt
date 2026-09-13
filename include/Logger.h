@@ -20,7 +20,9 @@ public:
     void warning(String msg);
     void info(String msg);
     void debug(String msg);
-    void copyRing(String &destination) const;
+    void snapshotRing(size_t *start, size_t *length) const;
+    size_t copyRingSlice(size_t start, size_t length, size_t offset, char *destination, size_t maxLength) const;
+    void writeRing(Print &out) const;
 
 private:
     static const size_t kRingSize = 65536;

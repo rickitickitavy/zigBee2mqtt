@@ -568,9 +568,17 @@ void WebConsole::handleDevicesSearchStopPost(AsyncWebServerRequest *request) {
 }
 
 void WebConsole::handleLogGet(AsyncWebServerRequest *request) {
-    String logText;
-    LOGGER.copyRing(logText);
-    request->send(200, "text/plain", logText);
+    size_t start = 0;
+    size_t length = 0;
+    LOGGER.snapshotRing(&start, &length);
+    AsyncWebServerResponse *response = request->beginResponse(
+        "text/plain",
+        length,
+        [start, length](uint8_t *buffer, size_t maxLen, size_t index) -> size_t {
+            return LOGGER.copyRingSlice(start, length, index, reinterpret_cast<char *>(buffer), maxLen);
+        }
+    );
+    request->send(response);
 }
 
 void WebConsole::handleVersionGet(AsyncWebServerRequest *request) {

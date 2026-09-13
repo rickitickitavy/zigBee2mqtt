@@ -171,7 +171,10 @@ bool ZigbeeCoordinator::begin(uint8_t channel, uint8_t permitJoinSec) {
 
     started = true;
     lastRefreshMs = millis();
-    LOGGER.info("Zigbee coordinator started");
+    esp_zb_ieee_addr_t localIeee;
+    memset(localIeee, 0, sizeof(localIeee));
+    esp_zb_get_long_address(localIeee);
+    LOGGER.info("Zigbee coordinator started ieee=" + formatIeeeText(localIeee));
     if (permitJoinSec > 0) {
         startPairingWindow(permitJoinSec);
     }
@@ -268,32 +271,41 @@ void ZigbeeCoordinator::storeBoundDevice(zb_device_params_t *device) {
         }
     }
     const uint8_t endpoint = device->endpoint;
-    const bool addressChanged = !isNewDevice
-        && (slot->shortAddr != shortAddr || slot->endpoint != endpoint);
+    const bool incomingUsable = shortAddr != 0 && shortAddr != 0xFFFF
+        && DeviceTopicMap::isUsableEndpoint(endpoint) && !isZeroIeee(device->ieee_addr);
 
-    if (isNewDevice) {
+    if (!incomingUsable) {
+        if (!isNewDevice) {
+            return;
+        }
         memset(slot, 0, sizeof(BoundZigbeeDevice));
         memcpy(slot->ieee, device->ieee_addr, 8);
-    }
-    slot->shortAddr = shortAddr;
-    slot->endpoint = endpoint;
-    slot->occupied = true;
-    const bool usableIdentity = shortAddr != 0 && shortAddr != 0xFFFF
-        && DeviceTopicMap::isUsableEndpoint(endpoint) && !isZeroIeee(slot->ieee);
-    if (!usableIdentity) {
-        if (isNewDevice) {
-            slot->occupied = false;
-        }
+        slot->shortAddr = shortAddr;
+        slot->endpoint = endpoint;
+        slot->occupied = true;
         LOGGER.info(
             "Ignoring incomplete join ieee=" + formatIeeeText(slot->ieee)
             + " nwk=0x" + String(shortAddr, HEX) + " ep=" + String(endpoint)
         );
         return;
     }
+
     if (isNewDevice) {
+        memset(slot, 0, sizeof(BoundZigbeeDevice));
+        memcpy(slot->ieee, device->ieee_addr, 8);
+    }
+    const bool wasIncomplete = !isNewDevice
+        && (slot->shortAddr == 0 || slot->shortAddr == 0xFFFF
+            || !DeviceTopicMap::isUsableEndpoint(slot->endpoint));
+    const bool addressChanged = !isNewDevice
+        && (slot->shortAddr != shortAddr || slot->endpoint != endpoint);
+    slot->shortAddr = shortAddr;
+    slot->endpoint = endpoint;
+    slot->occupied = true;
+    if (isNewDevice || wasIncomplete) {
         logDeviceEvent("join", slot->ieee, slot->shortAddr, slot->endpoint, registeredName(slot->ieee));
     }
-    if (deviceBoundHandler != nullptr && (isNewDevice || addressChanged || !slot->pairingOffered)) {
+    if (deviceBoundHandler != nullptr && (isNewDevice || addressChanged || wasIncomplete || !slot->pairingOffered)) {
         slot->pairingOffered = true;
         deviceBoundHandler(slot);
     }
