@@ -16,11 +16,47 @@ void FoundDeviceList::removeIeee(const uint8_t ieee[8]) {
 }
 
 void FoundDeviceList::noteJoin(const SpiFrame &frame, DeviceTopicMap *registered) {
-    if (frame.cmd != SpiEvtDeviceJoin || frame.length < 75 || registered == nullptr) {
+    if (frame.cmd != SpiEvtDeviceJoin || frame.length < 75) {
         return;
     }
     uint8_t ieee[8];
     memcpy(ieee, frame.payload, 8);
+    const uint16_t shortAddr = (uint16_t)frame.payload[8] | ((uint16_t)frame.payload[9] << 8);
+    const uint8_t endpoint = frame.payload[10];
+    noteIdentity(
+        ieee,
+        shortAddr,
+        endpoint,
+        (const char *)frame.payload + 11,
+        (const char *)frame.payload + 43,
+        registered
+    );
+}
+
+void FoundDeviceList::noteIdentity(
+    const uint8_t ieee[8],
+    uint16_t shortAddr,
+    uint8_t endpoint,
+    const char *manufacturer,
+    const char *model,
+    DeviceTopicMap *registered
+) {
+    if (ieee == nullptr || registered == nullptr) {
+        return;
+    }
+    if (shortAddr == 0 || shortAddr == 0xFFFF || !DeviceTopicMap::isUsableEndpoint(endpoint)) {
+        return;
+    }
+    bool ieeePresent = false;
+    for (int i = 0; i < 8; i++) {
+        if (ieee[i] != 0) {
+            ieeePresent = true;
+            break;
+        }
+    }
+    if (!ieeePresent) {
+        return;
+    }
     if (registered->findByIeee(ieee) != nullptr) {
         return;
     }
@@ -44,10 +80,14 @@ void FoundDeviceList::noteJoin(const SpiFrame &frame, DeviceTopicMap *registered
     }
     memset(slot, 0, sizeof(*slot));
     memcpy(slot->ieee, ieee, 8);
-    slot->shortAddr = (uint16_t)frame.payload[8] | ((uint16_t)frame.payload[9] << 8);
-    slot->endpoint = frame.payload[10];
-    strncpy(slot->manufacturer, (const char *)frame.payload + 11, sizeof(slot->manufacturer) - 1);
-    strncpy(slot->model, (const char *)frame.payload + 43, sizeof(slot->model) - 1);
+    slot->shortAddr = shortAddr;
+    slot->endpoint = endpoint;
+    if (manufacturer != nullptr) {
+        strncpy(slot->manufacturer, manufacturer, sizeof(slot->manufacturer) - 1);
+    }
+    if (model != nullptr) {
+        strncpy(slot->model, model, sizeof(slot->model) - 1);
+    }
     slot->used = true;
 }
 
@@ -56,6 +96,9 @@ String FoundDeviceList::listJson(DeviceTopicMap *formatter) {
     bool first = true;
     for (int i = 0; i < kMaxFound; i++) {
         if (!found[i].used) {
+            continue;
+        }
+        if (formatter != nullptr && formatter->findByIeee(found[i].ieee) != nullptr) {
             continue;
         }
         if (!first) {

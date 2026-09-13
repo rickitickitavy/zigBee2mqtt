@@ -15,12 +15,14 @@ struct BoundZigbeeDevice {
     char manufacturer[32];
     char model[32];
     bool occupied;
+    bool pairingOffered;
 };
 
 class ZigbeeCoordinator {
 public:
     using LightStateFn = void (*)(const char *message, const uint8_t ieee[8], uint8_t endpoint, uint16_t shortAddr);
     using DeviceBoundFn = void (*)(const BoundZigbeeDevice *device);
+    using RegistryChangedFn = void (*)();
 
     ZigbeeCoordinator();
 
@@ -37,6 +39,7 @@ public:
     BoundZigbeeDevice *findByShortAddr(uint16_t shortAddr);
     void setLightStateHandler(LightStateFn handler);
     void setDeviceBoundHandler(DeviceBoundFn handler);
+    void setRegistryChangedHandler(RegistryChangedFn handler);
     void handleLightStateWithSource(bool on, uint8_t endpoint, esp_zb_zcl_addr_t source);
     void handleIasZoneStatus(const esp_zb_zcl_ias_zone_status_change_notification_message_t *message);
     void handleIasZoneEnroll(ZigbeeEP *endpoint, const esp_zb_zcl_ias_zone_enroll_request_message_t *message);
@@ -49,6 +52,7 @@ public:
     void setRegisteredMap(DeviceTopicMap *deviceMap);
     void clearRegisteredDevices();
     void upsertRegisteredDevice(const DeviceTopicEntry *entry);
+    void removeRegisteredDevice(const uint8_t ieee[8]);
     void markRegistryReady();
     bool isRegistered(const uint8_t ieee[8]) const;
     const char *registeredName(const uint8_t ieee[8]) const;
@@ -93,6 +97,7 @@ private:
     uint8_t nextIasZoneId = 1;
     LightStateFn lightStateHandler = nullptr;
     DeviceBoundFn deviceBoundHandler = nullptr;
+    RegistryChangedFn registryChangedHandler = nullptr;
     bool registryReady = false;
     unsigned long lastRefreshMs = 0;
     unsigned long pairingUntilMs = 0;
@@ -104,5 +109,10 @@ private:
     void stopPairingWindow();
     void updatePairingLed();
     void storeBoundDevice(zb_device_params_t *device);
+    void refreshRegisteredShorts();
     void resolveIeeeFromSource(esp_zb_zcl_addr_t source, uint8_t ieee[8], uint16_t *shortAddr);
+    void rememberShortIeee(uint16_t shortAddr, const uint8_t ieee[8], uint8_t endpoint);
+    void adoptReportIdentity(const uint8_t ieee[8], uint16_t shortAddr, uint8_t endpoint);
+    void offerPairingIfNeeded(const uint8_t ieee[8]);
+    bool migrateRegisteredIeee(const uint8_t previousIeee[8], const uint8_t nextIeee[8]);
 };

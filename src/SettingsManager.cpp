@@ -4,7 +4,6 @@
 #include "JsonField.h"
 
 #include <EEPROM.h>
-#include <LittleFS.h>
 #include <stdlib.h>
 #include <string.h>
 #include <WiFi.h>
@@ -25,7 +24,6 @@ SettingsManager::SettingsManager() : topicMap(deviceSlots) {
     if (!haveMarker) {
         LOGGER.warning("Settings uninitialized; writing defaults");
         applyDefaults();
-        createEmptyDeviceFile();
         saveMain(true);
         memcpy(&committedMain, &settings, sizeof(settings));
         logSettings();
@@ -37,13 +35,10 @@ SettingsManager::SettingsManager() : topicMap(deviceSlots) {
     if (storedVersion == 4) {
         upgradeLegacyMainFromEeprom();
         saveMain(false);
-        loadDeviceFile();
     } else if (storedVersion == GLOBAL_CURRENT_SETTINGS_VERSION) {
         readSettings();
-        loadDeviceFile();
     } else {
         applyDefaults();
-        createEmptyDeviceFile();
         saveMain(false);
     }
 
@@ -104,7 +99,7 @@ void SettingsManager::upgradeLegacyMainFromEeprom() {
     memset(settings.alignPad, 0, sizeof(settings.alignPad));
     memset(settings.reserved, 0, sizeof(settings.reserved));
     memset(deviceSlots, 0, sizeof(deviceSlots));
-    LOGGER.info("Legacy EEPROM main upgraded; devices stay in LittleFS JSON");
+    LOGGER.info("Legacy EEPROM main upgraded; devices stay on the slave");
 }
 
 bool SettingsManager::mainEqualsCommitted() const {
@@ -163,13 +158,6 @@ void SettingsManager::readSettings() {
 }
 
 void SettingsManager::createEmptyDeviceFile() {
-    File file = LittleFS.open(DEVICES_STORE_PATH, "w");
-    if (!file) {
-        LOGGER.error("Cannot create device store");
-        return;
-    }
-    file.print("[]");
-    file.close();
 }
 
 void SettingsManager::parseDevicesJson(const String &json) {
@@ -177,33 +165,15 @@ void SettingsManager::parseDevicesJson(const String &json) {
 }
 
 void SettingsManager::loadDeviceFile() {
-    if (!topicMap.loadFromFile(DEVICES_STORE_PATH)) {
-        LOGGER.warning("Host device cache missing or invalid; starting empty");
-        memset(deviceSlots, 0, sizeof(deviceSlots));
-        createEmptyDeviceFile();
-        return;
-    }
+    memset(deviceSlots, 0, sizeof(deviceSlots));
+    LOGGER.info("Host device list waits for slave pull");
 }
 
 String SettingsManager::devicesJsonFile() {
-    File file = LittleFS.open(DEVICES_STORE_PATH, "r");
-    if (!file) {
-        return topicMap.listJson();
-    }
-    String json = file.readString();
-    file.close();
-    json.trim();
-    if (json.length() == 0) {
-        return topicMap.listJson();
-    }
-    return json;
+    return topicMap.listJson();
 }
 
 bool SettingsManager::saveDevicesJson() {
-    if (!topicMap.saveToFile(DEVICES_STORE_PATH)) {
-        LOGGER.error("Cannot write device JSON");
-        return false;
-    }
     return true;
 }
 

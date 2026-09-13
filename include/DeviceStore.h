@@ -9,6 +9,7 @@ public:
     bool begin();
     bool reloadFromFile();
     DeviceTopicMap *deviceMap();
+    String readFileText();
     void requestPersist(bool allowEmpty);
     void persistIfDue();
 

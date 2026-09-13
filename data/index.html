@@ -51,8 +51,9 @@
                 loadZigbee();
             }
             if (name == "devices") {
-                loadDevices();
+                startDevicesPolling();
             } else {
+                stopDevicesPolling();
                 var searchDialog = document.getElementById("searchDialog");
                 if (searchDialog && !searchDialog.hidden) {
                     closeSearchDialog(true);
@@ -180,6 +181,164 @@
             });
         }
 
+        function normalizeIeeeText(text) {
+            return String(text || "").replace(/[^0-9A-Fa-f]/g, "").toUpperCase();
+        }
+
+        function deviceLabel(device) {
+            var name = device && (device.name || device.friendlyName) ? (device.name || device.friendlyName) : "";
+            var ieee = device && device.ieee ? device.ieee : "";
+            if (name && ieee) {
+                return name + " (" + ieee + ")";
+            }
+            return name || ieee || "unknown device";
+        }
+
+        function closeRestoreSkippedDialog() {
+            var dialog = document.getElementById("restoreSkippedDialog");
+            if (dialog) {
+                dialog.hidden = true;
+            }
+        }
+
+        function showRestoreSkippedDialog(skippedDevices) {
+            var list = document.getElementById("restoreSkippedList");
+            var dialog = document.getElementById("restoreSkippedDialog");
+            if (!list || !dialog) {
+                return;
+            }
+            list.innerHTML = "";
+            skippedDevices.forEach(function (device) {
+                var item = document.createElement("li");
+                item.textContent = deviceLabel(device);
+                list.appendChild(item);
+            });
+            dialog.hidden = false;
+        }
+
+        function postRestoredDevice(device) {
+            return fetch("/api/devices", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    ieee: device.ieee,
+                    name: device.name || device.friendlyName || "",
+                    state: device.state || "",
+                    command: device.command || "",
+                    availability: device.availability || "",
+                    channels: device.channels
+                })
+            }).then(function (response) {
+                return response.text().then(function (text) {
+                    if (!response.ok) {
+                        throw new Error(text || ("HTTP " + response.status));
+                    }
+                });
+            });
+        }
+
+        function restoreDevicesFromSelectedFile(file) {
+            var restoreError = document.getElementById("devicesRestoreError");
+            if (restoreError) {
+                restoreError.hidden = true;
+            }
+            if (!file) {
+                return;
+            }
+            var reader = new FileReader();
+            reader.onerror = function () {
+                if (restoreError) {
+                    restoreError.hidden = false;
+                    restoreError.textContent = "Failed to read the selected file";
+                }
+            };
+            reader.onload = function () {
+                var parsed;
+                try {
+                    parsed = JSON.parse(String(reader.result || ""));
+                } catch (parseError) {
+                    if (restoreError) {
+                        restoreError.hidden = false;
+                        restoreError.textContent = "Selected file is not valid JSON";
+                    }
+                    return;
+                }
+                if (!Array.isArray(parsed)) {
+                    if (restoreError) {
+                        restoreError.hidden = false;
+                        restoreError.textContent = "Selected file must be a devices JSON array";
+                    }
+                    return;
+                }
+                fetch("/api/devices", { cache: "no-store" }).then(function (response) {
+                    return response.json().then(function (currentDevices) {
+                        if (!response.ok || !Array.isArray(currentDevices)) {
+                            throw new Error("Failed to load current devices");
+                        }
+                        var presentIeee = {};
+                        currentDevices.forEach(function (device) {
+                            var key = normalizeIeeeText(device && device.ieee);
+                            if (key) {
+                                presentIeee[key] = true;
+                            }
+                        });
+                        var skippedDevices = [];
+                        var devicesToAdd = [];
+                        parsed.forEach(function (device) {
+                            var key = normalizeIeeeText(device && device.ieee);
+                            var friendlyName = device && (device.name || device.friendlyName);
+                            if (!key || !friendlyName) {
+                                skippedDevices.push(device || {});
+                                return;
+                            }
+                            if (presentIeee[key]) {
+                                skippedDevices.push(device);
+                                return;
+                            }
+                            presentIeee[key] = true;
+                            devicesToAdd.push(device);
+                        });
+                        var addChain = Promise.resolve();
+                        devicesToAdd.forEach(function (device) {
+                            addChain = addChain.then(function () {
+                                return postRestoredDevice(device);
+                            });
+                        });
+                        return addChain.then(function () {
+                            refreshDevicesJson();
+                            if (typeof loadDevices === "function") {
+                                loadDevices();
+                            }
+                            if (skippedDevices.length > 0) {
+                                showRestoreSkippedDialog(skippedDevices);
+                            }
+                        });
+                    });
+                }).catch(function (error) {
+                    if (restoreError) {
+                        restoreError.hidden = false;
+                        restoreError.textContent = error && error.message ? error.message : "Restore failed";
+                    }
+                });
+            };
+            reader.readAsText(file);
+        }
+
+        function openDevicesRestoreDialog() {
+            var fileInput = document.getElementById("devicesRestoreFile");
+            if (!fileInput) {
+                return;
+            }
+            fileInput.value = "";
+            fileInput.click();
+        }
+
+        function onDevicesRestoreFileSelected(event) {
+            var fileInput = event && event.target ? event.target : null;
+            var file = fileInput && fileInput.files && fileInput.files[0] ? fileInput.files[0] : null;
+            restoreDevicesFromSelectedFile(file);
+        }
+
         function refreshDevicesJson() {
             var viewer = document.getElementById("devicesJsonViewer");
             if (!viewer) {
@@ -191,15 +350,21 @@
                         viewer.value = "Failed to load " + "devices.json (HTTP " + response.status + ")";
                         return;
                     }
-                    try {
-                        viewer.value = JSON.stringify(JSON.parse(text), null, 2);
-                    } catch (parseError) {
-                        viewer.value = text || "[]";
-                    }
+                    viewer.value = text;
                 });
             }).catch(function () {
                 viewer.value = "Failed to load devices.json (network error)";
             });
+            window.setTimeout(function () {
+                fetch("/api/devices/store", { cache: "no-store" }).then(function (response) {
+                    return response.text();
+                }).then(function (text) {
+                    if (viewer) {
+                        viewer.value = text;
+                    }
+                }).catch(function () {
+                });
+            }, 800);
         }
 
         function refreshLog() {
@@ -521,12 +686,14 @@
         }
 
         var foundPollTimer = null;
+        var devicesPollTimer = null;
         var selectedFoundIeee = "";
         var selectedRegisteredIeee = "";
         var mqttBaseTopicCache = "";
         var topicsTouched = false;
         var registeredDeviceRows = [];
         var searchRunning = false;
+        var pairingSessionActive = false;
 
         function topicSlug(name) {
             return String(name || "")
@@ -628,10 +795,17 @@
                 row.onclick = function () {
                     selectRegisteredIeee(this.getAttribute("data-ieee") || "");
                 };
+                var onlineCell = document.createElement("td");
+                onlineCell.className = "device-online-cell";
+                var onlineDot = document.createElement("span");
+                onlineDot.className = rows[index].online ? "device-online-dot is-online" : "device-online-dot";
+                onlineDot.title = rows[index].online ? "Online" : "Offline";
+                onlineCell.appendChild(onlineDot);
                 var ieeeCell = document.createElement("td");
                 ieeeCell.textContent = ieee;
                 var nameCell = document.createElement("td");
                 nameCell.textContent = rows[index].name || rows[index].friendlyName || "";
+                row.appendChild(onlineCell);
                 row.appendChild(ieeeCell);
                 row.appendChild(nameCell);
                 body.appendChild(row);
@@ -640,6 +814,30 @@
                 selectedRegisteredIeee = "";
             }
             updateDeviceActionButtons();
+        }
+
+        function stopDevicesPolling() {
+            if (devicesPollTimer != null) {
+                window.clearInterval(devicesPollTimer);
+                devicesPollTimer = null;
+            }
+        }
+
+        function startDevicesPolling() {
+            loadDevices();
+            if (devicesPollTimer != null) {
+                return;
+            }
+            devicesPollTimer = window.setInterval(loadDevices, 2000);
+        }
+
+        function resumePairingDialog() {
+            var searchDialog = document.getElementById("searchDialog");
+            if (!pairingSessionActive || !searchDialog) {
+                return;
+            }
+            searchDialog.hidden = false;
+            startFoundPolling();
         }
 
         function loadDevices() {
@@ -752,6 +950,7 @@
 
         function openSearchDialog() {
             selectedFoundIeee = "";
+            pairingSessionActive = true;
             setSearchRunning(false);
             document.getElementById("foundAddBtn").disabled = true;
             document.getElementById("searchDialogError").hidden = true;
@@ -766,6 +965,7 @@
             stopFoundPolling();
             setSearchRunning(false);
             if (sendStop !== false) {
+                pairingSessionActive = false;
                 fetch("/api/devices/search/stop", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
@@ -833,7 +1033,8 @@
             if (!selectedFoundIeee) {
                 return;
             }
-            closeSearchDialog(true);
+            document.getElementById("searchDialog").hidden = true;
+            stopFoundPolling();
             topicsTouched = false;
             refreshMqttBaseTopic();
             fillParameterDialog({ ieee: selectedFoundIeee }, "Device parameters");
@@ -904,6 +1105,7 @@
 
         function closeParameterDialog() {
             document.getElementById("parameterDialog").hidden = true;
+            resumePairingDialog();
         }
 
         function onDeviceNameInput() {
@@ -943,8 +1145,9 @@
                     if (!response.ok) {
                         throw new Error(text || ("HTTP " + response.status));
                     }
-                    closeParameterDialog();
+                    document.getElementById("parameterDialog").hidden = true;
                     loadDevices();
+                    resumePairingDialog();
                 });
             }).catch(function (error) {
                 errorLine.hidden = false;
@@ -1122,6 +1325,7 @@
                 <table class="data-table selectable">
                     <thead>
                         <tr>
+                            <th class="device-online-cell" aria-label="Online"></th>
                             <th>IEEE</th>
                             <th>Name</th>
                         </tr>
@@ -1218,6 +1422,19 @@
             </div>
         </div>
 
+        <div id="restoreSkippedDialog" class="dialog-overlay" hidden>
+            <div class="dialog-panel" role="dialog" aria-label="Restore skipped devices">
+                <h3 class="upload-title">Restore finished</h3>
+                <p class="field-hint">These devices were already present and were not restored:</p>
+                <div class="dialog-scroll">
+                    <ul id="restoreSkippedList"></ul>
+                </div>
+                <div class="dialog-actions">
+                    <button type="button" class="btn btn-primary" onclick="closeRestoreSkippedDialog()">Close</button>
+                </div>
+            </div>
+        </div>
+
         <div id="deleteConfirmDialog" class="dialog-overlay" hidden>
             <div class="dialog-panel" role="dialog" aria-label="Confirm delete">
                 <h3 class="upload-title">Delete device</h3>
@@ -1283,10 +1500,15 @@
                 </div>
                 <div id="system-tab-devices-json" class="system-tab-panel tab-panel" role="tabpanel">
                     <div class="upload-card log-card">
-                        <h3 class="upload-title">LittleFS /devices.json</h3>
-                        <p class="field-hint">Registered device config stored on the host filesystem. Not written to EEPROM.</p>
+                        <h3 class="upload-title">Slave /devices.json</h3>
+                        <p class="field-hint">Exact /devices.json from the slave filesystem. Restore adds only devices that are missing from that file.</p>
                         <textarea id="devicesJsonViewer" class="log-viewer" readonly></textarea>
-                        <button type="button" class="btn btn-secondary btn-inline" onclick="refreshDevicesJson()">Refresh</button>
+                        <p id="devicesRestoreError" class="save-error" hidden></p>
+                        <input id="devicesRestoreFile" type="file" accept=".json,application/json" hidden onchange="onDevicesRestoreFileSelected(event)">
+                        <div class="dialog-actions">
+                            <button type="button" class="btn btn-secondary btn-inline" onclick="refreshDevicesJson()">Refresh</button>
+                            <button type="button" class="btn btn-primary btn-inline" onclick="openDevicesRestoreDialog()">Restore</button>
+                        </div>
                     </div>
                 </div>
                 <div id="system-tab-log" class="system-tab-panel tab-panel" role="tabpanel">

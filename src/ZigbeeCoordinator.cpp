@@ -26,6 +26,11 @@ static String formatIeeeText(const uint8_t ieee[8]) {
     return String(buffer);
 }
 
+static bool isZeroIeee(const uint8_t ieee[8]) {
+    static const uint8_t kZeroIeee[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    return ieee != nullptr && memcmp(ieee, kZeroIeee, 8) == 0;
+}
+
 static void logDeviceEvent(
     const char *eventName,
     const uint8_t ieee[8],
@@ -134,6 +139,10 @@ void ZigbeeCoordinator::setDeviceBoundHandler(DeviceBoundFn handler) {
     deviceBoundHandler = handler;
 }
 
+void ZigbeeCoordinator::setRegistryChangedHandler(RegistryChangedFn handler) {
+    registryChangedHandler = handler;
+}
+
 void ZigbeeCoordinator::attachLibraryCallbacks(void (*withSource)(bool, uint8_t, esp_zb_zcl_addr_t)) {
     zigbeeSwitch.onLightStateChangeWithSource(withSource);
 }
@@ -199,6 +208,9 @@ void ZigbeeCoordinator::startPairingWindow(uint8_t seconds) {
     pairingUntilMs = millis() + (unsigned long)seconds * 1000UL;
     pairingLedToggleMs = 0;
     pairingLedOn = false;
+    for (int i = 0; i < kMaxBoundDevices; i++) {
+        boundDevices[i].pairingOffered = false;
+    }
 }
 
 void ZigbeeCoordinator::stopPairingWindow() {
@@ -265,10 +277,23 @@ void ZigbeeCoordinator::storeBoundDevice(zb_device_params_t *device) {
     slot->shortAddr = shortAddr;
     slot->endpoint = endpoint;
     slot->occupied = true;
+    const bool usableIdentity = shortAddr != 0 && shortAddr != 0xFFFF
+        && DeviceTopicMap::isUsableEndpoint(endpoint) && !isZeroIeee(slot->ieee);
+    if (!usableIdentity) {
+        if (isNewDevice) {
+            slot->occupied = false;
+        }
+        LOGGER.info(
+            "Ignoring incomplete join ieee=" + formatIeeeText(slot->ieee)
+            + " nwk=0x" + String(shortAddr, HEX) + " ep=" + String(endpoint)
+        );
+        return;
+    }
     if (isNewDevice) {
         logDeviceEvent("join", slot->ieee, slot->shortAddr, slot->endpoint, registeredName(slot->ieee));
     }
-    if (deviceBoundHandler != nullptr && (isNewDevice || addressChanged)) {
+    if (deviceBoundHandler != nullptr && (isNewDevice || addressChanged || !slot->pairingOffered)) {
+        slot->pairingOffered = true;
         deviceBoundHandler(slot);
     }
 }
@@ -277,6 +302,23 @@ void ZigbeeCoordinator::refreshBoundDevices() {
     std::list<zb_device_params_t *> boundLights = zigbeeSwitch.getBoundDevices();
     for (zb_device_params_t *device : boundLights) {
         storeBoundDevice(device);
+    }
+}
+
+void ZigbeeCoordinator::refreshRegisteredShorts() {
+    if (registeredMap == nullptr) {
+        return;
+    }
+    int slotIndex = registeredMap->nextUsedIndex(0);
+    while (slotIndex >= 0) {
+        DeviceTopicEntry *entry = registeredMap->slotAt(slotIndex);
+        if (entry != nullptr && entry->used) {
+            const uint16_t resolvedShort = esp_zb_address_short_by_ieee(entry->ieee);
+            if (resolvedShort != 0 && resolvedShort != 0xFFFF) {
+                rememberShortIeee(resolvedShort, entry->ieee, 0);
+            }
+        }
+        slotIndex = registeredMap->nextUsedIndex(slotIndex + 1);
     }
 }
 
@@ -292,6 +334,7 @@ void ZigbeeCoordinator::dispatch() {
     if (zigbeeSwitch.bound()) {
         refreshBoundDevices();
     }
+    refreshRegisteredShorts();
 }
 
 BoundZigbeeDevice *ZigbeeCoordinator::findByIeee(const uint8_t ieee[8]) {
@@ -312,6 +355,34 @@ BoundZigbeeDevice *ZigbeeCoordinator::findByShortAddr(uint16_t shortAddr) {
     return nullptr;
 }
 
+void ZigbeeCoordinator::rememberShortIeee(uint16_t shortAddr, const uint8_t ieee[8], uint8_t endpoint) {
+    if (ieee == nullptr || isZeroIeee(ieee) || shortAddr == 0 || shortAddr == 0xFFFF) {
+        return;
+    }
+    BoundZigbeeDevice *slot = findByIeee(ieee);
+    if (slot == nullptr) {
+        slot = findByShortAddr(shortAddr);
+    }
+    if (slot == nullptr) {
+        for (int i = 0; i < kMaxBoundDevices; i++) {
+            if (!boundDevices[i].occupied) {
+                slot = &boundDevices[i];
+                memset(slot, 0, sizeof(BoundZigbeeDevice));
+                break;
+            }
+        }
+    }
+    if (slot == nullptr) {
+        return;
+    }
+    memcpy(slot->ieee, ieee, 8);
+    slot->shortAddr = shortAddr;
+    if (DeviceTopicMap::isUsableEndpoint(endpoint)) {
+        slot->endpoint = endpoint;
+    }
+    slot->occupied = true;
+}
+
 void ZigbeeCoordinator::resolveIeeeFromSource(esp_zb_zcl_addr_t source, uint8_t ieee[8], uint16_t *shortAddr) {
     memset(ieee, 0, 8);
     *shortAddr = 0;
@@ -321,13 +392,141 @@ void ZigbeeCoordinator::resolveIeeeFromSource(esp_zb_zcl_addr_t source, uint8_t 
         if (known != nullptr) {
             *shortAddr = known->shortAddr;
         }
-        return;
+        if (*shortAddr == 0 || *shortAddr == 0xFFFF) {
+            const uint16_t resolvedShort = esp_zb_address_short_by_ieee(ieee);
+            if (resolvedShort != 0 && resolvedShort != 0xFFFF) {
+                *shortAddr = resolvedShort;
+            }
+        }
+        if (!isZeroIeee(ieee)) {
+            rememberShortIeee(*shortAddr, ieee, 0);
+            return;
+        }
     }
     *shortAddr = source.u.short_addr;
     BoundZigbeeDevice *known = findByShortAddr(*shortAddr);
-    if (known != nullptr) {
+    if (known != nullptr && !isZeroIeee(known->ieee)) {
         memcpy(ieee, known->ieee, 8);
+        return;
     }
+    if (*shortAddr != 0 && *shortAddr != 0xFFFF) {
+        uint8_t resolvedIeee[8];
+        memset(resolvedIeee, 0, sizeof(resolvedIeee));
+        if (esp_zb_ieee_address_by_short(*shortAddr, resolvedIeee) == ESP_OK && !isZeroIeee(resolvedIeee)) {
+            memcpy(ieee, resolvedIeee, 8);
+            rememberShortIeee(*shortAddr, ieee, 0);
+            return;
+        }
+        if (registeredMap != nullptr) {
+            int slotIndex = registeredMap->nextUsedIndex(0);
+            while (slotIndex >= 0) {
+                DeviceTopicEntry *entry = registeredMap->slotAt(slotIndex);
+                if (entry != nullptr && entry->used) {
+                    const uint16_t mappedShort = esp_zb_address_short_by_ieee(entry->ieee);
+                    if (mappedShort == *shortAddr) {
+                        memcpy(ieee, entry->ieee, 8);
+                        rememberShortIeee(*shortAddr, ieee, 0);
+                        return;
+                    }
+                }
+                slotIndex = registeredMap->nextUsedIndex(slotIndex + 1);
+            }
+        }
+        for (int i = 0; i < kMaxBoundDevices; i++) {
+            if (!boundDevices[i].occupied || isZeroIeee(boundDevices[i].ieee)) {
+                continue;
+            }
+            if (boundDevices[i].shortAddr == 0 || boundDevices[i].shortAddr == 0xFFFF) {
+                const uint16_t mappedShort = esp_zb_address_short_by_ieee(boundDevices[i].ieee);
+                if (mappedShort == *shortAddr) {
+                    memcpy(ieee, boundDevices[i].ieee, 8);
+                    rememberShortIeee(*shortAddr, ieee, 0);
+                    return;
+                }
+            }
+        }
+    }
+}
+
+bool ZigbeeCoordinator::migrateRegisteredIeee(const uint8_t previousIeee[8], const uint8_t nextIeee[8]) {
+    if (registeredMap == nullptr || previousIeee == nullptr || nextIeee == nullptr) {
+        return false;
+    }
+    if (isZeroIeee(previousIeee) || isZeroIeee(nextIeee) || memcmp(previousIeee, nextIeee, 8) == 0) {
+        return false;
+    }
+    DeviceTopicEntry *previous = registeredMap->findByIeee(previousIeee);
+    if (previous == nullptr || registeredMap->findByIeee(nextIeee) != nullptr) {
+        return false;
+    }
+    if (registeredMap->upsert(
+            nextIeee,
+            previous->friendlyName,
+            previous->stateTopic,
+            previous->commandTopic,
+            previous->availabilityTopic,
+            previous->channelCount
+        )
+        == nullptr) {
+        return false;
+    }
+    registeredMap->removeByIeee(previousIeee);
+    LOGGER.info(
+        "Moved registered device " + String(registeredName(nextIeee) != nullptr ? registeredName(nextIeee) : "")
+        + " ieee=" + formatIeeeText(previousIeee) + " -> ieee=" + formatIeeeText(nextIeee)
+    );
+    if (registryChangedHandler != nullptr) {
+        registryChangedHandler();
+    }
+    return true;
+}
+
+void ZigbeeCoordinator::offerPairingIfNeeded(const uint8_t ieee[8]) {
+    BoundZigbeeDevice *slot = findByIeee(ieee);
+    if (slot == nullptr || deviceBoundHandler == nullptr || slot->pairingOffered) {
+        return;
+    }
+    const bool usableIdentity = slot->shortAddr != 0 && slot->shortAddr != 0xFFFF
+        && DeviceTopicMap::isUsableEndpoint(slot->endpoint) && !isZeroIeee(slot->ieee);
+    if (!usableIdentity) {
+        return;
+    }
+    slot->pairingOffered = true;
+    if (!isRegistered(slot->ieee)) {
+        logDeviceEvent("join", slot->ieee, slot->shortAddr, slot->endpoint, registeredName(slot->ieee));
+    }
+    deviceBoundHandler(slot);
+}
+
+void ZigbeeCoordinator::adoptReportIdentity(const uint8_t ieee[8], uint16_t shortAddr, uint8_t endpoint) {
+    if (ieee == nullptr || isZeroIeee(ieee) || shortAddr == 0 || shortAddr == 0xFFFF) {
+        return;
+    }
+    rememberShortIeee(shortAddr, ieee, endpoint);
+    if (!isRegistered(ieee)) {
+        DeviceTopicEntry *orphan = nullptr;
+        int orphanCount = 0;
+        if (registeredMap != nullptr) {
+            int slotIndex = registeredMap->nextUsedIndex(0);
+            while (slotIndex >= 0) {
+                DeviceTopicEntry *entry = registeredMap->slotAt(slotIndex);
+                if (entry != nullptr && entry->used) {
+                    const uint16_t mappedShort = esp_zb_address_short_by_ieee(entry->ieee);
+                    if (mappedShort == 0 || mappedShort == 0xFFFF) {
+                        orphan = entry;
+                        orphanCount++;
+                    }
+                }
+                slotIndex = registeredMap->nextUsedIndex(slotIndex + 1);
+            }
+        }
+        if (orphanCount == 1 && orphan != nullptr) {
+            uint8_t previousIeee[8];
+            memcpy(previousIeee, orphan->ieee, 8);
+            migrateRegisteredIeee(previousIeee, ieee);
+        }
+    }
+    offerPairingIfNeeded(ieee);
 }
 
 void ZigbeeCoordinator::setRegisteredMap(DeviceTopicMap *deviceMap) {
@@ -356,6 +555,13 @@ void ZigbeeCoordinator::upsertRegisteredDevice(const DeviceTopicEntry *entry) {
         == nullptr) {
         LOGGER.warning("Registered device table full");
     }
+}
+
+void ZigbeeCoordinator::removeRegisteredDevice(const uint8_t ieee[8]) {
+    if (registeredMap == nullptr || ieee == nullptr) {
+        return;
+    }
+    registeredMap->removeByIeee(ieee);
 }
 
 void ZigbeeCoordinator::markRegistryReady() {
@@ -388,6 +594,7 @@ void ZigbeeCoordinator::handleIasZoneStatus(
     uint8_t ieee[8];
     uint16_t shortAddr = 0;
     resolveIeeeFromSource(message->info.src_address, ieee, &shortAddr);
+    adoptReportIdentity(ieee, shortAddr, message->info.src_endpoint);
     const bool alarm = (message->zone_status & ESP_ZB_ZCL_IAS_ZONE_ZONE_STATUS_ALARM1) != 0;
     char eventName[48];
     snprintf(
@@ -416,6 +623,7 @@ void ZigbeeCoordinator::handleIasZoneEnroll(
     if (shortAddr == 0 || shortAddr == 0xFFFF) {
         shortAddr = message->info.src_address.u.short_addr;
     }
+    adoptReportIdentity(ieee, shortAddr, message->info.src_endpoint);
     const uint8_t zoneId = nextIasZoneId;
     if (nextIasZoneId < 254) {
         nextIasZoneId++;
@@ -444,6 +652,7 @@ void ZigbeeCoordinator::handleAttributeReport(
     uint8_t ieee[8];
     uint16_t shortAddr = 0;
     resolveIeeeFromSource(srcAddress, ieee, &shortAddr);
+    adoptReportIdentity(ieee, shortAddr, srcEndpoint);
     uint32_t value = 0;
     if (attribute->data.value != nullptr && attribute->data.size > 0) {
         memcpy(&value, attribute->data.value, attribute->data.size > 4 ? 4 : attribute->data.size);
@@ -481,6 +690,7 @@ void ZigbeeCoordinator::handleLightStateWithSource(bool on, uint8_t endpoint, es
     uint8_t ieee[8];
     uint16_t shortAddr = 0;
     resolveIeeeFromSource(source, ieee, &shortAddr);
+    adoptReportIdentity(ieee, shortAddr, endpoint);
     logDeviceEvent(
         on ? "message ON" : "message OFF",
         ieee,

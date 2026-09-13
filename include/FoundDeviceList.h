@@ -20,6 +20,14 @@ public:
 
     void clear();
     void noteJoin(const SpiFrame &frame, DeviceTopicMap *registered);
+    void noteIdentity(
+        const uint8_t ieee[8],
+        uint16_t shortAddr,
+        uint8_t endpoint,
+        const char *manufacturer,
+        const char *model,
+        DeviceTopicMap *registered
+    );
     void removeIeee(const uint8_t ieee[8]);
     String listJson(DeviceTopicMap *formatter);
 

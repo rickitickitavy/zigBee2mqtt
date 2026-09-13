@@ -396,6 +396,14 @@ void WebConsole::handleZigbeePost(AsyncWebServerRequest *request) {
     request->send(200, "text/plain", "Saved. Device will restart to apply ZigBee.");
 }
 
+void WebConsole::setDeviceOnlineHandler(WebConsole::DeviceOnlineFn handler) {
+    isDeviceOnline = handler;
+}
+
+void WebConsole::setDevicesFileHandler(WebConsole::DevicesFileFn handler) {
+    devicesFileJson = handler;
+}
+
 void WebConsole::setHardwareApplyHandler(WebConsole::HardwareApplyFn handler) {
     applyHardware = handler;
 }
@@ -432,17 +440,19 @@ void WebConsole::setDeviceServices(
     FoundDeviceList *foundList,
     WebConsole::SearchStartFn startSearchFn,
     WebConsole::SearchStopFn stopSearchFn,
-    WebConsole::DeviceSavedFn onSaved
+    WebConsole::DeviceUpsertedFn upserted,
+    WebConsole::DeviceRemovedFn removed
 ) {
     foundDevices = foundList;
     startSearch = startSearchFn;
     stopSearch = stopSearchFn;
-    onDeviceSaved = onSaved;
+    onDeviceUpserted = upserted;
+    onDeviceRemoved = removed;
 }
 
 void WebConsole::handleDevicesGet(AsyncWebServerRequest *request) {
     DeviceTopicMap *deviceMap = settingsManager->deviceMap();
-    String json = deviceMap->listJson();
+    String json = deviceMap->listJson(isDeviceOnline);
     AsyncWebServerResponse *response = request->beginResponse(200, "application/json", json);
     response->addHeader("Cache-Control", "no-store");
     request->send(response);
@@ -489,15 +499,12 @@ void WebConsole::handleDevicesPost(AsyncWebServerRequest *request) {
         request->send(400, "text/plain", "Device map full");
         return;
     }
-    if (!settingsManager->saveDeviceSlot(deviceMap->slotIndex(entry))) {
-        request->send(500, "text/plain", "Device store failed");
-        return;
-    }
     if (foundDevices != nullptr) {
         foundDevices->removeIeee(ieee);
     }
-    if (onDeviceSaved != nullptr) {
-        onDeviceSaved();
+    if (onDeviceUpserted != nullptr && !onDeviceUpserted(entry)) {
+        request->send(503, "text/plain", "Slave is not ready to store the device");
+        return;
     }
     request->send(200, "text/plain", "Saved");
 }
@@ -518,12 +525,9 @@ void WebConsole::handleDevicesDelete(AsyncWebServerRequest *request) {
         request->send(404, "text/plain", "Device not found");
         return;
     }
-    if (!settingsManager->saveDevicesJson()) {
-        request->send(500, "text/plain", "Device store failed");
+    if (onDeviceRemoved != nullptr && !onDeviceRemoved(ieee)) {
+        request->send(503, "text/plain", "Slave is not ready to store the device");
         return;
-    }
-    if (onDeviceSaved != nullptr) {
-        onDeviceSaved();
     }
     request->send(200, "text/plain", "Deleted");
 }
@@ -540,9 +544,6 @@ void WebConsole::handleDevicesFoundGet(AsyncWebServerRequest *request) {
 }
 
 void WebConsole::handleDevicesSearchPost(AsyncWebServerRequest *request) {
-    if (foundDevices != nullptr) {
-        foundDevices->clear();
-    }
     if (startSearch == nullptr || !startSearch()) {
         LOGGER.warning("Device search did not start");
         request->send(500, "text/plain", "Slave is not ready for pairing");
@@ -553,7 +554,7 @@ void WebConsole::handleDevicesSearchPost(AsyncWebServerRequest *request) {
 }
 
 void WebConsole::handleDevicesStoreGet(AsyncWebServerRequest *request) {
-    String json = settingsManager->devicesJsonFile();
+    String json = devicesFileJson != nullptr ? devicesFileJson() : String("[]");
     AsyncWebServerResponse *response = request->beginResponse(200, "application/json", json);
     response->addHeader("Cache-Control", "no-store");
     request->send(response);

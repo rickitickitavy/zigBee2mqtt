@@ -222,6 +222,17 @@ void DeviceTopicMap::clearAll() {
     memset(slots, 0, sizeof(DeviceTopicEntry) * DEVICE_MAP_SLOTS);
 }
 
+void DeviceTopicMap::replaceFrom(const DeviceTopicMap *source) {
+    if (slots == nullptr) {
+        return;
+    }
+    if (source == nullptr || source->slots == nullptr) {
+        clearAll();
+        return;
+    }
+    memcpy(slots, source->slots, sizeof(DeviceTopicEntry) * DEVICE_MAP_SLOTS);
+}
+
 int DeviceTopicMap::nextUsedIndex(int startIndex) const {
     if (slots == nullptr) {
         return -1;
@@ -305,7 +316,7 @@ bool DeviceTopicMap::saveToFile(const char *path) {
     if (!file) {
         return false;
     }
-    const String json = listJson();
+    const String json = listStoreJson();
     const size_t written = file.print(json);
     file.close();
     return written == json.length();
@@ -320,7 +331,8 @@ size_t DeviceTopicMap::packSyncPayload(
     if (out == nullptr || outMax < 1) {
         return 0;
     }
-    const bool hasEntry = (flags & SPI_DEVICE_SYNC_ENTRY) != 0 && entry != nullptr;
+    const bool hasEntry = entry != nullptr
+        && ((flags & SPI_DEVICE_SYNC_ENTRY) != 0 || (flags & SPI_DEVICE_SYNC_DELETE) != 0);
     const size_t length = hasEntry ? SPI_DEVICE_SYNC_ENTRY_LEN : 1;
     if (outMax < length) {
         return 0;
@@ -351,7 +363,7 @@ bool DeviceTopicMap::unpackSyncPayload(
     if (entry != nullptr) {
         memset(entry, 0, sizeof(DeviceTopicEntry));
     }
-    if ((*flags & SPI_DEVICE_SYNC_ENTRY) == 0) {
+    if ((*flags & (SPI_DEVICE_SYNC_ENTRY | SPI_DEVICE_SYNC_DELETE)) == 0) {
         return true;
     }
     if (length < SPI_DEVICE_SYNC_ENTRY_LEN_NO_CHANNELS || entry == nullptr) {
@@ -437,6 +449,10 @@ bool DeviceTopicMap::parseIeee(const char *text, uint8_t ieee[8]) {
 }
 
 String DeviceTopicMap::listJson() {
+    return listJson(nullptr);
+}
+
+String DeviceTopicMap::listJson(OnlineFn isOnline) {
     String json = "[";
     bool first = true;
     if (slots == nullptr) {
@@ -464,8 +480,16 @@ String DeviceTopicMap::listJson() {
         appendJsonEscaped(json, entry->availabilityTopic, sizeof(entry->availabilityTopic));
         json += "\",\"channels\":";
         json += String(entry->channelCount);
+        if (isOnline != nullptr) {
+            json += ",\"online\":";
+            json += isOnline(entry->ieee) ? "true" : "false";
+        }
         json += "}";
     }
     json += "]";
     return json;
+}
+
+String DeviceTopicMap::listStoreJson() {
+    return listJson(nullptr);
 }

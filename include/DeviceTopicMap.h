@@ -29,6 +29,7 @@ public:
     static bool parseChannelPayload(const char *payload, uint8_t *endpoint, String *action);
     bool removeByIeee(const uint8_t ieee[8]);
     void clearAll();
+    void replaceFrom(const DeviceTopicMap *source);
     int slotIndex(const DeviceTopicEntry *entry) const;
     DeviceTopicEntry *slotAt(int index);
     int usedCount() const;
@@ -36,7 +37,11 @@ public:
 
     String formatIeee(const uint8_t ieee[8]);
     bool parseIeee(const char *text, uint8_t ieee[8]);
+    using OnlineFn = bool (*)(const uint8_t ieee[8]);
+
     String listJson();
+    String listJson(OnlineFn isOnline);
+    String listStoreJson();
     void replaceFromJson(const String &json);
     bool loadFromFile(const char *path);
     bool saveToFile(const char *path);

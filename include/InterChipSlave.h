@@ -10,6 +10,7 @@ public:
     using PermitJoinFn = bool (*)(uint8_t seconds);
     using OnOffFn = void (*)(const uint8_t ieee[8], const char *command, uint8_t endpoint);
     using DeviceSyncFn = void (*)(uint8_t flags, const DeviceTopicEntry *entry);
+    using DevicesFileFn = String (*)();
 
     void begin();
     void pump();
@@ -31,27 +32,36 @@ public:
     void applyDeferredSettings();
     void applyDeferredRadioCommands();
     void pumpDeviceDump();
+    void pumpDevicesFileDump();
+    void requestDeviceDump();
+    void requestDevicesFileDump();
+    void setDevicesFileSource(DevicesFileFn handler);
     void setPumpPaused(bool paused);
     void resumeAfterRadioPause();
 
 private:
-    static constexpr int kQueue = 8;
+    static constexpr int kQueue = 16;
     static constexpr int kHwSlots = 2;
 
     struct QueuedFrame {
-        bool used = false;
         SpiFrame frame{};
     };
 
     QueuedFrame outbound[kQueue]{};
+    int outboundCount = 0;
     SettingsFn settingsHandler = nullptr;
     PermitJoinFn permitJoinHandler = nullptr;
     OnOffFn onOffHandler = nullptr;
     DeviceSyncFn deviceSyncHandler = nullptr;
     DeviceTopicMap *deviceMapSource = nullptr;
+    DevicesFileFn devicesFileSource = nullptr;
     bool deviceDumpPending = false;
-    bool deviceDumpResetSent = false;
+    bool deviceDumpHeaderSent = false;
     int deviceDumpIndex = 0;
+    bool fileDumpPending = false;
+    bool fileDumpStarted = false;
+    int fileDumpOffset = 0;
+    String fileDumpText;
     uint8_t nextSeq = 1;
     bool readySent = false;
     bool spiReady = false;
@@ -70,7 +80,9 @@ private:
     bool enqueueEvent(uint8_t cmd, const uint8_t *payload, uint16_t length);
     bool enqueueReply(uint8_t cmd, uint8_t seq, const uint8_t *payload, uint16_t length);
     bool tryEnqueue(uint8_t cmd, uint8_t seq, const uint8_t *payload, uint16_t length);
-    void dropOldestLogRecord();
+    bool dropOldestLogRecord();
+    bool enqueueDeviceMap(const uint8_t *payload, uint16_t length);
+    void removeOutboundAt(int index);
     void updateIrq();
     void handleHostFrame(const SpiFrame &frame);
     bool takeOutbound(SpiFrame &frame);

@@ -8,8 +8,11 @@ class WebConsole {
 public:
     using SearchStartFn = bool (*)();
     using SearchStopFn = void (*)();
-    using DeviceSavedFn = void (*)();
+    using DeviceUpsertedFn = bool (*)(const DeviceTopicEntry *entry);
+    using DeviceRemovedFn = bool (*)(const uint8_t ieee[8]);
     using HardwareApplyFn = void (*)(uint32_t spiSpeedHz);
+    using DeviceOnlineFn = bool (*)(const uint8_t ieee[8]);
+    using DevicesFileFn = String (*)();
 
     explicit WebConsole(SettingsManager *settingsManager);
 
@@ -19,17 +22,23 @@ public:
         FoundDeviceList *foundDevices,
         SearchStartFn startSearch,
         SearchStopFn stopSearch,
-        DeviceSavedFn onDeviceSaved
+        DeviceUpsertedFn onDeviceUpserted,
+        DeviceRemovedFn onDeviceRemoved
     );
     void setHardwareApplyHandler(HardwareApplyFn handler);
+    void setDeviceOnlineHandler(DeviceOnlineFn handler);
+    void setDevicesFileHandler(DevicesFileFn handler);
 
 private:
     SettingsManager *settingsManager;
     FoundDeviceList *foundDevices = nullptr;
     SearchStartFn startSearch = nullptr;
     SearchStopFn stopSearch = nullptr;
-    DeviceSavedFn onDeviceSaved = nullptr;
+    DeviceUpsertedFn onDeviceUpserted = nullptr;
+    DeviceRemovedFn onDeviceRemoved = nullptr;
     HardwareApplyFn applyHardware = nullptr;
+    DeviceOnlineFn isDeviceOnline = nullptr;
+    DevicesFileFn devicesFileJson = nullptr;
     AsyncWebServer server;
     String requestBody;
     bool otaStarted = false;

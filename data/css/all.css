@@ -627,6 +627,28 @@ html, body {
     background: #d8d0ef;
 }
 
+.data-table th.device-online-cell,
+.data-table td.device-online-cell {
+    width: 1.25rem;
+    padding-left: 0.45rem;
+    padding-right: 0.15rem;
+    text-align: center;
+    word-break: normal;
+}
+
+.device-online-dot {
+    display: inline-block;
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 50%;
+    background: transparent;
+    vertical-align: middle;
+}
+
+.device-online-dot.is-online {
+    background: #1aaa4a;
+}
+
 .data-table td.actions {
     width: 1%;
     white-space: nowrap;

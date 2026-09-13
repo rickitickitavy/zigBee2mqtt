@@ -15,7 +15,7 @@ bool DeviceStore::begin() {
         return false;
     }
     if (!topicMap.loadFromFile(DEVICES_STORE_PATH)) {
-        LOGGER.info("Slave device store file missing; keeping empty RAM until host sends devices");
+        LOGGER.info("Slave device store file missing; starting with an empty list");
         return true;
     }
     LOGGER.info("Slave device store loaded " + String(topicMap.usedCount()) + " device(s)");
@@ -32,6 +32,20 @@ bool DeviceStore::reloadFromFile() {
 
 DeviceTopicMap *DeviceStore::deviceMap() {
     return &topicMap;
+}
+
+String DeviceStore::readFileText() {
+    File file = LittleFS.open(DEVICES_STORE_PATH, "r");
+    if (!file) {
+        return String("[]");
+    }
+    String json = file.readString();
+    file.close();
+    json.trim();
+    if (json.length() == 0) {
+        return String("[]");
+    }
+    return json;
 }
 
 void DeviceStore::requestPersist(bool allowEmpty) {
