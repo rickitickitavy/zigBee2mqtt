@@ -1,7 +1,7 @@
 #include "ZigbeeCoordinator.h"
 #include "Logger.h"
 #include "Defines.h"
-#include "pins.h"
+#include "StatusRgb.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -165,6 +165,7 @@ bool ZigbeeCoordinator::begin(uint8_t channel, uint8_t permitJoinSec) {
     LOGGER.info("Starting Zigbee coordinator on channel " + String(channel));
     if (!Zigbee.begin(ZIGBEE_COORDINATOR)) {
         LOGGER.error("Zigbee.begin failed");
+        STATUS_RGB.setCritical(true);
         return false;
     }
 
@@ -208,6 +209,7 @@ void ZigbeeCoordinator::startPairingWindow(uint8_t seconds) {
     pairingUntilMs = millis() + (unsigned long)seconds * 1000UL;
     pairingLedToggleMs = 0;
     pairingLedOn = false;
+    STATUS_RGB.setPairingHeld(true);
     for (int i = 0; i < kMaxBoundDevices; i++) {
         boundDevices[i].pairingOffered = false;
     }
@@ -216,7 +218,7 @@ void ZigbeeCoordinator::startPairingWindow(uint8_t seconds) {
 void ZigbeeCoordinator::stopPairingWindow() {
     pairingUntilMs = 0;
     pairingLedOn = false;
-    rgbLedWrite(PIN_STATUS_RGB, 0, 0, 0);
+    STATUS_RGB.setPairingHeld(false);
 }
 
 void ZigbeeCoordinator::updatePairingLed() {
@@ -227,16 +229,15 @@ void ZigbeeCoordinator::updatePairingLed() {
         stopPairingWindow();
         return;
     }
+    if (!STATUS_RGB.allowsPairingBlink()) {
+        return;
+    }
     if ((millis() - pairingLedToggleMs) < 250) {
         return;
     }
     pairingLedToggleMs = millis();
     pairingLedOn = !pairingLedOn;
-    if (pairingLedOn) {
-        rgbLedWrite(PIN_STATUS_RGB, 0, 0, 48);
-    } else {
-        rgbLedWrite(PIN_STATUS_RGB, 0, 0, 0);
-    }
+    STATUS_RGB.writePairingPhase(pairingLedOn);
 }
 
 void ZigbeeCoordinator::storeBoundDevice(zb_device_params_t *device) {

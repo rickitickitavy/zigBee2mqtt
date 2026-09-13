@@ -11,6 +11,7 @@ public:
 
     bool isApMode() const;
     bool isStaConnected() const;
+    bool hasUsableInterface() const;
     void setInterfaceReadyHandler(InterfaceReadyFn handler);
     void applyStaRadio();
     void enableIeee154Coex();

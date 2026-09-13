@@ -56,6 +56,13 @@ bool WiFiController::isStaConnected() const {
     return WiFi.status() == WL_CONNECTED;
 }
 
+bool WiFiController::hasUsableInterface() const {
+    if (isStaConnected()) {
+        return true;
+    }
+    return apActive && isApRadioUp();
+}
+
 void WiFiController::setInterfaceReadyHandler(InterfaceReadyFn handler) {
     interfaceReadyHandler = handler;
 }
