@@ -245,14 +245,17 @@ void InterChipSlave::enqueueLogLine(const char *line) {
     }
 }
 
-void InterChipSlave::enqueueAttrReport(bool on, const uint8_t ieee[8], uint8_t endpoint, uint16_t shortAddr) {
-    uint8_t payload[12];
+void InterChipSlave::enqueueAttrReport(const char *message, const uint8_t ieee[8], uint8_t endpoint, uint16_t shortAddr) {
+    uint8_t payload[11 + SPI_DEVICE_MESSAGE_MAX];
+    memset(payload, 0, sizeof(payload));
     memcpy(payload, ieee, 8);
     payload[8] = endpoint;
     payload[9] = (uint8_t)(shortAddr & 0xFF);
     payload[10] = (uint8_t)((shortAddr >> 8) & 0xFF);
-    payload[11] = on ? 1 : 0;
-    enqueueEvent(SpiEvtAttrReport, payload, 12);
+    const char *body = message != nullptr ? message : "";
+    strncpy((char *)payload + 11, body, SPI_DEVICE_MESSAGE_MAX - 1);
+    const uint16_t length = (uint16_t)(11 + strlen((char *)payload + 11) + 1);
+    enqueueEvent(SpiEvtAttrReport, payload, length);
 }
 
 void InterChipSlave::enqueueDeviceJoin(
@@ -338,9 +341,14 @@ void InterChipSlave::handleHostFrame(const SpiFrame &frame) {
         enqueueEvent(SpiEvtCmdResult, &ok, 1);
         return;
     }
-    if (frame.cmd == SpiCmdZclOnOff && frame.length >= 9) {
+    if (frame.cmd == SpiCmdZclOnOff && frame.length >= 10) {
         memcpy(deferredOnOffIeee, frame.payload, 8);
-        deferredOnOffAction = frame.payload[8];
+        deferredOnOffEndpoint = frame.payload[8];
+        memset(deferredOnOffCommand, 0, sizeof(deferredOnOffCommand));
+        const size_t commandLength = frame.length - 9;
+        const size_t bounded =
+            commandLength >= sizeof(deferredOnOffCommand) ? sizeof(deferredOnOffCommand) - 1 : commandLength;
+        memcpy(deferredOnOffCommand, frame.payload + 9, bounded);
         onOffPending = true;
         uint8_t ok = 1;
         enqueueEvent(SpiEvtCmdResult, &ok, 1);
@@ -424,7 +432,7 @@ void InterChipSlave::applyDeferredRadioCommands() {
         }
     }
     if (onOffPending && onOffHandler != nullptr) {
-        onOffHandler(deferredOnOffIeee, deferredOnOffAction);
+        onOffHandler(deferredOnOffIeee, deferredOnOffCommand, deferredOnOffEndpoint);
         onOffPending = false;
     }
 }

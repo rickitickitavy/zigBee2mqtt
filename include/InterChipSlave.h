@@ -8,13 +8,13 @@ class InterChipSlave {
 public:
     using SettingsFn = void (*)(uint8_t channel, uint8_t permitJoinSec, uint32_t unixSec);
     using PermitJoinFn = bool (*)(uint8_t seconds);
-    using OnOffFn = void (*)(const uint8_t ieee[8], uint8_t action);
+    using OnOffFn = void (*)(const uint8_t ieee[8], const char *command, uint8_t endpoint);
     using DeviceSyncFn = void (*)(uint8_t flags, const DeviceTopicEntry *entry);
 
     void begin();
     void pump();
     void enqueueLogLine(const char *line);
-    void enqueueAttrReport(bool on, const uint8_t ieee[8], uint8_t endpoint, uint16_t shortAddr);
+    void enqueueAttrReport(const char *message, const uint8_t ieee[8], uint8_t endpoint, uint16_t shortAddr);
     void enqueueDeviceJoin(
         const uint8_t ieee[8],
         uint16_t shortAddr,
@@ -63,7 +63,8 @@ private:
     uint8_t pendingPermitJoinSec = 0;
     uint8_t deferredPermitSeconds = 0;
     uint8_t deferredOnOffIeee[8]{};
-    uint8_t deferredOnOffAction = 0;
+    char deferredOnOffCommand[SPI_DEVICE_MESSAGE_MAX]{};
+    uint8_t deferredOnOffEndpoint = 255;
     uint32_t pendingUnixSec = 0;
 
     bool enqueueEvent(uint8_t cmd, const uint8_t *payload, uint16_t length);

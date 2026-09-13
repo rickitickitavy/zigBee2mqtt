@@ -19,7 +19,7 @@ struct BoundZigbeeDevice {
 
 class ZigbeeCoordinator {
 public:
-    using LightStateFn = void (*)(bool on, const uint8_t ieee[8], uint8_t endpoint, uint16_t shortAddr);
+    using LightStateFn = void (*)(const char *message, const uint8_t ieee[8], uint8_t endpoint, uint16_t shortAddr);
     using DeviceBoundFn = void (*)(const BoundZigbeeDevice *device);
 
     ZigbeeCoordinator();
@@ -32,7 +32,7 @@ public:
     void refreshBoundDevices();
     void dispatch();
     String devicesJson(DeviceTopicMap *topicMap);
-    bool controlOnOff(const uint8_t ieee[8], const char *command);
+    bool controlOnOff(const uint8_t ieee[8], const char *command, uint8_t endpoint);
     BoundZigbeeDevice *findByIeee(const uint8_t ieee[8]);
     BoundZigbeeDevice *findByShortAddr(uint16_t shortAddr);
     void setLightStateHandler(LightStateFn handler);

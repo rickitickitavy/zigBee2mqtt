@@ -32,8 +32,10 @@ constexpr uint8_t SPI_DEVICE_SYNC_ENTRY = 0x04;
 constexpr uint8_t SPI_DEVICE_SYNC_ALLOW_EMPTY = 0x08;
 constexpr size_t SPI_DEVICE_SYNC_NAME_LEN = 24;
 constexpr size_t SPI_DEVICE_SYNC_TOPIC_LEN = 64;
-constexpr size_t SPI_DEVICE_SYNC_ENTRY_LEN =
+constexpr size_t SPI_DEVICE_SYNC_ENTRY_LEN_NO_CHANNELS =
     1 + 8 + SPI_DEVICE_SYNC_NAME_LEN + (SPI_DEVICE_SYNC_TOPIC_LEN * 3);
+constexpr size_t SPI_DEVICE_SYNC_ENTRY_LEN = SPI_DEVICE_SYNC_ENTRY_LEN_NO_CHANNELS + 1;
+constexpr size_t SPI_DEVICE_MESSAGE_MAX = 64;
 static_assert(SPI_DEVICE_SYNC_ENTRY_LEN <= SPI_MAX_PAYLOAD, "device sync frame must fit SPI payload");
 
 enum SpiEvent : uint8_t {

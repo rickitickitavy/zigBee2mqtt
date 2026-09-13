@@ -463,6 +463,10 @@ void WebConsole::handleDevicesPost(AsyncWebServerRequest *request) {
     extractJsonString(requestBody.c_str(), "state", stateTopic);
     extractJsonString(requestBody.c_str(), "command", commandTopic);
     extractJsonString(requestBody.c_str(), "availability", availability);
+    int parsedChannels = DEVICE_CHANNEL_COUNT_DEFAULT;
+    if (!extractJsonInt(requestBody.c_str(), "channels", parsedChannels)) {
+        parsedChannels = DEVICE_CHANNEL_COUNT_DEFAULT;
+    }
     if (friendlyName.length() == 0) {
         request->send(400, "text/plain", "Need friendly name");
         return;
@@ -478,7 +482,8 @@ void WebConsole::handleDevicesPost(AsyncWebServerRequest *request) {
         friendlyName.c_str(),
         stateTopic.c_str(),
         commandTopic.c_str(),
-        availability.c_str()
+        availability.c_str(),
+        DeviceTopicMap::normalizeChannelCount(parsedChannels)
     );
     if (entry == nullptr) {
         request->send(400, "text/plain", "Device map full");

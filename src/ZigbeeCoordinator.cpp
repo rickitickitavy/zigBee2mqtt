@@ -350,7 +350,8 @@ void ZigbeeCoordinator::upsertRegisteredDevice(const DeviceTopicEntry *entry) {
             entry->friendlyName,
             entry->stateTopic,
             entry->commandTopic,
-            entry->availabilityTopic
+            entry->availabilityTopic,
+            entry->channelCount
         )
         == nullptr) {
         LOGGER.warning("Registered device table full");
@@ -398,7 +399,7 @@ void ZigbeeCoordinator::handleIasZoneStatus(
     );
     logDeviceEvent(eventName, ieee, shortAddr, message->info.src_endpoint, registeredName(ieee));
     if (lightStateHandler != nullptr) {
-        lightStateHandler(alarm, ieee, message->info.src_endpoint, shortAddr);
+        lightStateHandler(alarm ? "LEAK" : "DRY", ieee, message->info.src_endpoint, shortAddr);
     }
 }
 
@@ -457,7 +458,7 @@ void ZigbeeCoordinator::handleAttributeReport(
             registeredName(ieee)
         );
         if (lightStateHandler != nullptr) {
-            lightStateHandler(on, ieee, srcEndpoint, shortAddr);
+            lightStateHandler(on ? "ON" : "OFF", ieee, srcEndpoint, shortAddr);
         }
         return;
     }
@@ -465,12 +466,15 @@ void ZigbeeCoordinator::handleAttributeReport(
     snprintf(
         eventName,
         sizeof(eventName),
-        "message cl=0x%04X attr=0x%04X val=0x%lX",
+        "cl=0x%04X,attr=0x%04X,val=0x%lX",
         (unsigned int)clusterId,
         (unsigned int)attribute->id,
         (unsigned long)value
     );
     logDeviceEvent(eventName, ieee, shortAddr, srcEndpoint, registeredName(ieee));
+    if (lightStateHandler != nullptr) {
+        lightStateHandler(eventName, ieee, srcEndpoint, shortAddr);
+    }
 }
 
 void ZigbeeCoordinator::handleLightStateWithSource(bool on, uint8_t endpoint, esp_zb_zcl_addr_t source) {
@@ -485,11 +489,11 @@ void ZigbeeCoordinator::handleLightStateWithSource(bool on, uint8_t endpoint, es
         registeredName(ieee)
     );
     if (lightStateHandler != nullptr) {
-        lightStateHandler(on, ieee, endpoint, shortAddr);
+        lightStateHandler(on ? "ON" : "OFF", ieee, endpoint, shortAddr);
     }
 }
 
-bool ZigbeeCoordinator::controlOnOff(const uint8_t ieee[8], const char *command) {
+bool ZigbeeCoordinator::controlOnOff(const uint8_t ieee[8], const char *command, uint8_t endpoint) {
     if (!started) {
         LOGGER.warning("Zigbee is not started");
         return false;
@@ -504,36 +508,46 @@ bool ZigbeeCoordinator::controlOnOff(const uint8_t ieee[8], const char *command)
         return false;
     }
 
-    String action = String(command);
+    uint8_t targetEndpoint = endpoint;
+    if (!DeviceTopicMap::isUsableEndpoint(targetEndpoint)) {
+        targetEndpoint = device->endpoint;
+    }
+    if (!DeviceTopicMap::isUsableEndpoint(targetEndpoint)) {
+        LOGGER.warning("No usable Zigbee endpoint for command");
+        return false;
+    }
+
+    const char *body = command != nullptr ? command : "";
+    String action = String(body);
     action.trim();
-    action.toLowerCase();
+    String actionLower = action;
+    actionLower.toLowerCase();
 
     esp_zb_ieee_addr_t ieeeAddr;
     memcpy(ieeeAddr, device->ieee, 8);
 
-    if (action == "on" || action == "1" || action == "true") {
-        logDeviceEvent("command ON", device->ieee, device->shortAddr, device->endpoint, registeredName(device->ieee));
-        zigbeeSwitch.lightOn(device->endpoint, ieeeAddr);
+    char commandLabel[80];
+    snprintf(commandLabel, sizeof(commandLabel), "command %s", action.c_str());
+    logDeviceEvent(
+        commandLabel,
+        device->ieee,
+        device->shortAddr,
+        targetEndpoint,
+        registeredName(device->ieee)
+    );
+    if (actionLower == "on" || actionLower == "1" || actionLower == "true") {
+        zigbeeSwitch.lightOn(targetEndpoint, ieeeAddr);
         return true;
     }
-    if (action == "off" || action == "0" || action == "false") {
-        logDeviceEvent("command OFF", device->ieee, device->shortAddr, device->endpoint, registeredName(device->ieee));
-        zigbeeSwitch.lightOff(device->endpoint, ieeeAddr);
+    if (actionLower == "off" || actionLower == "0" || actionLower == "false") {
+        zigbeeSwitch.lightOff(targetEndpoint, ieeeAddr);
         return true;
     }
-    if (action == "toggle") {
-        logDeviceEvent(
-            "command TOGGLE",
-            device->ieee,
-            device->shortAddr,
-            device->endpoint,
-            registeredName(device->ieee)
-        );
-        zigbeeSwitch.lightToggle(device->endpoint, ieeeAddr);
+    if (actionLower == "toggle") {
+        zigbeeSwitch.lightToggle(targetEndpoint, ieeeAddr);
         return true;
     }
-    LOGGER.warning("Unknown on/off command: " + action);
-    return false;
+    return true;
 }
 
 String ZigbeeCoordinator::devicesJson(DeviceTopicMap *topicMap) {

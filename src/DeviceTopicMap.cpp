@@ -64,15 +64,101 @@ const DeviceTopicEntry *DeviceTopicMap::findByIeee(const uint8_t ieee[8]) const 
     return nullptr;
 }
 
+uint8_t DeviceTopicMap::normalizeChannelCount(int raw) {
+    if (raw == DEVICE_CHANNEL_PARSE) {
+        return DEVICE_CHANNEL_PARSE;
+    }
+    if (raw >= DEVICE_CHANNEL_COUNT_DEFAULT && raw <= DEVICE_CHANNEL_COUNT_MAX) {
+        return (uint8_t)raw;
+    }
+    return DEVICE_CHANNEL_COUNT_DEFAULT;
+}
+
+bool DeviceTopicMap::usesPayloadParse(uint8_t channelCount) {
+    return channelCount == DEVICE_CHANNEL_PARSE;
+}
+
+bool DeviceTopicMap::usesTopicSuffix(uint8_t channelCount) {
+    return channelCount >= 2 && channelCount <= DEVICE_CHANNEL_COUNT_MAX;
+}
+
+bool DeviceTopicMap::isUsableEndpoint(uint8_t endpoint) {
+    return endpoint >= 1 && endpoint <= 240;
+}
+
+String DeviceTopicMap::statePublishTopic(const DeviceTopicEntry *entry, uint8_t endpoint) {
+    if (entry == nullptr || entry->stateTopic[0] == '\0') {
+        return "";
+    }
+    if (usesTopicSuffix(entry->channelCount) && isUsableEndpoint(endpoint) && endpoint != 1) {
+        return String(entry->stateTopic) + "/" + String(endpoint);
+    }
+    return String(entry->stateTopic);
+}
+
+String DeviceTopicMap::statePublishPayload(const DeviceTopicEntry *entry, uint8_t endpoint, const char *message) {
+    const char *body = message != nullptr ? message : "";
+    if (entry != nullptr && usesPayloadParse(entry->channelCount) && isUsableEndpoint(endpoint)) {
+        return String("ch-") + String(endpoint) + "##" + body;
+    }
+    return String(body);
+}
+
+bool DeviceTopicMap::parseChannelPayload(const char *payload, uint8_t *endpoint, String *action) {
+    if (payload == nullptr || endpoint == nullptr || action == nullptr) {
+        return false;
+    }
+    if (strncmp(payload, "ch-", 3) != 0) {
+        return false;
+    }
+    const char *digits = payload + 3;
+    if (*digits < '0' || *digits > '9') {
+        return false;
+    }
+    const int parsed = atoi(digits);
+    const char *separator = strstr(digits, "##");
+    if (separator == nullptr || parsed < 1 || parsed > 240) {
+        return false;
+    }
+    *endpoint = (uint8_t)parsed;
+    *action = String(separator + 2);
+    return true;
+}
+
 DeviceTopicEntry *DeviceTopicMap::findByCommandTopic(const char *topic) {
+    return findByCommandTopic(topic, nullptr);
+}
+
+DeviceTopicEntry *DeviceTopicMap::findByCommandTopic(const char *topic, uint8_t *topicEndpoint) {
     if (slots == nullptr || topic == nullptr || topic[0] == '\0') {
         return nullptr;
     }
+    if (topicEndpoint != nullptr) {
+        *topicEndpoint = 0;
+    }
     for (int i = 0; i < DEVICE_MAP_SLOTS; i++) {
         DeviceTopicEntry *entry = &slots[i];
-        if (entry->used && entry->commandTopic[0] != '\0' && strcmp(entry->commandTopic, topic) == 0) {
+        if (!entry->used || entry->commandTopic[0] == '\0') {
+            continue;
+        }
+        if (strcmp(entry->commandTopic, topic) == 0) {
             return entry;
         }
+        if (!usesTopicSuffix(entry->channelCount)) {
+            continue;
+        }
+        const size_t prefixLength = strlen(entry->commandTopic);
+        if (strncmp(topic, entry->commandTopic, prefixLength) != 0 || topic[prefixLength] != '/') {
+            continue;
+        }
+        const int parsed = atoi(topic + prefixLength + 1);
+        if (!isUsableEndpoint((uint8_t)parsed) || parsed == 1) {
+            continue;
+        }
+        if (topicEndpoint != nullptr) {
+            *topicEndpoint = (uint8_t)parsed;
+        }
+        return entry;
     }
     return nullptr;
 }
@@ -82,7 +168,8 @@ DeviceTopicEntry *DeviceTopicMap::upsert(
     const char *friendlyName,
     const char *stateTopic,
     const char *commandTopic,
-    const char *availabilityTopic
+    const char *availabilityTopic,
+    uint8_t channelCount
 ) {
     if (slots == nullptr) {
         return nullptr;
@@ -115,6 +202,7 @@ DeviceTopicEntry *DeviceTopicMap::upsert(
     if (availabilityTopic != nullptr) {
         strncpy(entry->availabilityTopic, availabilityTopic, sizeof(entry->availabilityTopic) - 1);
     }
+    entry->channelCount = normalizeChannelCount(channelCount);
     return entry;
 }
 
@@ -172,6 +260,10 @@ void DeviceTopicMap::replaceFromJson(const String &json) {
         extractJsonString(object.c_str(), "state", stateTopic);
         extractJsonString(object.c_str(), "command", commandTopic);
         extractJsonString(object.c_str(), "availability", availability);
+        int parsedChannels = DEVICE_CHANNEL_COUNT_DEFAULT;
+        if (!extractJsonInt(object.c_str(), "channels", parsedChannels)) {
+            parsedChannels = DEVICE_CHANNEL_COUNT_DEFAULT;
+        }
         uint8_t ieee[8];
         if (ieeeText.length() > 0 && parseIeee(ieeeText.c_str(), ieee)) {
             upsert(
@@ -179,7 +271,8 @@ void DeviceTopicMap::replaceFromJson(const String &json) {
                 friendlyName.c_str(),
                 stateTopic.c_str(),
                 commandTopic.c_str(),
-                availability.c_str()
+                availability.c_str(),
+                normalizeChannelCount(parsedChannels)
             );
         }
         cursor = objectEnd + 1;
@@ -240,6 +333,7 @@ size_t DeviceTopicMap::packSyncPayload(
         strncpy((char *)out + 33, entry->stateTopic, SPI_DEVICE_SYNC_TOPIC_LEN - 1);
         strncpy((char *)out + 97, entry->commandTopic, SPI_DEVICE_SYNC_TOPIC_LEN - 1);
         strncpy((char *)out + 161, entry->availabilityTopic, SPI_DEVICE_SYNC_TOPIC_LEN - 1);
+        out[SPI_DEVICE_SYNC_ENTRY_LEN_NO_CHANNELS] = entry->channelCount;
     }
     return length;
 }
@@ -260,7 +354,7 @@ bool DeviceTopicMap::unpackSyncPayload(
     if ((*flags & SPI_DEVICE_SYNC_ENTRY) == 0) {
         return true;
     }
-    if (length < SPI_DEVICE_SYNC_ENTRY_LEN || entry == nullptr) {
+    if (length < SPI_DEVICE_SYNC_ENTRY_LEN_NO_CHANNELS || entry == nullptr) {
         return false;
     }
     memcpy(entry->ieee, in + 1, 8);
@@ -268,6 +362,11 @@ bool DeviceTopicMap::unpackSyncPayload(
     strncpy(entry->stateTopic, (const char *)in + 33, sizeof(entry->stateTopic) - 1);
     strncpy(entry->commandTopic, (const char *)in + 97, sizeof(entry->commandTopic) - 1);
     strncpy(entry->availabilityTopic, (const char *)in + 161, sizeof(entry->availabilityTopic) - 1);
+    if (length >= SPI_DEVICE_SYNC_ENTRY_LEN) {
+        entry->channelCount = normalizeChannelCount(in[SPI_DEVICE_SYNC_ENTRY_LEN_NO_CHANNELS]);
+    } else {
+        entry->channelCount = DEVICE_CHANNEL_COUNT_DEFAULT;
+    }
     entry->used = 1;
     return true;
 }
@@ -363,7 +462,9 @@ String DeviceTopicMap::listJson() {
         appendJsonEscaped(json, entry->commandTopic, sizeof(entry->commandTopic));
         json += "\",\"availability\":\"";
         appendJsonEscaped(json, entry->availabilityTopic, sizeof(entry->availabilityTopic));
-        json += "\"}";
+        json += "\",\"channels\":";
+        json += String(entry->channelCount);
+        json += "}";
     }
     json += "]";
     return json;

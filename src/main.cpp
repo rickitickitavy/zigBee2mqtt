@@ -77,6 +77,10 @@ static void applyDeviceConfigPayload(const char *payload) {
     extractJsonString(payload, "state", stateTopic);
     extractJsonString(payload, "command", commandTopic);
     extractJsonString(payload, "availability", availability);
+    int parsedChannels = DEVICE_CHANNEL_COUNT_DEFAULT;
+    if (!extractJsonInt(payload, "channels", parsedChannels)) {
+        parsedChannels = DEVICE_CHANNEL_COUNT_DEFAULT;
+    }
 
     uint8_t ieee[8];
     if (!topicMap->parseIeee(ieeeText.c_str(), ieee)) {
@@ -88,7 +92,8 @@ static void applyDeviceConfigPayload(const char *payload) {
         friendlyName.c_str(),
         stateTopic.c_str(),
         commandTopic.c_str(),
-        availability.c_str()
+        availability.c_str(),
+        DeviceTopicMap::normalizeChannelCount(parsedChannels)
     );
     if (entry == nullptr) {
         LOGGER.error("Device map full");
@@ -133,15 +138,30 @@ static void onMqttLogicalMessage(const char *topic, const char *payload) {
         return;
     }
 
-    DeviceTopicEntry *entry = topicMap->findByCommandTopic(topic);
-    if (entry != nullptr) {
-        LOGGER.info(String("MQTT recv topic=") + topic + " data=" + payload);
-        ZIGBEE_SPI_PROXY.controlOnOff(entry->ieee, payload);
+    uint8_t topicEndpoint = 0;
+    DeviceTopicEntry *entry = topicMap->findByCommandTopic(topic, &topicEndpoint);
+    if (entry == nullptr) {
+        return;
     }
+    String action = String(payload);
+    uint8_t commandEndpoint = topicEndpoint;
+    if (DeviceTopicMap::usesPayloadParse(entry->channelCount)) {
+        uint8_t parsedEndpoint = 0;
+        String parsedAction;
+        if (!DeviceTopicMap::parseChannelPayload(payload, &parsedEndpoint, &parsedAction)) {
+            LOGGER.warning("MQTT command ignored; expected ch-<ep>##ON");
+            return;
+        }
+        commandEndpoint = parsedEndpoint;
+        action = parsedAction;
+    } else if (DeviceTopicMap::usesTopicSuffix(entry->channelCount) && commandEndpoint == 0) {
+        commandEndpoint = 1;
+    }
+    LOGGER.info(String("MQTT recv topic=") + topic + " data=" + payload);
+    ZIGBEE_SPI_PROXY.controlOnOff(entry->ieee, action.c_str(), commandEndpoint);
 }
 
-static void onLightState(bool on, const uint8_t ieee[8], uint8_t endpoint, uint16_t shortAddr) {
-    (void)endpoint;
+static void onLightState(const char *message, const uint8_t ieee[8], uint8_t endpoint, uint16_t shortAddr) {
     (void)shortAddr;
     DeviceTopicEntry *entry = topicMap->findByIeee(ieee);
     if (entry == nullptr) {
@@ -152,7 +172,7 @@ static void onLightState(bool on, const uint8_t ieee[8], uint8_t endpoint, uint1
         LOGGER.info("Device has no state topic configured");
         return;
     }
-    mqttClient->publishDeviceState(entry, on);
+    mqttClient->publishDeviceState(entry, message, endpoint);
 }
 
 static void onHostSpiEvent(const SpiFrame &frame) {
@@ -374,8 +394,8 @@ static void createSlaveCoordinator() {
         }
     );
     zigbeeCoordinator->setLightStateHandler(
-        [](bool on, const uint8_t ieee[8], uint8_t endpoint, uint16_t shortAddr) {
-            INTER_CHIP_SLAVE.enqueueAttrReport(on, ieee, endpoint, shortAddr);
+        [](const char *message, const uint8_t ieee[8], uint8_t endpoint, uint16_t shortAddr) {
+            INTER_CHIP_SLAVE.enqueueAttrReport(message, ieee, endpoint, shortAddr);
         }
     );
     zigbeeCoordinator->attachLibraryCallbacks(
@@ -437,17 +457,11 @@ static void onSlaveDeviceSync(uint8_t flags, const DeviceTopicEntry *entry) {
     }
 }
 
-static void onSlaveOnOff(const uint8_t ieee[8], uint8_t action) {
+static void onSlaveOnOff(const uint8_t ieee[8], const char *command, uint8_t endpoint) {
     if (zigbeeCoordinator == nullptr) {
         return;
     }
-    const char *command = "off";
-    if (action == 1) {
-        command = "on";
-    } else if (action == 2) {
-        command = "toggle";
-    }
-    zigbeeCoordinator->controlOnOff(ieee, command);
+    zigbeeCoordinator->controlOnOff(ieee, command, endpoint);
 }
 
 static void setupHost() {

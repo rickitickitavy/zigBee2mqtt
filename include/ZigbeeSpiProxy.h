@@ -6,13 +6,13 @@
 
 class ZigbeeSpiProxy {
 public:
-    using LightStateFn = void (*)(bool on, const uint8_t ieee[8], uint8_t endpoint, uint16_t shortAddr);
+    using LightStateFn = void (*)(const char *message, const uint8_t ieee[8], uint8_t endpoint, uint16_t shortAddr);
 
     void begin();
     void onSpiEvent(const SpiFrame &frame);
     bool permitJoin(uint8_t seconds);
     bool closeJoin();
-    bool controlOnOff(const uint8_t ieee[8], const char *command);
+    bool controlOnOff(const uint8_t ieee[8], const char *command, uint8_t endpoint);
     void startRegistrySync(DeviceTopicMap *topicMap, bool allowEmptyReplace = false);
     void requestRegistryPull(DeviceTopicMap *topicMap);
     void pumpRegistrySync();

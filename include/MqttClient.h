@@ -19,7 +19,7 @@ public:
     bool isConnected() const;
     void publishStatus(const char *payload);
     void publishDevices(const String &json);
-    void publishDeviceState(const DeviceTopicEntry *entry, bool on);
+    void publishDeviceState(const DeviceTopicEntry *entry, const char *message, uint8_t endpoint);
     void subscribeDeviceCommands();
     const String &permitJoinTopic() const { return topicPermitJoin; }
     const String &configDeviceTopic() const { return topicConfigDevice; }
@@ -38,7 +38,8 @@ private:
     String topicPermitJoin;
     String topicConfigDevice;
     String lastDevicesJson;
-    char subscribedCommandTopics[DEVICE_MAP_SLOTS][64];
+    static constexpr int kMaxCommandSubscriptions = DEVICE_MAP_SLOTS * 2;
+    char subscribedCommandTopics[kMaxCommandSubscriptions][64];
 
     void rebuildTopics();
     void reconnect();

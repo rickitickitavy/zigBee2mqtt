@@ -50,25 +50,15 @@ bool ZigbeeSpiProxy::closeJoin() {
     return INTER_CHIP_HOST.tryEnqueue(SpiCmdPermitJoin, &seconds, 1);
 }
 
-bool ZigbeeSpiProxy::controlOnOff(const uint8_t ieee[8], const char *command) {
-    String action = String(command);
-    action.trim();
-    action.toLowerCase();
-    uint8_t code = 0xFF;
-    if (action == "off" || action == "0" || action == "false") {
-        code = 0;
-    } else if (action == "on" || action == "1" || action == "true") {
-        code = 1;
-    } else if (action == "toggle") {
-        code = 2;
-    } else {
-        LOGGER.warning("Unknown on/off command: " + action);
-        return false;
-    }
-    uint8_t payload[9];
+bool ZigbeeSpiProxy::controlOnOff(const uint8_t ieee[8], const char *command, uint8_t endpoint) {
+    const char *body = command != nullptr ? command : "";
+    uint8_t payload[9 + SPI_DEVICE_MESSAGE_MAX];
     memcpy(payload, ieee, 8);
-    payload[8] = code;
-    return INTER_CHIP_HOST.tryEnqueue(SpiCmdZclOnOff, payload, 9);
+    payload[8] = endpoint;
+    strncpy((char *)payload + 9, body, SPI_DEVICE_MESSAGE_MAX - 1);
+    payload[8 + SPI_DEVICE_MESSAGE_MAX] = 0;
+    const uint16_t length = (uint16_t)(9 + strlen((char *)payload + 9) + 1);
+    return INTER_CHIP_HOST.tryEnqueue(SpiCmdZclOnOff, payload, length);
 }
 
 void ZigbeeSpiProxy::setRegistryPullDoneHandler(void (*handler)()) {
@@ -129,7 +119,8 @@ void ZigbeeSpiProxy::applyPulledRegistry(const SpiFrame &frame) {
             entry.friendlyName,
             entry.stateTopic,
             entry.commandTopic,
-            entry.availabilityTopic
+            entry.availabilityTopic,
+            entry.channelCount
         );
         registryPullCount++;
     }
@@ -235,14 +226,23 @@ void ZigbeeSpiProxy::onSpiEvent(const SpiFrame &frame) {
         memcpy(ieee, frame.payload, 8);
         const uint8_t endpoint = frame.payload[8];
         const uint16_t shortAddr = (uint16_t)frame.payload[9] | ((uint16_t)frame.payload[10] << 8);
-        const bool on = frame.payload[11] != 0;
+        char message[SPI_DEVICE_MESSAGE_MAX];
+        memset(message, 0, sizeof(message));
+        if (frame.length == 12 && frame.payload[11] < 2) {
+            strncpy(message, frame.payload[11] != 0 ? "ON" : "OFF", sizeof(message) - 1);
+        } else {
+            const size_t copyLength = frame.length - 11;
+            const size_t bounded = copyLength >= sizeof(message) ? sizeof(message) - 1 : copyLength;
+            memcpy(message, frame.payload + 11, bounded);
+            message[sizeof(message) - 1] = '\0';
+        }
         CachedDevice *slot = allocSlot(ieee);
         if (slot != nullptr) {
             slot->endpoint = endpoint;
             slot->shortAddr = shortAddr;
         }
         if (lightStateHandler != nullptr) {
-            lightStateHandler(on, ieee, endpoint, shortAddr);
+            lightStateHandler(message, ieee, endpoint, shortAddr);
         }
         return;
     }

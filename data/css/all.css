@@ -634,14 +634,14 @@ html, body {
 }
 
 .data-table tbody tr.selected {
-    background: var(--accent);
-    color: #fff;
-    box-shadow: inset 4px 0 0 #f2c14e;
+    background: #d4cce8;
+    color: var(--text);
+    box-shadow: inset 3px 0 0 #8f7bb8;
 }
 
 .data-table tbody tr.selected td {
-    color: #fff;
-    font-weight: 700;
+    color: var(--text);
+    font-weight: 600;
 }
 
 .dialog-overlay {

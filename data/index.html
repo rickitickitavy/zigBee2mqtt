@@ -817,6 +817,14 @@
             document.getElementById("deviceStateTopic").value = device.state || "";
             document.getElementById("deviceCommandTopic").value = device.command || "";
             document.getElementById("deviceAvailabilityTopic").value = device.availability || "";
+            var channelsSelect = document.getElementById("deviceChannels");
+            if (channelsSelect) {
+                var channelsValue = device.channels;
+                if (channelsValue === undefined || channelsValue === null || channelsValue === "") {
+                    channelsValue = 1;
+                }
+                channelsSelect.value = String(channelsValue);
+            }
             document.getElementById("parameterDialogError").hidden = true;
             document.getElementById("parameterDialog").hidden = false;
         }
@@ -923,7 +931,8 @@
                 friendlyName: name,
                 state: document.getElementById("deviceStateTopic").value,
                 command: document.getElementById("deviceCommandTopic").value,
-                availability: document.getElementById("deviceAvailabilityTopic").value
+                availability: document.getElementById("deviceAvailabilityTopic").value,
+                channels: parseInt(document.getElementById("deviceChannels").value, 10)
             };
             fetch("/api/devices", {
                 method: "POST",
@@ -1167,6 +1176,28 @@
                 <div class="field">
                     <label for="deviceName">NAME</label>
                     <input id="deviceName" type="text" autocomplete="off" oninput="onDeviceNameInput()">
+                </div>
+                <div class="field">
+                    <label for="deviceChannels">CHANNELS</label>
+                    <select id="deviceChannels">
+                        <option value="0">Multichannel with parsing</option>
+                        <option value="1" selected>1</option>
+                        <option value="2">2</option>
+                        <option value="3">3</option>
+                        <option value="4">4</option>
+                        <option value="5">5</option>
+                        <option value="6">6</option>
+                        <option value="7">7</option>
+                        <option value="8">8</option>
+                        <option value="9">9</option>
+                        <option value="10">10</option>
+                        <option value="11">11</option>
+                        <option value="12">12</option>
+                        <option value="13">13</option>
+                        <option value="14">14</option>
+                        <option value="15">15</option>
+                        <option value="16">16</option>
+                    </select>
                 </div>
                 <div class="field">
                     <label for="deviceStateTopic">STATE</label>

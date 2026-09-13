@@ -65,7 +65,7 @@ int MqttClient::findCommandSubscription(const char *topic) const {
     if (topic == nullptr || topic[0] == '\0') {
         return -1;
     }
-    for (int i = 0; i < DEVICE_MAP_SLOTS; i++) {
+    for (int i = 0; i < kMaxCommandSubscriptions; i++) {
         if (subscribedCommandTopics[i][0] != '\0' && strcmp(subscribedCommandTopics[i], topic) == 0) {
             return i;
         }
@@ -74,7 +74,7 @@ int MqttClient::findCommandSubscription(const char *topic) const {
 }
 
 int MqttClient::nextFreeCommandSubscription() const {
-    for (int i = 0; i < DEVICE_MAP_SLOTS; i++) {
+    for (int i = 0; i < kMaxCommandSubscriptions; i++) {
         if (subscribedCommandTopics[i][0] == '\0') {
             return i;
         }
@@ -87,7 +87,7 @@ void MqttClient::subscribeDeviceCommands() {
         return;
     }
 
-    bool keepSubscription[DEVICE_MAP_SLOTS];
+    bool keepSubscription[kMaxCommandSubscriptions];
     memset(keepSubscription, 0, sizeof(keepSubscription));
 
     for (int slotIndex = 0; slotIndex < DEVICE_MAP_SLOTS; slotIndex++) {
@@ -96,29 +96,42 @@ void MqttClient::subscribeDeviceCommands() {
             continue;
         }
 
-        const int existing = findCommandSubscription(entry->commandTopic);
-        if (existing >= 0) {
-            keepSubscription[existing] = true;
-            continue;
+        String subscribeTopics[2];
+        subscribeTopics[0] = String(entry->commandTopic);
+        int topicCount = 1;
+        if (DeviceTopicMap::usesTopicSuffix(entry->channelCount)) {
+            subscribeTopics[1] = String(entry->commandTopic) + "/+";
+            topicCount = 2;
         }
 
-        if (!client->subscribe(entry->commandTopic)) {
-            LOGGER.warning("MQTT subscribe failed topic=" + String(entry->commandTopic));
-            continue;
+        for (int topicIndex = 0; topicIndex < topicCount; topicIndex++) {
+            const String &subscribeTopic = subscribeTopics[topicIndex];
+            const int existing = findCommandSubscription(subscribeTopic.c_str());
+            if (existing >= 0) {
+                keepSubscription[existing] = true;
+                continue;
+            }
+            if (!client->subscribe(subscribeTopic.c_str())) {
+                LOGGER.warning("MQTT subscribe failed topic=" + subscribeTopic);
+                continue;
+            }
+            const int freeIndex = nextFreeCommandSubscription();
+            if (freeIndex < 0) {
+                LOGGER.warning("MQTT subscribe table full topic=" + subscribeTopic);
+                continue;
+            }
+            strncpy(
+                subscribedCommandTopics[freeIndex],
+                subscribeTopic.c_str(),
+                sizeof(subscribedCommandTopics[freeIndex]) - 1
+            );
+            subscribedCommandTopics[freeIndex][sizeof(subscribedCommandTopics[freeIndex]) - 1] = '\0';
+            keepSubscription[freeIndex] = true;
+            LOGGER.info("MQTT subscribe topic=" + subscribeTopic);
         }
-
-        const int freeIndex = nextFreeCommandSubscription();
-        if (freeIndex < 0) {
-            LOGGER.warning("MQTT subscribe table full topic=" + String(entry->commandTopic));
-            continue;
-        }
-        strncpy(subscribedCommandTopics[freeIndex], entry->commandTopic, sizeof(subscribedCommandTopics[freeIndex]) - 1);
-        subscribedCommandTopics[freeIndex][sizeof(subscribedCommandTopics[freeIndex]) - 1] = '\0';
-        keepSubscription[freeIndex] = true;
-        LOGGER.info("MQTT subscribe topic=" + String(entry->commandTopic));
     }
 
-    for (int i = 0; i < DEVICE_MAP_SLOTS; i++) {
+    for (int i = 0; i < kMaxCommandSubscriptions; i++) {
         if (subscribedCommandTopics[i][0] == '\0' || keepSubscription[i]) {
             continue;
         }
@@ -196,9 +209,18 @@ void MqttClient::publishDevices(const String &json) {
     }
 }
 
-void MqttClient::publishDeviceState(const DeviceTopicEntry *entry, bool on) {
+void MqttClient::publishDeviceState(const DeviceTopicEntry *entry, const char *message, uint8_t endpoint) {
     if (entry == nullptr || entry->stateTopic[0] == '\0') {
         return;
     }
-    publishMessage(entry->stateTopic, on ? "ON" : "OFF", true);
+    if (message == nullptr) {
+        return;
+    }
+    if (DeviceTopicMap::usesPayloadParse(entry->channelCount) && !DeviceTopicMap::isUsableEndpoint(endpoint)) {
+        LOGGER.warning("Skip state publish; parse mode needs a real endpoint");
+        return;
+    }
+    const String topic = DeviceTopicMap::statePublishTopic(entry, endpoint);
+    const String payload = DeviceTopicMap::statePublishPayload(entry, endpoint, message);
+    publishMessage(topic.c_str(), payload.c_str(), true);
 }
