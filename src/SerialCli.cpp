@@ -58,9 +58,7 @@ void SerialCli::handleLine(const String &line) {
         return;
     }
     if (trimmed == "log") {
-        String logText;
-        LOGGER.copyRing(logText);
-        Serial.print(logText);
+        LOGGER.writeRing(Serial);
         return;
     }
 
