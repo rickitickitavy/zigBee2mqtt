@@ -115,4 +115,5 @@ private:
     void adoptReportIdentity(const uint8_t ieee[8], uint16_t shortAddr, uint8_t endpoint);
     void offerPairingIfNeeded(const uint8_t ieee[8]);
     bool migrateRegisteredIeee(const uint8_t previousIeee[8], const uint8_t nextIeee[8]);
+    void pulseInboundDevice(const uint8_t ieee[8]);
 };

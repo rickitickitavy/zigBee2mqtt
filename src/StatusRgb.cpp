@@ -1,13 +1,7 @@
 #include "StatusRgb.h"
-#include "SpiProtocol.h"
 #include "pins.h"
 
 StatusRgb STATUS_RGB;
-
-bool StatusRgb::isApplicationFrame(uint8_t cmd) {
-    return cmd != SpiCmdPing && cmd != SpiCmdGetStatus && cmd != SpiCmdTimeSync && cmd != SpiCmdReadEvent
-        && cmd != SpiEvtPong && cmd != SpiEvtStatus && cmd != SpiEvtSlaveReady && cmd != SpiEvtLogRecord;
-}
 
 bool StatusRgb::allowsPairingBlink() const {
     return !criticalHeld && !bootHeld;
@@ -35,24 +29,28 @@ void StatusRgb::setPairingHeld(bool enabled) {
     apply();
 }
 
-void StatusRgb::pulseReceive() {
+void StatusRgb::startPulse(uint8_t red, uint8_t green, uint8_t blue) {
     if (!allowsActivityPulse()) {
         return;
     }
-    activityReceive = true;
+    activityRed = red;
+    activityGreen = green;
+    activityBlue = blue;
     activityActive = true;
     activityUntilMs = millis() + kPulseMs;
     apply();
 }
 
-void StatusRgb::pulseSend() {
-    if (!allowsActivityPulse()) {
-        return;
-    }
-    activityReceive = false;
-    activityActive = true;
-    activityUntilMs = millis() + kPulseMs;
-    apply();
+void StatusRgb::pulseGreen() {
+    startPulse(0, kBrightness, 0);
+}
+
+void StatusRgb::pulseRed() {
+    startPulse(kBrightness, 0, 0);
+}
+
+void StatusRgb::pulseBlue() {
+    startPulse(0, 0, kBrightness);
 }
 
 void StatusRgb::writePairingPhase(bool ledOn) {
@@ -81,11 +79,7 @@ void StatusRgb::apply() {
         return;
     }
     if (activityActive) {
-        if (activityReceive) {
-            write(0, kBrightness, 0);
-        } else {
-            write(kBrightness, 0, 0);
-        }
+        write(activityRed, activityGreen, activityBlue);
         return;
     }
     write(0, 0, 0);

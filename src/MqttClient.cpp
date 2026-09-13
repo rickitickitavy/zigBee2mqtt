@@ -1,5 +1,6 @@
 #include "MqttClient.h"
 #include "Logger.h"
+#include "StatusRgb.h"
 
 #include <string.h>
 
@@ -42,6 +43,10 @@ void MqttClient::onMessage(char *topic, byte *payload, unsigned int length) {
         body += (char)payload[i];
     }
     LOGGER.debug("MQTT " + String(topic) + " = " + body);
+    uint8_t commandEndpoint = 0;
+    if (topicMap != nullptr && topicMap->findByCommandTopic(topic, &commandEndpoint) != nullptr) {
+        STATUS_RGB.pulseGreen();
+    }
     if (messageHandler != nullptr) {
         messageHandler(topic, body.c_str());
     }
@@ -222,5 +227,7 @@ void MqttClient::publishDeviceState(const DeviceTopicEntry *entry, const char *m
     }
     const String topic = DeviceTopicMap::statePublishTopic(entry, endpoint);
     const String payload = DeviceTopicMap::statePublishPayload(entry, endpoint, message);
-    publishMessage(topic.c_str(), payload.c_str(), true);
+    if (publishMessage(topic.c_str(), payload.c_str(), true)) {
+        STATUS_RGB.pulseRed();
+    }
 }

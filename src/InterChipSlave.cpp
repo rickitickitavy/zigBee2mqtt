@@ -447,9 +447,6 @@ void InterChipSlave::fillHardwareQueue() {
         SpiFrame outgoing;
         if (takeOutbound(outgoing)) {
             spiEncodeFrame(outgoing, dmaTx[slot], SPI_MAX_FRAME);
-            if (StatusRgb::isApplicationFrame(outgoing.cmd)) {
-                STATUS_RGB.pulseSend();
-            }
         }
         memset(&slaveTransDesc[slot], 0, sizeof(slaveTransDesc[slot]));
         slaveTransDesc[slot].length = SPI_MAX_FRAME * 8;
@@ -480,9 +477,6 @@ void InterChipSlave::serviceSpi() {
     if (done != nullptr && done->rx_buffer != nullptr) {
         SpiFrame inbound;
         if (spiDecodeFrame((const uint8_t *)done->rx_buffer, SPI_MAX_FRAME, inbound)) {
-            if (StatusRgb::isApplicationFrame(inbound.cmd)) {
-                STATUS_RGB.pulseReceive();
-            }
             handleHostFrame(inbound);
         }
     }
