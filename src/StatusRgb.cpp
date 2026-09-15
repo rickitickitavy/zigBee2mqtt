@@ -1,14 +1,37 @@
 #include "StatusRgb.h"
 #include "pins.h"
 
+#include "driver/gpio.h"
+
 StatusRgb STATUS_RGB;
+
+static const int kLedPins[4] = {PIN_LED1, PIN_LED2, PIN_LED3, PIN_LED4};
 
 bool StatusRgb::allowsPairingBlink() const {
     return !criticalHeld && !bootHeld;
 }
 
 bool StatusRgb::allowsActivityPulse() const {
-    return !criticalHeld && !bootHeld && !pairingHeld;
+    return !criticalHeld && !bootHeld;
+}
+
+void StatusRgb::configureLedPin(int gpioNumber) {
+    const gpio_num_t gpioPin = (gpio_num_t)gpioNumber;
+    gpio_reset_pin(gpioPin);
+    gpio_set_direction(gpioPin, GPIO_MODE_OUTPUT);
+    gpio_set_pull_mode(gpioPin, GPIO_FLOATING);
+    gpio_set_drive_capability(gpioPin, GPIO_DRIVE_CAP_3);
+}
+
+void StatusRgb::begin() {
+    bootHeld = true;
+    for (int ledIndex = 0; ledIndex < kLedCount; ledIndex++) {
+        configureLedPin(kLedPins[ledIndex]);
+        lastLevel[ledIndex] = 255;
+    }
+    pinsReady = true;
+    lastRgbRed = 255;
+    apply();
 }
 
 void StatusRgb::setCritical(bool enabled) {
@@ -29,28 +52,47 @@ void StatusRgb::setPairingHeld(bool enabled) {
     apply();
 }
 
-void StatusRgb::startPulse(uint8_t red, uint8_t green, uint8_t blue) {
-    if (!allowsActivityPulse()) {
-        return;
-    }
-    activityRed = red;
-    activityGreen = green;
-    activityBlue = blue;
-    activityActive = true;
-    activityUntilMs = millis() + kPulseMs;
+void StatusRgb::setMqttConnected(bool enabled) {
+    mqttConnected = enabled;
     apply();
 }
 
-void StatusRgb::pulseGreen() {
-    startPulse(0, kBrightness, 0);
+void StatusRgb::setReadyGreen(bool enabled) {
+    readyGreen = enabled;
+    apply();
 }
 
-void StatusRgb::pulseRed() {
-    startPulse(kBrightness, 0, 0);
+void StatusRgb::startLedPulse(int ledIndex) {
+    if (ledIndex < 0 || ledIndex >= kLedCount || !allowsActivityPulse()) {
+        return;
+    }
+    pulseActive[ledIndex] = true;
+    pulseUntilMs[ledIndex] = millis() + kPulseMs;
+    apply();
 }
 
-void StatusRgb::pulseBlue() {
-    startPulse(0, 0, kBrightness);
+void StatusRgb::pulseMqttCommandReceived() {
+    startLedPulse(0);
+}
+
+void StatusRgb::pulseMqttPublished() {
+    startLedPulse(1);
+}
+
+void StatusRgb::pulsePacketReceived() {
+    startLedPulse(0);
+}
+
+void StatusRgb::pulseKnownDevicePacket() {
+    startLedPulse(1);
+}
+
+void StatusRgb::pulseAckSent() {
+    startLedPulse(2);
+}
+
+void StatusRgb::pulsePacketToDevice() {
+    startLedPulse(3);
 }
 
 void StatusRgb::writePairingPhase(bool ledOn) {
@@ -59,38 +101,60 @@ void StatusRgb::writePairingPhase(bool ledOn) {
 }
 
 void StatusRgb::service() {
-    if (activityActive && (long)(millis() - activityUntilMs) >= 0) {
-        activityActive = false;
+    const unsigned long nowMs = millis();
+    for (int ledIndex = 0; ledIndex < kLedCount; ledIndex++) {
+        if (pulseActive[ledIndex] && (long)(nowMs - pulseUntilMs[ledIndex]) >= 0) {
+            pulseActive[ledIndex] = false;
+        }
     }
     apply();
 }
 
 void StatusRgb::apply() {
+    bool levelOn[kLedCount] = {false, false, false, false};
     if (criticalHeld || bootHeld) {
-        write(kBrightness, 0, 0);
+        writeLevels(levelOn);
+        writeRgb(kRgbBrightness, 0, 0);
         return;
     }
+
+    for (int ledIndex = 0; ledIndex < kLedCount; ledIndex++) {
+        levelOn[ledIndex] = pulseActive[ledIndex];
+    }
+    writeLevels(levelOn);
+
     if (pairingHeld) {
-        if (pairingPhaseOn) {
-            write(0, 0, kBrightness);
-        } else {
-            write(0, 0, 0);
-        }
+        writeRgb(0, 0, pairingPhaseOn ? kRgbBrightness : 0);
         return;
     }
-    if (activityActive) {
-        write(activityRed, activityGreen, activityBlue);
+    if (mqttConnected || readyGreen) {
+        writeRgb(0, kRgbBrightness, 0);
         return;
     }
-    write(0, 0, 0);
+    writeRgb(0, 0, 0);
 }
 
-void StatusRgb::write(uint8_t red, uint8_t green, uint8_t blue) {
-    if (red == lastRed && green == lastGreen && blue == lastBlue) {
+void StatusRgb::writeLevels(const bool levelOn[kLedCount]) {
+    if (!pinsReady) {
         return;
     }
-    lastRed = red;
-    lastGreen = green;
-    lastBlue = blue;
+    for (int ledIndex = 0; ledIndex < kLedCount; ledIndex++) {
+        const uint8_t level = levelOn[ledIndex] ? kLedOnLevel : kLedOffLevel;
+        if (level == lastLevel[ledIndex]) {
+            continue;
+        }
+        lastLevel[ledIndex] = level;
+        gpio_set_level((gpio_num_t)kLedPins[ledIndex], level == HIGH ? 1 : 0);
+        digitalWrite(kLedPins[ledIndex], level);
+    }
+}
+
+void StatusRgb::writeRgb(uint8_t red, uint8_t green, uint8_t blue) {
+    if (red == lastRgbRed && green == lastRgbGreen && blue == lastRgbBlue) {
+        return;
+    }
+    lastRgbRed = red;
+    lastRgbGreen = green;
+    lastRgbBlue = blue;
     rgbLedWrite(PIN_STATUS_RGB, red, green, blue);
 }

@@ -2,112 +2,131 @@
 
 ## Purpose
 
-Gives each DevKitC board a single onboard RGB meaning so an operator can see boot still in progress, slave SPI application traffic, and a slave critical fault without opening the console.
+Gives each board an onboard RGB (GPIO8) and four external red LEDs (GPIO18–21) that work together. RGB is red for boot/critical (green off). Host RGB is green while MQTT is connected. Slave RGB is green when the chip is ready and has no critical fault. Slave pairing blinks blue.
 
 ## Requirements
 
-### Requirement: Boot red until that chip is ready
+### Requirement: RGB and LED1–LED4 work together
 
-Each chip SHALL turn the onboard status RGB red as soon as that chip’s role setup starts. The host SHALL keep boot-red until it has a usable Wi-Fi interface (STA associated or SoftAP serving an address) and the slave link is in normal work after settings have been applied. The slave SHALL keep boot-red until it has applied host settings for this boot and the Zigbee coordinator is running. MQTT connection SHALL NOT be required to clear host boot-red. After that chip’s boot-red clears, the LED SHALL go dark unless another requirement in this capability holds it or flashes it.
+Each chip SHALL drive LED1 on GPIO18, LED2 on GPIO19, LED3 on GPIO20, LED4 on GPIO21, and the onboard WS2812 on GPIO8. Host LED3 and LED4 SHALL stay off. RGB green SHALL mean host MQTT connected, or slave ready with no fault. A HIGH GPIO level SHALL light each external LED.
+
+#### Scenario: Pins
+
+- **WHEN** status indication is shown
+- **THEN** host uses LED1, LED2, and RGB only; slave uses LED1–LED4 and RGB
+
+### Requirement: RGB red while that chip is booting or in a critical error
+
+Each chip SHALL turn the onboard RGB **red** as soon as firmware starts, before Serial, Wi-Fi, SPI, or Zigbee init, and SHALL keep it red until that chip is ready, and while a critical error is present. LED1–LED4 SHALL NOT be held on for boot or critical error. MQTT connection SHALL NOT be required to clear host boot red. Critical-error red SHALL outrank pairing blink and activity pulses.
 
 #### Scenario: Host still preparing
 
 - **WHEN** the host has started but Wi-Fi has no address yet or the slave is not yet in normal work
-- **THEN** the host status RGB stays red
+- **THEN** the host onboard RGB stays red and host LED1–LED4 stay off except later activity pulses after boot
 
 #### Scenario: Host preparation finished
 
 - **WHEN** the host has a usable Wi-Fi address and the slave link is in normal work
-- **THEN** the host status RGB is no longer held red for boot
+- **THEN** host RGB is no longer held red for boot
 
 #### Scenario: Slave still preparing
 
 - **WHEN** the slave has started but has not yet applied host settings or started the coordinator
-- **THEN** the slave status RGB stays red
+- **THEN** the slave onboard RGB stays red and LED1–LED4 stay off except later activity pulses after boot
 
 #### Scenario: Slave preparation finished
 
 - **WHEN** the slave has applied host settings and the Zigbee coordinator is running, and no critical error is present
-- **THEN** the slave status RGB is no longer held red for boot
+- **THEN** slave RGB is no longer held red for boot and stays **green** while no critical error is present
 
-### Requirement: Slave flashes for Zigbee device events
+#### Scenario: Critical error appears
 
-After slave boot-red is cleared, and while no critical error is present and pairing is not blinking, the slave SHALL flash the status RGB for Zigbee device events only:
+- **WHEN** a chip enters a critical error
+- **THEN** that chip’s onboard RGB stays red and green stays off until that error is cleared
 
-- **green** for 0.1 seconds when the coordinator sends a command event to an end device
-- **red** for 0.1 seconds when an event is received from a registered device
-- **blue** for 0.1 seconds when an event is received from an unregistered device
+### Requirement: Host RGB green while MQTT is connected
 
-SPI frames, logs, keep-alives, settings, and other host–slave link traffic MUST NOT trigger a flash. If two flashes overlap, the later event SHALL replace the color for a new 0.1 second window.
+After host boot red is cleared, the host onboard RGB SHALL stay **green** while the MQTT client is connected to the broker. It SHALL not be green while MQTT is disabled, STA is down, or the broker is disconnected. Host LED3 SHALL stay off.
 
-#### Scenario: Command sent to a device
+#### Scenario: Broker connected
 
-- **WHEN** the slave is ready, idle, and sends a Zigbee command to an end device
-- **THEN** the status RGB is green for 0.1 seconds and then returns to dark
+- **WHEN** the host is ready and MQTT is connected
+- **THEN** the host onboard RGB is green and host LED3 stays off
 
-#### Scenario: Event from a registered device
+#### Scenario: Broker disconnected
 
-- **WHEN** the slave is ready, idle, and receives a Zigbee event from a registered IEEE
-- **THEN** the status RGB is red for 0.1 seconds and then returns to dark
+- **WHEN** the host is ready and MQTT is not connected
+- **THEN** the host onboard RGB is not held green
 
-#### Scenario: Event from an unregistered device
+### Requirement: Slave RGB green when ready
 
-- **WHEN** the slave is ready, idle, pairing is not blinking, and a Zigbee event arrives from an unregistered IEEE
-- **THEN** the status RGB is blue for 0.1 seconds and then returns to dark
+After slave boot red is cleared, and while no critical error is present, the slave onboard RGB SHALL stay **green** to show the chip is ready. While boot or a critical error is present, RGB SHALL be red and green SHALL be off.
 
-#### Scenario: SPI traffic does not flash
+#### Scenario: Slave ready
 
-- **WHEN** the host and slave exchange SPI frames with no Zigbee device event
-- **THEN** the slave status RGB does not flash for that transfer
+- **WHEN** the slave coordinator is running and no critical error is present
+- **THEN** the slave onboard RGB is green
 
-### Requirement: Host flashes for MQTT device traffic
+#### Scenario: Slave trouble
 
-After host boot-red is cleared, the host SHALL flash the status RGB for MQTT **device** traffic only:
+- **WHEN** the slave is still booting or a critical error is present
+- **THEN** the slave onboard RGB is red and green is off
 
-- **green** for 0.1 seconds when it receives a device event from MQTT (a subscribed device command topic)
-- **red** for 0.1 seconds when it successfully publishes a device message to MQTT (device state or availability)
+### Requirement: Host pulses LED1 and LED2 for MQTT device traffic
 
-Gateway topics (online/status, device list), failed publishes, and broker keep-alives MUST NOT trigger a flash. Boot-red SHALL outrank these pulses. If two flashes overlap, the later event SHALL replace the color for a new 0.1 second window.
+After host boot red is cleared, the host SHALL pulse LED1 for 0.1 seconds when it receives a device command from MQTT, and SHALL pulse LED2 for 0.1 seconds when it successfully publishes a device state message. Host LED3 and LED4 SHALL NOT light. RGB SHALL NOT flash green or red for those MQTT events.
 
 #### Scenario: MQTT device command received
 
 - **WHEN** the host is ready and receives an MQTT message on a registered device command topic
-- **THEN** the host status RGB is green for 0.1 seconds and then returns to dark
+- **THEN** host LED1 is on for 0.1 seconds
 
 #### Scenario: MQTT device state published
 
-- **WHEN** the host is ready and successfully publishes a device state or availability message
-- **THEN** the host status RGB is red for 0.1 seconds and then returns to dark
+- **WHEN** the host is ready and successfully publishes a device state message
+- **THEN** host LED2 is on for 0.1 seconds
 
-#### Scenario: Gateway MQTT does not flash
+### Requirement: Slave pulses LED1–LED4 for Zigbee packets
 
-- **WHEN** the host publishes gateway status or the devices list, or only keeps the broker connection alive
-- **THEN** the host status RGB does not flash for that traffic
+After slave boot red is cleared, and while no critical error is present:
 
-### Requirement: Slave holds red while a critical error is present
+- LED1 for 0.1 seconds when a packet is received from an **unregistered** device
+- LED2 for 0.1 seconds when a packet is received from a **registered** device
+- LED3 for 0.1 seconds when a ZCL default-response ACK is processed
+- LED4 for 0.1 seconds **only** when a Zigbee command is sent to a device
 
-The slave SHALL turn the status RGB red and keep it red for the entire time a critical error is present. A critical error is a fatal or unrecoverable fault that stops normal radio or SPI work (for example SPI slave hardware failed to start, or the Zigbee coordinator failed fatally). Transient log errors that the slave can continue after MUST NOT hold the LED. Critical-error red SHALL outrank boot-red, activity flashes, and pairing blink. When the critical error is no longer present, the LED SHALL follow the other requirements in this capability.
+LED1 SHALL NOT pulse for a registered-device packet. RGB green SHALL NOT flash for a command send.
 
-#### Scenario: Critical error appears
+#### Scenario: Packet from an unregistered device
 
-- **WHEN** the slave enters a critical error
-- **THEN** the status RGB stays red until that error is cleared
+- **WHEN** the slave is ready and receives a Zigbee event from an unregistered IEEE
+- **THEN** LED1 is on for 0.1 seconds and LED2 does not pulse
 
-#### Scenario: Activity during critical error
+#### Scenario: Packet from a registered device
 
-- **WHEN** a critical error is present and a Zigbee device event is sent or received
-- **THEN** the status RGB stays red and does not flash green, red, or blue for that event
+- **WHEN** the slave is ready and receives a Zigbee event from a registered IEEE
+- **THEN** LED2 is on for 0.1 seconds and LED1 does not pulse
 
-### Requirement: Pairing blink yields to boot-red and critical-error red
+#### Scenario: Command sent to a device
 
-While pairing is open and the slave is ready with no critical error, the existing pairing blink on the same status RGB SHALL continue as it does today. Pairing blink MUST NOT run while boot-red or critical-error red is held. Activity flashes (green send, red registered receive, blue unregistered receive) MUST NOT run while pairing is blinking.
+- **WHEN** the slave is ready and sends a Zigbee command to an end device
+- **THEN** LED4 is on for 0.1 seconds and the RGB does not turn green
+
+#### Scenario: ACK for a command
+
+- **WHEN** the slave is ready and a ZCL default response for a command is processed
+- **THEN** LED3 is on for 0.1 seconds
+
+### Requirement: Slave pairing blinks the onboard blue LED
+
+While pairing is open and the slave is ready with no critical error, the slave SHALL blink the onboard WS2812 **blue**. Pairing blink MUST NOT run while boot or critical-error red is held. LED1–LED4 SHALL keep their packet-pulse roles during pairing.
 
 #### Scenario: Pairing after ready
 
 - **WHEN** the slave is ready, no critical error is present, and pairing is open
-- **THEN** the status RGB uses the pairing blink and does not show send or receive flashes
+- **THEN** the onboard LED blinks blue and LED1–LED4 still pulse for Zigbee packets
 
 #### Scenario: Pairing during bring-up
 
-- **WHEN** pairing would start but slave boot-red is still held
-- **THEN** the status RGB stays red for boot and does not blink for pairing
+- **WHEN** pairing would start but slave boot red is still held
+- **THEN** the RGB stays red and does not blink blue

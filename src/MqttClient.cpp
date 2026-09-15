@@ -45,7 +45,7 @@ void MqttClient::onMessage(char *topic, byte *payload, unsigned int length) {
     LOGGER.debug("MQTT " + String(topic) + " = " + body);
     uint8_t commandEndpoint = 0;
     if (topicMap != nullptr && topicMap->findByCommandTopic(topic, &commandEndpoint) != nullptr) {
-        STATUS_RGB.pulseGreen();
+        STATUS_RGB.pulseMqttCommandReceived();
     }
     if (messageHandler != nullptr) {
         messageHandler(topic, body.c_str());
@@ -170,13 +170,17 @@ void MqttClient::reconnect() {
 void MqttClient::dispatch(bool staConnected) {
     GlobalSettings *settings = settingsManager->getSettings();
     if (!settings->mqtt.enabled || !staConnected) {
+        STATUS_RGB.setMqttConnected(false);
         return;
     }
 
     if (client->connected()) {
+        STATUS_RGB.setMqttConnected(true);
         client->loop();
         return;
     }
+
+    STATUS_RGB.setMqttConnected(false);
 
     const unsigned long now = millis();
     const unsigned long waitMs = reconnectBackoffMs > 0 ? reconnectBackoffMs : (unsigned long)settings->mqtt.reconnectIntervalMs;
@@ -228,6 +232,6 @@ void MqttClient::publishDeviceState(const DeviceTopicEntry *entry, const char *m
     const String topic = DeviceTopicMap::statePublishTopic(entry, endpoint);
     const String payload = DeviceTopicMap::statePublishPayload(entry, endpoint, message);
     if (publishMessage(topic.c_str(), payload.c_str(), true)) {
-        STATUS_RGB.pulseRed();
+        STATUS_RGB.pulseMqttPublished();
     }
 }
