@@ -31,6 +31,19 @@ static bool isZeroIeee(const uint8_t ieee[8]) {
     return ieee != nullptr && memcmp(ieee, kZeroIeee, 8) == 0;
 }
 
+static void onCoordinatorDefaultResponse(
+    zb_cmd_type_t respToCmd,
+    esp_zb_zcl_status_t status,
+    uint8_t endpoint,
+    uint16_t cluster
+) {
+    (void)respToCmd;
+    (void)status;
+    (void)endpoint;
+    (void)cluster;
+    STATUS_RGB.pulseAckSent();
+}
+
 static void logDeviceEvent(
     const char *eventName,
     const uint8_t ieee[8],
@@ -153,6 +166,7 @@ bool ZigbeeCoordinator::begin(uint8_t channel, uint8_t permitJoinSec) {
     iasCie.setManufacturerAndModel("z2m-gateway", "ESP32-C6");
     Zigbee.addEndpoint(&zigbeeSwitch);
     Zigbee.addEndpoint(&iasCie);
+    Zigbee.onGlobalDefaultResponse(onCoordinatorDefaultResponse);
 
     if (channel >= 11 && channel <= 26) {
         Zigbee.setPrimaryChannelMask(1UL << channel);
@@ -723,15 +737,11 @@ void ZigbeeCoordinator::handleLightStateWithSource(bool on, uint8_t endpoint, es
 }
 
 void ZigbeeCoordinator::pulseInboundDevice(const uint8_t ieee[8]) {
-    if (ieee == nullptr) {
-        STATUS_RGB.pulseBlue();
+    if (ieee != nullptr && isRegistered(ieee)) {
+        STATUS_RGB.pulseKnownDevicePacket();
         return;
     }
-    if (isRegistered(ieee)) {
-        STATUS_RGB.pulseRed();
-        return;
-    }
-    STATUS_RGB.pulseBlue();
+    STATUS_RGB.pulsePacketReceived();
 }
 
 bool ZigbeeCoordinator::controlOnOff(const uint8_t ieee[8], const char *command, uint8_t endpoint) {
@@ -778,17 +788,17 @@ bool ZigbeeCoordinator::controlOnOff(const uint8_t ieee[8], const char *command,
     );
     if (actionLower == "on" || actionLower == "1" || actionLower == "true") {
         zigbeeSwitch.lightOn(targetEndpoint, ieeeAddr);
-        STATUS_RGB.pulseGreen();
+        STATUS_RGB.pulsePacketToDevice();
         return true;
     }
     if (actionLower == "off" || actionLower == "0" || actionLower == "false") {
         zigbeeSwitch.lightOff(targetEndpoint, ieeeAddr);
-        STATUS_RGB.pulseGreen();
+        STATUS_RGB.pulsePacketToDevice();
         return true;
     }
     if (actionLower == "toggle") {
         zigbeeSwitch.lightToggle(targetEndpoint, ieeeAddr);
-        STATUS_RGB.pulseGreen();
+        STATUS_RGB.pulsePacketToDevice();
         return true;
     }
     return true;

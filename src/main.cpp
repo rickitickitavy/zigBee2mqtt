@@ -598,6 +598,7 @@ static void setupHost() {
 }
 
 static void setupSlave() {
+    STATUS_RGB.setReadyGreen(true);
     STATUS_RGB.setBootHeld(true);
     LOGGER.setRoleLabel("slave");
     LOGGER.setStoreRing(false);
@@ -627,6 +628,7 @@ static void setupSlave() {
 }
 
 void setup() {
+    STATUS_RGB.begin();
     Serial.begin(115200);
     Serial.setTxTimeoutMs(20);
     delay(400);
