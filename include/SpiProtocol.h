@@ -41,6 +41,8 @@ constexpr size_t SPI_DEVICE_SYNC_ENTRY_LEN_NO_CHANNELS =
 constexpr size_t SPI_DEVICE_SYNC_ENTRY_LEN_WITH_CHANNELS = SPI_DEVICE_SYNC_ENTRY_LEN_NO_CHANNELS + 1;
 constexpr size_t SPI_DEVICE_SYNC_ENTRY_LEN = SPI_DEVICE_SYNC_ENTRY_LEN_WITH_CHANNELS + 1;
 constexpr size_t SPI_DEVICE_MESSAGE_MAX = 64;
+constexpr size_t SPI_ATTR_REPORT_RSSI_OFFSET = 11;
+constexpr size_t SPI_ATTR_REPORT_MESSAGE_OFFSET = 12;
 constexpr size_t SPI_ZCL_WRITE_ATTR_LEN = 18;
 constexpr uint8_t ZCL_ATTR_TYPE_U8 = 0x20;
 constexpr uint8_t ZCL_ATTR_TYPE_U16 = 0x21;
@@ -62,6 +64,7 @@ enum SpiEvent : uint8_t {
     SpiEvtCmdResult = 0x89,
     SpiEvtDeviceMap = 0x8A,
     SpiEvtDevicesFile = 0x8B,
+    SpiEvtJoinClosed = 0x8C,
     SpiEvtErr = 0x8E,
     SpiEvtTimeout = 0x8F
 };

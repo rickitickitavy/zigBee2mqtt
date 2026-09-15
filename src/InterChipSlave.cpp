@@ -326,17 +326,28 @@ void InterChipSlave::enqueueLogLine(const char *line) {
     }
 }
 
-void InterChipSlave::enqueueAttrReport(const char *message, const uint8_t ieee[8], uint8_t endpoint, uint16_t shortAddr) {
-    uint8_t payload[11 + SPI_DEVICE_MESSAGE_MAX];
+void InterChipSlave::enqueueAttrReport(
+    const char *message,
+    const uint8_t ieee[8],
+    uint8_t endpoint,
+    uint16_t shortAddr,
+    int8_t rssiDbm
+) {
+    uint8_t payload[SPI_ATTR_REPORT_MESSAGE_OFFSET + SPI_DEVICE_MESSAGE_MAX];
     memset(payload, 0, sizeof(payload));
     memcpy(payload, ieee, 8);
     payload[8] = endpoint;
     payload[9] = (uint8_t)(shortAddr & 0xFF);
     payload[10] = (uint8_t)((shortAddr >> 8) & 0xFF);
+    payload[SPI_ATTR_REPORT_RSSI_OFFSET] = (uint8_t)rssiDbm;
     const char *body = message != nullptr ? message : "";
-    strncpy((char *)payload + 11, body, SPI_DEVICE_MESSAGE_MAX - 1);
-    const uint16_t length = (uint16_t)(11 + strlen((char *)payload + 11) + 1);
+    strncpy((char *)payload + SPI_ATTR_REPORT_MESSAGE_OFFSET, body, SPI_DEVICE_MESSAGE_MAX - 1);
+    const uint16_t length = (uint16_t)(SPI_ATTR_REPORT_MESSAGE_OFFSET + strlen((char *)payload + SPI_ATTR_REPORT_MESSAGE_OFFSET) + 1);
     enqueueEvent(SpiEvtAttrReport, payload, length);
+}
+
+void InterChipSlave::enqueueJoinClosed() {
+    enqueueEvent(SpiEvtJoinClosed, nullptr, 0);
 }
 
 void InterChipSlave::enqueueDeviceJoin(

@@ -23,7 +23,14 @@ public:
     void begin();
     void pump();
     void enqueueLogLine(const char *line);
-    void enqueueAttrReport(const char *message, const uint8_t ieee[8], uint8_t endpoint, uint16_t shortAddr);
+    void enqueueAttrReport(
+        const char *message,
+        const uint8_t ieee[8],
+        uint8_t endpoint,
+        uint16_t shortAddr,
+        int8_t rssiDbm
+    );
+    void enqueueJoinClosed();
     void enqueueDeviceJoin(
         const uint8_t ieee[8],
         uint16_t shortAddr,

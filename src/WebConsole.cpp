@@ -130,6 +130,7 @@ void WebConsole::begin() {
 
     server.on("/api/log", HTTP_GET, [this](AsyncWebServerRequest *request) { handleLogGet(request); });
     server.on("/api/version", HTTP_GET, [this](AsyncWebServerRequest *request) { handleVersionGet(request); });
+    server.on("/api/status", HTTP_GET, [this](AsyncWebServerRequest *request) { handleGatewayStatusGet(request); });
 
     server.on(
         "/update",
@@ -400,6 +401,14 @@ void WebConsole::setDeviceOnlineHandler(WebConsole::DeviceOnlineFn handler) {
     isDeviceOnline = handler;
 }
 
+void WebConsole::setDeviceRssiHandler(WebConsole::DeviceRssiFn handler) {
+    lastDeviceRssi = handler;
+}
+
+void WebConsole::setGatewayStatusHandler(WebConsole::GatewayStatusFn handler) {
+    gatewayStatusJson = handler;
+}
+
 void WebConsole::setDevicesFileHandler(WebConsole::DevicesFileFn handler) {
     devicesFileJson = handler;
 }
@@ -452,7 +461,7 @@ void WebConsole::setDeviceServices(
 
 void WebConsole::handleDevicesGet(AsyncWebServerRequest *request) {
     DeviceTopicMap *deviceMap = settingsManager->deviceMap();
-    String json = deviceMap->listJson(isDeviceOnline);
+    String json = deviceMap->listJson(isDeviceOnline, lastDeviceRssi);
     AsyncWebServerResponse *response = request->beginResponse(200, "application/json", json);
     response->addHeader("Cache-Control", "no-store");
     request->send(response);
@@ -559,6 +568,13 @@ void WebConsole::handleDevicesSearchPost(AsyncWebServerRequest *request) {
 
 void WebConsole::handleDevicesStoreGet(AsyncWebServerRequest *request) {
     String json = devicesFileJson != nullptr ? devicesFileJson() : String("[]");
+    AsyncWebServerResponse *response = request->beginResponse(200, "application/json", json);
+    response->addHeader("Cache-Control", "no-store");
+    request->send(response);
+}
+
+void WebConsole::handleGatewayStatusGet(AsyncWebServerRequest *request) {
+    String json = gatewayStatusJson != nullptr ? gatewayStatusJson() : String("{}");
     AsyncWebServerResponse *response = request->beginResponse(200, "application/json", json);
     response->addHeader("Cache-Control", "no-store");
     request->send(response);

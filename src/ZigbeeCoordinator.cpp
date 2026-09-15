@@ -3,6 +3,7 @@
 #include "Defines.h"
 #include "StatusRgb.h"
 
+#include <nwk/esp_zigbee_nwk.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -173,6 +174,10 @@ void ZigbeeCoordinator::setRegistryChangedHandler(RegistryChangedFn handler) {
     registryChangedHandler = handler;
 }
 
+void ZigbeeCoordinator::setJoinClosedHandler(JoinClosedFn handler) {
+    joinClosedHandler = handler;
+}
+
 void ZigbeeCoordinator::attachLibraryCallbacks(void (*withSource)(bool, uint8_t, esp_zb_zcl_addr_t)) {
     zigbeeSwitch.onLightStateChangeWithSource(withSource);
 }
@@ -250,9 +255,13 @@ void ZigbeeCoordinator::startPairingWindow(uint8_t seconds) {
 }
 
 void ZigbeeCoordinator::stopPairingWindow() {
+    const bool wasOpen = pairingUntilMs != 0;
     pairingUntilMs = 0;
     pairingLedOn = false;
     STATUS_RGB.setPairingHeld(false);
+    if (wasOpen && joinClosedHandler != nullptr) {
+        joinClosedHandler();
+    }
 }
 
 void ZigbeeCoordinator::updatePairingLed() {
@@ -648,7 +657,7 @@ void ZigbeeCoordinator::handleIasZoneStatus(
     logDeviceEvent(eventName, ieee, shortAddr, message->info.src_endpoint, registeredName(ieee));
     pulseInboundDevice(ieee);
     if (lightStateHandler != nullptr) {
-        lightStateHandler(alarm ? "LEAK" : "DRY", ieee, message->info.src_endpoint, shortAddr);
+        lightStateHandler(alarm ? "LEAK" : "DRY", ieee, message->info.src_endpoint, shortAddr, message->info.header.rssi);
     }
 }
 
@@ -708,10 +717,10 @@ void ZigbeeCoordinator::handleAttributeReport(
         return;
     }
     if (clusterId == ESP_ZB_ZCL_CLUSTER_ID_ON_OFF && attribute->id == ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID) {
-        lightStateHandler(value != 0 ? "ON" : "OFF", ieee, srcEndpoint, shortAddr);
+        lightStateHandler(value != 0 ? "ON" : "OFF", ieee, srcEndpoint, shortAddr, rssiForShortAddr(shortAddr));
         return;
     }
-    lightStateHandler(eventName, ieee, srcEndpoint, shortAddr);
+    lightStateHandler(eventName, ieee, srcEndpoint, shortAddr, rssiForShortAddr(shortAddr));
 }
 
 void ZigbeeCoordinator::handleLightStateWithSource(bool on, uint8_t endpoint, esp_zb_zcl_addr_t source) {
@@ -730,7 +739,7 @@ void ZigbeeCoordinator::handleLightStateWithSource(bool on, uint8_t endpoint, es
     logDeviceEvent(eventName, ieee, shortAddr, endpoint, registeredName(ieee));
     pulseInboundDevice(ieee);
     if (lightStateHandler != nullptr) {
-        lightStateHandler(on ? "ON" : "OFF", ieee, endpoint, shortAddr);
+        lightStateHandler(on ? "ON" : "OFF", ieee, endpoint, shortAddr, rssiForShortAddr(shortAddr));
     }
 }
 
@@ -740,6 +749,20 @@ void ZigbeeCoordinator::pulseInboundDevice(const uint8_t ieee[8]) {
         return;
     }
     STATUS_RGB.pulsePacketReceived();
+}
+
+int8_t ZigbeeCoordinator::rssiForShortAddr(uint16_t shortAddr) const {
+    if (shortAddr == 0 || shortAddr == 0xFFFF) {
+        return 0;
+    }
+    esp_zb_nwk_info_iterator_t iterator = ESP_ZB_NWK_INFO_ITERATOR_INIT;
+    esp_zb_nwk_neighbor_info_t neighbor{};
+    while (esp_zb_nwk_get_next_neighbor(&iterator, &neighbor) == ESP_OK) {
+        if (neighbor.short_addr == shortAddr) {
+            return neighbor.rssi;
+        }
+    }
+    return 0;
 }
 
 bool ZigbeeCoordinator::controlOnOff(const uint8_t ieee[8], const char *command, uint8_t endpoint) {

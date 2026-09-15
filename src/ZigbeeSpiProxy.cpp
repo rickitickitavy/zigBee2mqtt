@@ -48,12 +48,20 @@ ZigbeeSpiProxy::CachedDevice *ZigbeeSpiProxy::allocSlot(const uint8_t ieee[8]) {
 }
 
 bool ZigbeeSpiProxy::permitJoin(uint8_t seconds) {
-    return INTER_CHIP_HOST.tryEnqueue(SpiCmdPermitJoin, &seconds, 1);
+    const bool queued = INTER_CHIP_HOST.tryEnqueue(SpiCmdPermitJoin, &seconds, 1);
+    if (queued) {
+        pairingOpen = seconds != 0;
+    }
+    return queued;
 }
 
 bool ZigbeeSpiProxy::closeJoin() {
     uint8_t seconds = 0;
-    return INTER_CHIP_HOST.tryEnqueue(SpiCmdPermitJoin, &seconds, 1);
+    const bool queued = INTER_CHIP_HOST.tryEnqueue(SpiCmdPermitJoin, &seconds, 1);
+    if (queued) {
+        pairingOpen = false;
+    }
+    return queued;
 }
 
 bool ZigbeeSpiProxy::controlOnOff(const uint8_t ieee[8], const char *command, uint8_t endpoint) {
@@ -64,7 +72,11 @@ bool ZigbeeSpiProxy::controlOnOff(const uint8_t ieee[8], const char *command, ui
     strncpy((char *)payload + 9, body, SPI_DEVICE_MESSAGE_MAX - 1);
     payload[8 + SPI_DEVICE_MESSAGE_MAX] = 0;
     const uint16_t length = (uint16_t)(9 + strlen((char *)payload + 9) + 1);
-    return INTER_CHIP_HOST.tryEnqueue(SpiCmdZclOnOff, payload, length);
+    const bool queued = INTER_CHIP_HOST.tryEnqueue(SpiCmdZclOnOff, payload, length);
+    if (queued) {
+        packetsTx++;
+    }
+    return queued;
 }
 
 bool ZigbeeSpiProxy::writeAttribute(
@@ -88,7 +100,11 @@ bool ZigbeeSpiProxy::writeAttribute(
         )) {
         return false;
     }
-    return INTER_CHIP_HOST.tryEnqueue(SpiCmdZclWriteAttr, payload, SPI_ZCL_WRITE_ATTR_LEN);
+    const bool queued = INTER_CHIP_HOST.tryEnqueue(SpiCmdZclWriteAttr, payload, SPI_ZCL_WRITE_ATTR_LEN);
+    if (queued) {
+        packetsTx++;
+    }
+    return queued;
 }
 
 void ZigbeeSpiProxy::setRegistryPullDoneHandler(void (*handler)()) {
@@ -337,6 +353,10 @@ void ZigbeeSpiProxy::pumpRegistrySync() {
 }
 
 void ZigbeeSpiProxy::onSpiEvent(const SpiFrame &frame) {
+    if (frame.cmd == SpiEvtJoinClosed) {
+        pairingOpen = false;
+        return;
+    }
     if (frame.cmd == SpiEvtDevicesFile) {
         applyDevicesFile(frame);
         return;
@@ -345,27 +365,27 @@ void ZigbeeSpiProxy::onSpiEvent(const SpiFrame &frame) {
         applyPulledRegistry(frame);
         return;
     }
-    if (frame.cmd == SpiEvtAttrReport && frame.length >= 12) {
+    if (frame.cmd == SpiEvtAttrReport && frame.length >= SPI_ATTR_REPORT_MESSAGE_OFFSET + 1) {
         uint8_t ieee[8];
         memcpy(ieee, frame.payload, 8);
         const uint8_t endpoint = frame.payload[8];
         const uint16_t shortAddr = (uint16_t)frame.payload[9] | ((uint16_t)frame.payload[10] << 8);
+        const int8_t rssiDbm = (int8_t)frame.payload[SPI_ATTR_REPORT_RSSI_OFFSET];
         char message[SPI_DEVICE_MESSAGE_MAX];
         memset(message, 0, sizeof(message));
-        if (frame.length == 12 && frame.payload[11] < 2) {
-            strncpy(message, frame.payload[11] != 0 ? "ON" : "OFF", sizeof(message) - 1);
-        } else {
-            const size_t copyLength = frame.length - 11;
-            const size_t bounded = copyLength >= sizeof(message) ? sizeof(message) - 1 : copyLength;
-            memcpy(message, frame.payload + 11, bounded);
-            message[sizeof(message) - 1] = '\0';
-        }
+        const size_t copyLength = frame.length - SPI_ATTR_REPORT_MESSAGE_OFFSET;
+        const size_t bounded = copyLength >= sizeof(message) ? sizeof(message) - 1 : copyLength;
+        memcpy(message, frame.payload + SPI_ATTR_REPORT_MESSAGE_OFFSET, bounded);
+        message[sizeof(message) - 1] = '\0';
         CachedDevice *slot = allocSlot(ieee);
         if (slot != nullptr) {
             slot->endpoint = endpoint;
             slot->shortAddr = shortAddr;
             slot->lastSeenMs = millis();
+            slot->lastRssiDbm = rssiDbm;
+            slot->hasRssi = true;
         }
+        packetsRx++;
         if (lightStateHandler != nullptr) {
             lightStateHandler(message, ieee, endpoint, shortAddr);
         }
@@ -375,6 +395,7 @@ void ZigbeeSpiProxy::onSpiEvent(const SpiFrame &frame) {
         uint8_t ieee[8];
         memcpy(ieee, frame.payload, 8);
         CachedDevice *slot = allocSlot(ieee);
+        packetsRx++;
         if (slot == nullptr) {
             return;
         }
@@ -383,6 +404,9 @@ void ZigbeeSpiProxy::onSpiEvent(const SpiFrame &frame) {
         slot->lastSeenMs = millis();
         strncpy(slot->manufacturer, (const char *)frame.payload + 11, sizeof(slot->manufacturer) - 1);
         strncpy(slot->model, (const char *)frame.payload + 43, sizeof(slot->model) - 1);
+    }
+    if (frame.cmd == SpiEvtDeviceLeave) {
+        packetsRx++;
     }
 }
 
@@ -404,6 +428,48 @@ bool ZigbeeSpiProxy::isOnline(const uint8_t ieee[8]) const {
         return (long)(millis() - devices[i].lastSeenMs) < (long)kOnlineWindowMs;
     }
     return false;
+}
+
+bool ZigbeeSpiProxy::lastRssiDbm(const uint8_t ieee[8], int8_t *rssiDbm) const {
+    if (ieee == nullptr || rssiDbm == nullptr) {
+        return false;
+    }
+    for (int i = 0; i < kMaxDevices; i++) {
+        if (!devices[i].occupied || memcmp(devices[i].ieee, ieee, 8) != 0) {
+            continue;
+        }
+        if (!devices[i].hasRssi) {
+            return false;
+        }
+        *rssiDbm = devices[i].lastRssiDbm;
+        return true;
+    }
+    return false;
+}
+
+uint32_t ZigbeeSpiProxy::packetsReceived() const {
+    return packetsRx;
+}
+
+uint32_t ZigbeeSpiProxy::packetsSent() const {
+    return packetsTx;
+}
+
+bool ZigbeeSpiProxy::pairingActive() const {
+    return pairingOpen;
+}
+
+int ZigbeeSpiProxy::onlineCount() const {
+    int count = 0;
+    for (int i = 0; i < kMaxDevices; i++) {
+        if (!devices[i].occupied) {
+            continue;
+        }
+        if ((long)(millis() - devices[i].lastSeenMs) < (long)kOnlineWindowMs) {
+            count++;
+        }
+    }
+    return count;
 }
 
 String ZigbeeSpiProxy::devicesJson(DeviceTopicMap *topicMap) {

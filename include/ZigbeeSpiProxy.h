@@ -30,7 +30,12 @@ public:
     bool enqueueDeviceDelete(const uint8_t ieee[8]);
     bool registryHydrated() const;
     bool isOnline(const uint8_t ieee[8]) const;
+    bool lastRssiDbm(const uint8_t ieee[8], int8_t *rssiDbm) const;
     void noteSeen(const uint8_t ieee[8]);
+    uint32_t packetsReceived() const;
+    uint32_t packetsSent() const;
+    bool pairingActive() const;
+    int onlineCount() const;
     String devicesJson(DeviceTopicMap *topicMap);
     void setLightStateHandler(LightStateFn handler);
     void setRegistryPullDoneHandler(void (*handler)());
@@ -49,6 +54,8 @@ private:
         char model[32];
         bool occupied;
         unsigned long lastSeenMs;
+        int8_t lastRssiDbm;
+        bool hasRssi;
     };
 
     struct PendingDeviceChange {
@@ -76,6 +83,9 @@ private:
     bool filePullCollecting = false;
     String filePullBuffer;
     String fileCache;
+    uint32_t packetsRx = 0;
+    uint32_t packetsTx = 0;
+    bool pairingOpen = false;
 
     CachedDevice *findByIeee(const uint8_t ieee[8]);
     CachedDevice *allocSlot(const uint8_t ieee[8]);
