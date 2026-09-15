@@ -13,6 +13,8 @@ public:
     bool isStaConnected() const;
     bool hasUsableInterface() const;
     void setInterfaceReadyHandler(InterfaceReadyFn handler);
+    void notifyStaDisconnected();
+    void notifyStaGotIp();
     void applyStaRadio();
     void enableIeee154Coex();
     uint8_t zigbeeChannelOverlappingSta() const;
@@ -33,6 +35,7 @@ private:
     unsigned long lastStaRadioRefreshMs = 0;
     bool staWasConnected = false;
     bool staNeedsWebRebind = false;
+    bool staWebRebindArmed = false;
     InterfaceReadyFn interfaceReadyHandler = nullptr;
     bool recoveryApIdentity = false;
 
@@ -43,6 +46,8 @@ private:
     void beginStaJoin();
     void reconnectSta();
     void onStaConnected();
+    void requestStaWebRebind();
+    void runPendingStaWebRebind(bool staHasIpv4);
     String apNetworkName() const;
     String apPassword() const;
 };
