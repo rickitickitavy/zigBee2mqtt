@@ -334,6 +334,17 @@ static void onWiFiArduinoEvent(arduino_event_id_t event, arduino_event_info_t in
     }
     if (event == ARDUINO_EVENT_WIFI_AP_STADISCONNECTED) {
         LOGGER.info("WiFi AP client left");
+        return;
+    }
+    if (wifiController == nullptr) {
+        return;
+    }
+    if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED || event == ARDUINO_EVENT_WIFI_STA_LOST_IP) {
+        wifiController->notifyStaDisconnected();
+        return;
+    }
+    if (event == ARDUINO_EVENT_WIFI_STA_GOT_IP) {
+        wifiController->notifyStaGotIp();
     }
 }
 

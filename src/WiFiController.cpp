@@ -65,6 +65,33 @@ bool WiFiController::hasUsableInterface() const {
 
 void WiFiController::setInterfaceReadyHandler(InterfaceReadyFn handler) {
     interfaceReadyHandler = handler;
+    staWebRebindArmed = handler != nullptr;
+    staNeedsWebRebind = false;
+}
+
+void WiFiController::requestStaWebRebind() {
+    if (!staWebRebindArmed || apActive || !staEnabledAtBoot) {
+        return;
+    }
+    staNeedsWebRebind = true;
+}
+
+void WiFiController::notifyStaDisconnected() {
+    LOGGER.warning("STA event: disconnected or lost IP");
+    requestStaWebRebind();
+}
+
+void WiFiController::notifyStaGotIp() {
+    LOGGER.info("STA event: got IP " + WiFi.localIP().toString());
+    requestStaWebRebind();
+}
+
+void WiFiController::runPendingStaWebRebind(bool staHasIpv4) {
+    if (!staHasIpv4 || !staNeedsWebRebind || interfaceReadyHandler == nullptr) {
+        return;
+    }
+    interfaceReadyHandler();
+    staNeedsWebRebind = false;
 }
 
 String WiFiController::apNetworkName() const {
@@ -288,17 +315,14 @@ void WiFiController::update() {
     const bool connected = isStaConnected();
     if (!connected && staWasConnected) {
         LOGGER.warning("STA disconnected; reconnecting");
-        staNeedsWebRebind = true;
+        requestStaWebRebind();
         lastStaReconnectMs = millis();
         reconnectSta();
     }
     if (connected && !staWasConnected) {
         onStaConnected();
-        if (staNeedsWebRebind && interfaceReadyHandler != nullptr) {
-            interfaceReadyHandler();
-        }
-        staNeedsWebRebind = false;
     }
+    runPendingStaWebRebind(connected);
     if (connected && (millis() - lastStaRadioRefreshMs) >= kStaRadioRefreshMs) {
         lastStaRadioRefreshMs = millis();
         applyStaRadio();
