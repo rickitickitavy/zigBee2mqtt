@@ -602,10 +602,14 @@ bool DeviceTopicMap::parseIeee(const char *text, uint8_t ieee[8]) {
 }
 
 String DeviceTopicMap::listJson() {
-    return listJson(nullptr);
+    return listJson(nullptr, nullptr);
 }
 
 String DeviceTopicMap::listJson(OnlineFn isOnline) {
+    return listJson(isOnline, nullptr);
+}
+
+String DeviceTopicMap::listJson(OnlineFn isOnline, LastRssiFn lastRssi) {
     String json = "[";
     bool first = true;
     if (slots == nullptr) {
@@ -638,6 +642,13 @@ String DeviceTopicMap::listJson(OnlineFn isOnline) {
         if (isOnline != nullptr) {
             json += ",\"online\":";
             json += isOnline(entry->ieee) ? "true" : "false";
+        }
+        if (lastRssi != nullptr) {
+            int8_t rssiDbm = 0;
+            if (lastRssi(entry->ieee, &rssiDbm)) {
+                json += ",\"rssi\":";
+                json += String((int)rssiDbm);
+            }
         }
         json += "}";
     }

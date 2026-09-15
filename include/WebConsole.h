@@ -12,7 +12,9 @@ public:
     using DeviceRemovedFn = bool (*)(const uint8_t ieee[8]);
     using HardwareApplyFn = void (*)(uint32_t spiSpeedHz);
     using DeviceOnlineFn = bool (*)(const uint8_t ieee[8]);
+    using DeviceRssiFn = bool (*)(const uint8_t ieee[8], int8_t *rssiDbm);
     using DevicesFileFn = String (*)();
+    using GatewayStatusFn = String (*)();
 
     explicit WebConsole(SettingsManager *settingsManager);
 
@@ -27,7 +29,9 @@ public:
     );
     void setHardwareApplyHandler(HardwareApplyFn handler);
     void setDeviceOnlineHandler(DeviceOnlineFn handler);
+    void setDeviceRssiHandler(DeviceRssiFn handler);
     void setDevicesFileHandler(DevicesFileFn handler);
+    void setGatewayStatusHandler(GatewayStatusFn handler);
 
 private:
     SettingsManager *settingsManager;
@@ -38,7 +42,9 @@ private:
     DeviceRemovedFn onDeviceRemoved = nullptr;
     HardwareApplyFn applyHardware = nullptr;
     DeviceOnlineFn isDeviceOnline = nullptr;
+    DeviceRssiFn lastDeviceRssi = nullptr;
     DevicesFileFn devicesFileJson = nullptr;
+    GatewayStatusFn gatewayStatusJson = nullptr;
     AsyncWebServer server;
     String requestBody;
     bool otaStarted = false;
@@ -61,6 +67,7 @@ private:
     void handleDevicesSearchPost(AsyncWebServerRequest *request);
     void handleDevicesSearchStopPost(AsyncWebServerRequest *request);
     void handleDevicesStoreGet(AsyncWebServerRequest *request);
+    void handleGatewayStatusGet(AsyncWebServerRequest *request);
     void appendRequestBody(uint8_t *data, size_t len, size_t index);
     void handleLogGet(AsyncWebServerRequest *request);
     void handleVersionGet(AsyncWebServerRequest *request);

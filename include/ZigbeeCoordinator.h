@@ -20,9 +20,16 @@ struct BoundZigbeeDevice {
 
 class ZigbeeCoordinator {
 public:
-    using LightStateFn = void (*)(const char *message, const uint8_t ieee[8], uint8_t endpoint, uint16_t shortAddr);
+    using LightStateFn = void (*)(
+        const char *message,
+        const uint8_t ieee[8],
+        uint8_t endpoint,
+        uint16_t shortAddr,
+        int8_t rssiDbm
+    );
     using DeviceBoundFn = void (*)(const BoundZigbeeDevice *device);
     using RegistryChangedFn = void (*)();
+    using JoinClosedFn = void (*)();
 
     ZigbeeCoordinator();
 
@@ -48,6 +55,7 @@ public:
     void setLightStateHandler(LightStateFn handler);
     void setDeviceBoundHandler(DeviceBoundFn handler);
     void setRegistryChangedHandler(RegistryChangedFn handler);
+    void setJoinClosedHandler(JoinClosedFn handler);
     void handleLightStateWithSource(bool on, uint8_t endpoint, esp_zb_zcl_addr_t source);
     void handleIasZoneStatus(const esp_zb_zcl_ias_zone_status_change_notification_message_t *message);
     void handleIasZoneEnroll(ZigbeeEP *endpoint, const esp_zb_zcl_ias_zone_enroll_request_message_t *message);
@@ -106,6 +114,7 @@ private:
     LightStateFn lightStateHandler = nullptr;
     DeviceBoundFn deviceBoundHandler = nullptr;
     RegistryChangedFn registryChangedHandler = nullptr;
+    JoinClosedFn joinClosedHandler = nullptr;
     bool registryReady = false;
     unsigned long lastRefreshMs = 0;
     unsigned long pairingUntilMs = 0;
@@ -124,4 +133,5 @@ private:
     void offerPairingIfNeeded(const uint8_t ieee[8]);
     bool migrateRegisteredIeee(const uint8_t previousIeee[8], const uint8_t nextIeee[8]);
     void pulseInboundDevice(const uint8_t ieee[8]);
+    int8_t rssiForShortAddr(uint16_t shortAddr) const;
 };

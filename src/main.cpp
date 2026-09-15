@@ -201,7 +201,8 @@ static void onHostSpiEvent(const SpiFrame &frame) {
     if (frame.cmd == SpiEvtDeviceJoin && foundDevices != nullptr && topicMap != nullptr) {
         foundDevices->noteJoin(frame, topicMap);
     }
-    if (frame.cmd == SpiEvtAttrReport && frame.length >= 12 && foundDevices != nullptr && topicMap != nullptr) {
+    if (frame.cmd == SpiEvtAttrReport && frame.length >= SPI_ATTR_REPORT_MESSAGE_OFFSET + 1
+        && foundDevices != nullptr && topicMap != nullptr) {
         uint8_t ieee[8];
         memcpy(ieee, frame.payload, 8);
         const uint8_t endpoint = frame.payload[8];
@@ -238,6 +239,39 @@ static bool persistHostDeviceList() {
         return false;
     }
     return settingsManager->saveDevicesJson();
+}
+
+static bool hostLastDeviceRssi(const uint8_t ieee[8], int8_t *rssiDbm) {
+    return ZIGBEE_SPI_PROXY.lastRssiDbm(ieee, rssiDbm);
+}
+
+static String hostGatewayStatusJson() {
+    int registeredCount = topicMap != nullptr ? topicMap->usedCount() : 0;
+    int onlineCount = 0;
+    if (topicMap != nullptr) {
+        int slotIndex = topicMap->nextUsedIndex(0);
+        while (slotIndex >= 0) {
+            DeviceTopicEntry *entry = topicMap->slotAt(slotIndex);
+            if (entry != nullptr && ZIGBEE_SPI_PROXY.isOnline(entry->ieee)) {
+                onlineCount++;
+            }
+            slotIndex = topicMap->nextUsedIndex(slotIndex + 1);
+        }
+    }
+    String json = "{\"devices\":";
+    json += String(registeredCount);
+    json += ",\"online\":";
+    json += String(onlineCount);
+    json += ",\"packetsRx\":";
+    json += String((unsigned long)ZIGBEE_SPI_PROXY.packetsReceived());
+    json += ",\"packetsTx\":";
+    json += String((unsigned long)ZIGBEE_SPI_PROXY.packetsSent());
+    json += ",\"version\":\"";
+    json += FIRMWARE_VERSION;
+    json += "\",\"pairingActive\":";
+    json += ZIGBEE_SPI_PROXY.pairingActive() ? "true" : "false";
+    json += "}";
+    return json;
 }
 
 static bool onDeviceUpserted(const DeviceTopicEntry *entry) {
@@ -425,6 +459,9 @@ static void createSlaveCoordinator() {
             INTER_CHIP_SLAVE.requestDevicesFileDump();
         }
     );
+    zigbeeCoordinator->setJoinClosedHandler(
+        []() { INTER_CHIP_SLAVE.enqueueJoinClosed(); }
+    );
     zigbeeCoordinator->setDeviceBoundHandler(
         [](const BoundZigbeeDevice *device) {
             if (device == nullptr) {
@@ -440,8 +477,8 @@ static void createSlaveCoordinator() {
         }
     );
     zigbeeCoordinator->setLightStateHandler(
-        [](const char *message, const uint8_t ieee[8], uint8_t endpoint, uint16_t shortAddr) {
-            INTER_CHIP_SLAVE.enqueueAttrReport(message, ieee, endpoint, shortAddr);
+        [](const char *message, const uint8_t ieee[8], uint8_t endpoint, uint16_t shortAddr, int8_t rssiDbm) {
+            INTER_CHIP_SLAVE.enqueueAttrReport(message, ieee, endpoint, shortAddr, rssiDbm);
         }
     );
     zigbeeCoordinator->attachLibraryCallbacks(
@@ -605,6 +642,8 @@ static void setupHost() {
     webConsole->setDeviceOnlineHandler([](const uint8_t ieee[8]) {
         return ZIGBEE_SPI_PROXY.isOnline(ieee);
     });
+    webConsole->setDeviceRssiHandler(hostLastDeviceRssi);
+    webConsole->setGatewayStatusHandler(hostGatewayStatusJson);
     webConsole->setDevicesFileHandler([]() {
         ZIGBEE_SPI_PROXY.requestDevicesFile();
         return ZIGBEE_SPI_PROXY.devicesFileJson();

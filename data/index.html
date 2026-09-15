@@ -26,20 +26,14 @@
                 }
             }
             if (name == "system") {
-                var activeSystem = document.querySelector(".system-tab-btn.active");
-                if (activeSystem && activeSystem.getAttribute("data-tab") == "log") {
-                    startLogPolling();
-                } else {
-                    stopLogPolling();
-                }
-                if (activeSystem && activeSystem.getAttribute("data-tab") == "devices-json") {
-                    refreshDevicesJson();
-                }
-                if (activeSystem && activeSystem.getAttribute("data-tab") == "hardware") {
-                    loadHardware();
-                }
+                showSystemTab("log");
             } else {
                 stopLogPolling();
+            }
+            if (name == "status") {
+                startStatusPolling();
+            } else {
+                stopStatusPolling();
             }
             if (name == "mqtt") {
                 loadMqtt();
@@ -121,6 +115,55 @@
                 return;
             }
             logPollTimer = window.setInterval(refreshLog, 2000);
+        }
+
+        var statusPollTimer = null;
+
+        function stopStatusPolling() {
+            if (statusPollTimer != null) {
+                window.clearInterval(statusPollTimer);
+                statusPollTimer = null;
+            }
+        }
+
+        function applyGatewayStatus(payload) {
+            var devicesLabel = document.getElementById("statusDevices");
+            var onlineLabel = document.getElementById("statusOnline");
+            var packetsRxLabel = document.getElementById("statusPacketsRx");
+            var packetsTxLabel = document.getElementById("statusPacketsTx");
+            var versionLabel = document.getElementById("statusFirmwareVersion");
+            if (devicesLabel) {
+                devicesLabel.textContent = payload && payload.devices != null ? String(payload.devices) : "—";
+            }
+            if (onlineLabel) {
+                onlineLabel.textContent = payload && payload.online != null ? String(payload.online) : "—";
+            }
+            if (packetsRxLabel) {
+                packetsRxLabel.textContent = payload && payload.packetsRx != null ? String(payload.packetsRx) : "—";
+            }
+            if (packetsTxLabel) {
+                packetsTxLabel.textContent = payload && payload.packetsTx != null ? String(payload.packetsTx) : "—";
+            }
+            if (versionLabel) {
+                versionLabel.textContent = payload && payload.version ? payload.version : "—";
+            }
+        }
+
+        function refreshGatewayStatus() {
+            fetch("/api/status", { cache: "no-store" }).then(function (response) {
+                return response.json();
+            }).then(function (payload) {
+                applyGatewayStatus(payload);
+            }).catch(function () {
+            });
+        }
+
+        function startStatusPolling() {
+            refreshGatewayStatus();
+            if (statusPollTimer != null) {
+                return;
+            }
+            statusPollTimer = window.setInterval(refreshGatewayStatus, 2000);
         }
 
         function loadHardware() {
@@ -340,6 +383,34 @@
             }
             fileInput.value = "";
             fileInput.click();
+        }
+
+        function exportDevicesStore() {
+            var saveError = document.getElementById("devicesSaveError");
+            if (saveError) {
+                saveError.hidden = true;
+            }
+            fetch("/api/devices/store", { cache: "no-store" }).then(function (response) {
+                return response.text().then(function (text) {
+                    if (!response.ok) {
+                        throw new Error("HTTP " + response.status);
+                    }
+                    var blob = new Blob([text || ""], { type: "application/json;charset=utf-8" });
+                    var objectUrl = URL.createObjectURL(blob);
+                    var link = document.createElement("a");
+                    link.href = objectUrl;
+                    link.download = "devices.json";
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+                    URL.revokeObjectURL(objectUrl);
+                });
+            }).catch(function (error) {
+                if (saveError) {
+                    saveError.hidden = false;
+                    saveError.textContent = error && error.message ? error.message : "Export failed";
+                }
+            });
         }
 
         function onDevicesRestoreFileSelected(event) {
@@ -696,13 +767,14 @@
 
         var foundPollTimer = null;
         var devicesPollTimer = null;
+        var pairingPollTimer = null;
         var selectedFoundIeee = "";
         var selectedRegisteredIeee = "";
         var mqttBaseTopicCache = "";
-        var topicsTouched = false;
         var registeredDeviceRows = [];
         var searchRunning = false;
         var pairingSessionActive = false;
+        var searchAwaitingClose = false;
 
         function topicSlug(name) {
             return String(name || "")
@@ -804,6 +876,10 @@
                 row.onclick = function () {
                     selectRegisteredIeee(this.getAttribute("data-ieee") || "");
                 };
+                row.ondblclick = function () {
+                    selectRegisteredIeee(this.getAttribute("data-ieee") || "");
+                    openEditSelectedDevice();
+                };
                 var onlineCell = document.createElement("td");
                 onlineCell.className = "device-online-cell";
                 var onlineDot = document.createElement("span");
@@ -814,9 +890,16 @@
                 ieeeCell.textContent = ieee;
                 var nameCell = document.createElement("td");
                 nameCell.textContent = rows[index].name || rows[index].friendlyName || "";
+                var rssiCell = document.createElement("td");
+                if (rows[index].rssi === undefined || rows[index].rssi === null || rows[index].rssi === "") {
+                    rssiCell.textContent = "";
+                } else {
+                    rssiCell.textContent = String(rows[index].rssi) + " dBm";
+                }
                 row.appendChild(onlineCell);
                 row.appendChild(ieeeCell);
                 row.appendChild(nameCell);
+                row.appendChild(rssiCell);
                 body.appendChild(row);
             }
             if (!stillSelected) {
@@ -847,6 +930,7 @@
             }
             searchDialog.hidden = false;
             startFoundPolling();
+            startPairingPolling();
         }
 
         function loadDevices() {
@@ -957,9 +1041,53 @@
             });
         }
 
+        function stopPairingPolling() {
+            if (pairingPollTimer != null) {
+                window.clearInterval(pairingPollTimer);
+                pairingPollTimer = null;
+            }
+        }
+
+        function applyPairingStatus(payload) {
+            var pairingActive = !!(payload && payload.pairingActive);
+            if (pairingActive) {
+                searchAwaitingClose = true;
+                setSearchRunning(true);
+                return;
+            }
+            if (searchAwaitingClose) {
+                searchAwaitingClose = false;
+                setSearchRunning(false);
+                var statusLine = document.getElementById("searchDialogStatus");
+                var searchDialog = document.getElementById("searchDialog");
+                if (statusLine && searchDialog && !searchDialog.hidden) {
+                    statusLine.textContent =
+                        "Click Search to open pairing. If several devices appear, select one row and click Add.";
+                }
+            }
+        }
+
+        function refreshPairingStatus() {
+            fetch("/api/status", { cache: "no-store" }).then(function (response) {
+                return response.json();
+            }).then(function (payload) {
+                applyPairingStatus(payload);
+            }).catch(function () {
+            });
+        }
+
+        function startPairingPolling() {
+            refreshPairingStatus();
+            if (pairingPollTimer != null) {
+                return;
+            }
+            pairingPollTimer = window.setInterval(refreshPairingStatus, 1000);
+        }
+
         function openSearchDialog() {
             selectedFoundIeee = "";
             pairingSessionActive = true;
+            searchAwaitingClose = false;
             setSearchRunning(false);
             document.getElementById("foundAddBtn").disabled = true;
             document.getElementById("searchDialogError").hidden = true;
@@ -967,11 +1095,14 @@
                 "Click Search to open pairing. If several devices appear, select one row and click Add.";
             document.getElementById("searchDialog").hidden = false;
             startFoundPolling();
+            startPairingPolling();
         }
 
         function closeSearchDialog(sendStop) {
             document.getElementById("searchDialog").hidden = true;
             stopFoundPolling();
+            stopPairingPolling();
+            searchAwaitingClose = false;
             setSearchRunning(false);
             if (sendStop !== false) {
                 pairingSessionActive = false;
@@ -988,6 +1119,7 @@
             var errorLine = document.getElementById("searchDialogError");
             var statusLine = document.getElementById("searchDialogStatus");
             errorLine.hidden = true;
+            searchAwaitingClose = true;
             setSearchRunning(true);
             if (statusLine) {
                 statusLine.textContent = "Searching… put the device in join mode.";
@@ -1005,8 +1137,10 @@
                         statusLine.textContent = "Searching… put the device in join mode. Select a row to add.";
                     }
                     startFoundPolling();
+                    startPairingPolling();
                 });
             }).catch(function (error) {
+                searchAwaitingClose = false;
                 setSearchRunning(false);
                 errorLine.hidden = false;
                 errorLine.textContent = error && error.message ? error.message : "Search start failed";
@@ -1048,7 +1182,7 @@
             }
             document.getElementById("searchDialog").hidden = true;
             stopFoundPolling();
-            topicsTouched = false;
+            stopPairingPolling();
             refreshMqttBaseTopic();
             fillParameterDialog({ ieee: selectedFoundIeee }, "Device parameters");
         }
@@ -1058,7 +1192,6 @@
             if (!device || !device.ieee) {
                 return;
             }
-            topicsTouched = true;
             refreshMqttBaseTopic();
             fillParameterDialog(device, "Edit device");
         }
@@ -1122,9 +1255,6 @@
         }
 
         function onDeviceNameInput() {
-            if (topicsTouched) {
-                return;
-            }
             var topics = defaultDeviceTopics(document.getElementById("deviceName").value);
             document.getElementById("deviceStateTopic").value = topics.state;
             document.getElementById("deviceCommandTopic").value = topics.command;
@@ -1229,6 +1359,7 @@
             loadZigbee();
             loadVersion();
             refreshMqttBaseTopic();
+            startStatusPolling();
         };
     </script>
 </head>
@@ -1246,6 +1377,28 @@
     <div class="main-panel">
         <section id="section-status" class="section-panel active" aria-label="Status">
             <h2 class="section-title">Status</h2>
+            <div class="settings-scroll">
+                <div class="field">
+                    <label>DEVICES</label>
+                    <p id="statusDevices" class="status-value">—</p>
+                </div>
+                <div class="field">
+                    <label>ONLINE</label>
+                    <p id="statusOnline" class="status-value">—</p>
+                </div>
+                <div class="field">
+                    <label>PACKETS RECEIVED</label>
+                    <p id="statusPacketsRx" class="status-value">—</p>
+                </div>
+                <div class="field">
+                    <label>PACKETS SENT</label>
+                    <p id="statusPacketsTx" class="status-value">—</p>
+                </div>
+                <div class="field">
+                    <label>VERSION</label>
+                    <p id="statusFirmwareVersion" class="status-value">—</p>
+                </div>
+            </div>
         </section>
 
         <section id="section-wifi" class="section-panel settings-card" aria-label="WiFi">
@@ -1385,6 +1538,7 @@
                             <th class="device-online-cell" aria-label="Online"></th>
                             <th>IEEE</th>
                             <th>Name</th>
+                            <th>RSSI</th>
                         </tr>
                     </thead>
                     <tbody id="deviceTableBody"></tbody>
@@ -1395,6 +1549,8 @@
                     <button type="button" class="btn btn-primary" onclick="openSearchDialog()">Add device</button>
                     <button type="button" id="deviceEditBtn" class="btn btn-secondary" onclick="openEditSelectedDevice()" disabled>Edit</button>
                     <button type="button" id="deviceDeleteBtn" class="btn btn-secondary" onclick="openDeleteConfirmDialog()" disabled>Delete</button>
+                    <button type="button" class="btn btn-secondary" onclick="exportDevicesStore()">Export</button>
+                    <button type="button" class="btn btn-secondary" onclick="openDevicesRestoreDialog()">Restore</button>
                 </div>
             </div>
         </section>
@@ -1462,15 +1618,15 @@
                 </div>
                 <div class="field">
                     <label for="deviceStateTopic">STATE</label>
-                    <input id="deviceStateTopic" type="text" autocomplete="off" oninput="topicsTouched = true">
+                    <input id="deviceStateTopic" type="text" autocomplete="off">
                 </div>
                 <div class="field">
                     <label for="deviceCommandTopic">COMMAND</label>
-                    <input id="deviceCommandTopic" type="text" autocomplete="off" oninput="topicsTouched = true">
+                    <input id="deviceCommandTopic" type="text" autocomplete="off">
                 </div>
                 <div class="field">
                     <label for="deviceAvailabilityTopic">AVAILABILITY</label>
-                    <input id="deviceAvailabilityTopic" type="text" autocomplete="off" oninput="topicsTouched = true">
+                    <input id="deviceAvailabilityTopic" type="text" autocomplete="off">
                 </div>
                 <div class="field field-check">
                     <input id="deviceFullControl" type="checkbox">
@@ -1510,13 +1666,38 @@
         <section id="section-system" class="section-panel" aria-label="System">
             <h2 class="section-title">System</h2>
             <nav class="tabs system-tabs" role="tablist" aria-label="System groups">
-                <button type="button" class="system-tab-btn tab-btn active" data-tab="update" role="tab" onclick="showSystemTab('update')">Update</button>
-                <button type="button" class="system-tab-btn tab-btn" data-tab="hardware" role="tab" onclick="showSystemTab('hardware')">Hardware</button>
+                <button type="button" class="system-tab-btn tab-btn active" data-tab="log" role="tab" onclick="showSystemTab('log')">Log</button>
                 <button type="button" class="system-tab-btn tab-btn" data-tab="devices-json" role="tab" onclick="showSystemTab('devices-json')">devices.json</button>
-                <button type="button" class="system-tab-btn tab-btn" data-tab="log" role="tab" onclick="showSystemTab('log')">Log</button>
+                <button type="button" class="system-tab-btn tab-btn" data-tab="update" role="tab" onclick="showSystemTab('update')">Update</button>
+                <button type="button" class="system-tab-btn tab-btn" data-tab="hardware" role="tab" onclick="showSystemTab('hardware')">Hardware</button>
             </nav>
             <div class="tab-content">
-                <div id="system-tab-update" class="system-tab-panel tab-panel active" role="tabpanel">
+                <div id="system-tab-log" class="system-tab-panel tab-panel active" role="tabpanel">
+                    <div class="upload-card log-card">
+                        <h3 class="upload-title">Log</h3>
+                        <p class="field-hint">In-memory firmware log (oldest lines drop when the ring is full).</p>
+                        <textarea id="memoryLogViewer" class="log-viewer" readonly></textarea>
+                        <p id="logDownloadError" class="save-error" hidden></p>
+                        <div class="dialog-actions">
+                            <button type="button" class="btn btn-secondary btn-inline" onclick="refreshLog()">Refresh</button>
+                            <button type="button" class="btn btn-primary btn-inline" onclick="downloadLog()">Download</button>
+                        </div>
+                    </div>
+                </div>
+                <div id="system-tab-devices-json" class="system-tab-panel tab-panel" role="tabpanel">
+                    <div class="upload-card log-card">
+                        <h3 class="upload-title">Slave /devices.json</h3>
+                        <p class="field-hint">Slave device store. The host reads the full list; create, update, and delete send one record at a time.</p>
+                        <textarea id="devicesJsonViewer" class="log-viewer" readonly></textarea>
+                        <p id="devicesRestoreError" class="save-error" hidden></p>
+                        <input id="devicesRestoreFile" type="file" accept=".json,application/json" hidden onchange="onDevicesRestoreFileSelected(event)">
+                        <div class="dialog-actions">
+                            <button type="button" class="btn btn-secondary btn-inline" onclick="refreshDevicesJson()">Refresh</button>
+                            <button type="button" class="btn btn-primary btn-inline" onclick="openDevicesRestoreDialog()">Restore</button>
+                        </div>
+                    </div>
+                </div>
+                <div id="system-tab-update" class="system-tab-panel tab-panel" role="tabpanel">
                     <div class="upload-card">
                         <h3 class="upload-title">Code (firmware)</h3>
                         <p class="field-hint">Running version: <span id="firmwareVersion">—</span></p>
@@ -1559,31 +1740,7 @@
                         <button type="button" class="btn btn-secondary" onclick="loadHardware()">Reset</button>
                     </div>
                 </div>
-                <div id="system-tab-devices-json" class="system-tab-panel tab-panel" role="tabpanel">
-                    <div class="upload-card log-card">
-                        <h3 class="upload-title">Slave /devices.json</h3>
-                        <p class="field-hint">Slave device store. The host reads the full list; create, update, and delete send one record at a time.</p>
-                        <textarea id="devicesJsonViewer" class="log-viewer" readonly></textarea>
-                        <p id="devicesRestoreError" class="save-error" hidden></p>
-                        <input id="devicesRestoreFile" type="file" accept=".json,application/json" hidden onchange="onDevicesRestoreFileSelected(event)">
-                        <div class="dialog-actions">
-                            <button type="button" class="btn btn-secondary btn-inline" onclick="refreshDevicesJson()">Refresh</button>
-                            <button type="button" class="btn btn-primary btn-inline" onclick="openDevicesRestoreDialog()">Restore</button>
-                        </div>
-                    </div>
-                </div>
-                <div id="system-tab-log" class="system-tab-panel tab-panel" role="tabpanel">
-                    <div class="upload-card log-card">
-                        <h3 class="upload-title">Log</h3>
-                        <p class="field-hint">In-memory firmware log (oldest lines drop when the ring is full).</p>
-                        <textarea id="memoryLogViewer" class="log-viewer" readonly></textarea>
-                        <p id="logDownloadError" class="save-error" hidden></p>
-                        <div class="dialog-actions">
-                            <button type="button" class="btn btn-secondary btn-inline" onclick="refreshLog()">Refresh</button>
-                            <button type="button" class="btn btn-primary btn-inline" onclick="downloadLog()">Download</button>
-                        </div>
-                    </div>
-                </div>
+
             </div>
         </section>
     </div>
