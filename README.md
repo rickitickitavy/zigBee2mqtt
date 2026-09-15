@@ -21,7 +21,7 @@ Onboard WS2812 is GPIO8. External red LEDs (GPIO HIGH = on): LED1 GPIO18, LED2 G
 | LED2 | 0.1 s: MQTT device state published | 0.1 s: packet from a **known** device |
 | LED3 | Unused | 0.1 s: ZCL default-response ACK |
 | LED4 | Unused | 0.1 s: **only** command sent to a device |
-| RGB red | Boot and critical error | Boot and critical error |
+| RGB red | Boot, and lost/unhealthy slave SPI link | Boot and critical error |
 | RGB green | On while MQTT is connected | On when the chip is ready (off while boot/critical red) |
 | RGB blue | — | Blinks while pairing/join is open |
 

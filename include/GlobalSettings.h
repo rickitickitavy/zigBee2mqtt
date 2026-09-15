@@ -48,6 +48,7 @@ struct DeviceTopicEntry {
     char commandTopic[64];
     char availabilityTopic[64];
     uint8_t channelCount;
+    uint8_t fullControl;
     uint8_t used;
 };
 

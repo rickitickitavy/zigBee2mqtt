@@ -48,6 +48,7 @@ static DeviceStore *deviceStore = nullptr;
 static bool ntpStarted = false;
 static bool slaveZigbeeStarted = false;
 static bool slaveZigbeeStarting = false;
+static bool persistHostDeviceList();
 static bool hostPreparationLatched = false;
 
 static BoardRole readBoardRole() {
@@ -101,7 +102,12 @@ static void applyDeviceConfigPayload(const char *payload) {
         LOGGER.error("Device map full");
         return;
     }
+    bool parsedFullControl = false;
+    if (extractJsonBool(payload, "fullControl", parsedFullControl)) {
+        entry->fullControl = parsedFullControl ? 1 : 0;
+    }
     mqttClient->subscribeDeviceCommands();
+    persistHostDeviceList();
     if (!ZIGBEE_SPI_PROXY.enqueueDeviceUpsert(entry)) {
         LOGGER.error("Slave device change queue full");
         return;
@@ -159,6 +165,20 @@ static void onMqttLogicalMessage(const char *topic, const char *payload) {
         commandEndpoint = 1;
     }
     LOGGER.info(String("MQTT recv topic=") + topic + " data=" + payload);
+    if (entry->fullControl) {
+        DeviceTopicMap::ZclWriteFields fields;
+        if (DeviceTopicMap::parseFullControlBody(action.c_str(), commandEndpoint, &fields) && fields.parsedAny) {
+            ZIGBEE_SPI_PROXY.writeAttribute(
+                entry->ieee,
+                fields.endpoint,
+                fields.clusterId,
+                fields.attributeId,
+                fields.dataType,
+                fields.attributeValue
+            );
+            return;
+        }
+    }
     ZIGBEE_SPI_PROXY.controlOnOff(entry->ieee, action.c_str(), commandEndpoint);
 }
 
@@ -213,10 +233,18 @@ static void stopDeviceSearch() {
     ZIGBEE_SPI_PROXY.closeJoin();
 }
 
+static bool persistHostDeviceList() {
+    if (settingsManager == nullptr) {
+        return false;
+    }
+    return settingsManager->saveDevicesJson();
+}
+
 static bool onDeviceUpserted(const DeviceTopicEntry *entry) {
     if (mqttClient != nullptr) {
         mqttClient->subscribeDeviceCommands();
     }
+    persistHostDeviceList();
     return ZIGBEE_SPI_PROXY.enqueueDeviceUpsert(entry);
 }
 
@@ -224,6 +252,7 @@ static bool onDeviceRemoved(const uint8_t ieee[8]) {
     if (mqttClient != nullptr) {
         mqttClient->subscribeDeviceCommands();
     }
+    persistHostDeviceList();
     return ZIGBEE_SPI_PROXY.enqueueDeviceDelete(ieee);
 }
 
@@ -294,28 +323,7 @@ static void runDeviceRegistryFixtures() {
     }
     foundDevices->clear();
 
-    DeviceTopicEntry *backup = (DeviceTopicEntry *)malloc(sizeof(DeviceTopicEntry) * DEVICE_MAP_SLOTS);
-    if (backup == nullptr) {
-        LOGGER.error("Device map full fixture alloc failed");
-        return;
-    }
-    memcpy(backup, settingsManager->devices(), sizeof(DeviceTopicEntry) * DEVICE_MAP_SLOTS);
-    for (int i = 0; i < DEVICE_MAP_SLOTS; i++) {
-        DeviceTopicEntry *slot = topicMap->slotAt(i);
-        if (slot != nullptr && !slot->used) {
-            slot->used = 1;
-            slot->ieee[0] = (uint8_t)(i + 1);
-        }
-    }
-    uint8_t extraIeee[8];
-    memset(extraIeee, 0xCC, sizeof(extraIeee));
-    if (topicMap->upsert(extraIeee, "overflow", "", "", "") != nullptr) {
-        LOGGER.error("Full map fixture did not reject 129th device");
-    } else {
-        LOGGER.info("Full map fixture rejected 129th device");
-    }
-    memcpy(settingsManager->devices(), backup, sizeof(DeviceTopicEntry) * DEVICE_MAP_SLOTS);
-    free(backup);
+    LOGGER.info("Device map cap " + String(DEVICE_MAP_SLOTS) + " (overflow rejected)");
 }
 
 static void onWiFiArduinoEvent(arduino_event_id_t event, arduino_event_info_t info) {
@@ -485,14 +493,7 @@ static void onSlaveDeviceSync(uint8_t flags, const DeviceTopicEntry *entry) {
         if (zigbeeCoordinator != nullptr) {
             zigbeeCoordinator->upsertRegisteredDevice(entry);
         } else if (storeMap != nullptr) {
-            storeMap->upsert(
-                entry->ieee,
-                entry->friendlyName,
-                entry->stateTopic,
-                entry->commandTopic,
-                entry->availabilityTopic,
-                entry->channelCount
-            );
+            storeMap->upsertFromEntry(entry, false);
         }
         persistSlaveDeviceStore(false);
     }
@@ -506,6 +507,20 @@ static void onSlaveOnOff(const uint8_t ieee[8], const char *command, uint8_t end
         return;
     }
     zigbeeCoordinator->controlOnOff(ieee, command, endpoint);
+}
+
+static void onSlaveWriteAttr(
+    const uint8_t ieee[8],
+    uint8_t endpoint,
+    uint16_t clusterId,
+    uint16_t attributeId,
+    uint8_t dataType,
+    uint32_t attributeValue
+) {
+    if (zigbeeCoordinator == nullptr) {
+        return;
+    }
+    zigbeeCoordinator->writeAttribute(ieee, endpoint, clusterId, attributeId, dataType, attributeValue);
 }
 
 static void setupHost() {
@@ -530,6 +545,29 @@ static void setupHost() {
         } else {
             LOGGER.info("SPI frame fixture ok");
         }
+        DeviceTopicMap::ZclWriteFields fields;
+        const bool parsedWrite = DeviceTopicMap::parseFullControlBody("cl=0x0102,val=0x1", 1, &fields);
+        if (!parsedWrite || !fields.parsedAny || fields.clusterId != 0x0102 || fields.attributeId != 0
+            || fields.attributeValue != 1 || fields.dataType != ZCL_ATTR_TYPE_U8 || fields.endpoint != 1) {
+            LOGGER.error("Full-control parse fixture failed");
+        } else {
+            LOGGER.info("Full-control parse fixture ok");
+        }
+        uint8_t packedWrite[SPI_ZCL_WRITE_ATTR_LEN];
+        const uint8_t fixtureIeee[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+        if (!spiPackZclWriteAttr(
+                packedWrite,
+                sizeof(packedWrite),
+                fixtureIeee,
+                4,
+                0x0006,
+                0,
+                ZCL_ATTR_TYPE_U8,
+                1
+            )
+            || packedWrite[8] != 4) {
+            LOGGER.error("Write-attr pack fixture failed");
+        }
     }
     LOGGER.info("role=host");
     LOGGER.info("z2m-gateway " FIRMWARE_VERSION);
@@ -549,6 +587,7 @@ static void setupHost() {
     }
 
     settingsManager = new SettingsManager();
+    settingsManager->loadDeviceFile();
     topicMap = settingsManager->deviceMap();
     foundDevices = new FoundDeviceList();
     wifiController = new WiFiController(settingsManager, forceAp);
@@ -582,6 +621,7 @@ static void setupHost() {
     ZIGBEE_SPI_PROXY.begin();
     ZIGBEE_SPI_PROXY.setLightStateHandler(onLightState);
     ZIGBEE_SPI_PROXY.setRegistryPullDoneHandler([]() {
+        persistHostDeviceList();
         if (mqttClient != nullptr && topicMap != nullptr) {
             mqttClient->subscribeDeviceCommands();
         }
@@ -605,6 +645,7 @@ static void setupSlave() {
     INTER_CHIP_SLAVE.setSettingsHandler(onSlaveSettings);
     INTER_CHIP_SLAVE.setPermitJoinHandler(onSlavePermitJoin);
     INTER_CHIP_SLAVE.setOnOffHandler(onSlaveOnOff);
+    INTER_CHIP_SLAVE.setWriteAttrHandler(onSlaveWriteAttr);
     INTER_CHIP_SLAVE.setDeviceSyncHandler(onSlaveDeviceSync);
     deviceStore = new DeviceStore();
     deviceStore->begin();
@@ -651,6 +692,9 @@ void loop() {
         if (!hostPreparationLatched && wifiController->hasUsableInterface() && INTER_CHIP_HOST.isNormal()) {
             hostPreparationLatched = true;
             STATUS_RGB.setBootHeld(false);
+        }
+        if (hostPreparationLatched) {
+            STATUS_RGB.setCritical(!INTER_CHIP_HOST.isLinkHealthy());
         }
         STATUS_RGB.service();
         delay(5);

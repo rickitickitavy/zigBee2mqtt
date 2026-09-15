@@ -216,7 +216,8 @@
             dialog.hidden = false;
         }
 
-        function postRestoredDevice(device) {
+        function postRestoredDevice(device, remainingTries) {
+            var triesLeft = remainingTries == null ? 25 : remainingTries;
             return fetch("/api/devices", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -226,10 +227,18 @@
                     state: device.state || "",
                     command: device.command || "",
                     availability: device.availability || "",
-                    channels: device.channels
+                    channels: device.channels,
+                    fullControl: !!device.fullControl
                 })
             }).then(function (response) {
                 return response.text().then(function (text) {
+                    if (response.status === 503 && triesLeft > 0) {
+                        return new Promise(function (resolve) {
+                            setTimeout(resolve, 200);
+                        }).then(function () {
+                            return postRestoredDevice(device, triesLeft - 1);
+                        });
+                    }
                     if (!response.ok) {
                         throw new Error(text || ("HTTP " + response.status));
                     }
@@ -1025,6 +1034,10 @@
                 }
                 channelsSelect.value = String(channelsValue);
             }
+            var fullControlInput = document.getElementById("deviceFullControl");
+            if (fullControlInput) {
+                fullControlInput.checked = !!device.fullControl;
+            }
             document.getElementById("parameterDialogError").hidden = true;
             document.getElementById("parameterDialog").hidden = false;
         }
@@ -1134,7 +1147,8 @@
                 state: document.getElementById("deviceStateTopic").value,
                 command: document.getElementById("deviceCommandTopic").value,
                 availability: document.getElementById("deviceAvailabilityTopic").value,
-                channels: parseInt(document.getElementById("deviceChannels").value, 10)
+                channels: parseInt(document.getElementById("deviceChannels").value, 10),
+                fullControl: document.getElementById("deviceFullControl").checked
             };
             fetch("/api/devices", {
                 method: "POST",
@@ -1458,6 +1472,10 @@
                     <label for="deviceAvailabilityTopic">AVAILABILITY</label>
                     <input id="deviceAvailabilityTopic" type="text" autocomplete="off" oninput="topicsTouched = true">
                 </div>
+                <div class="field field-check">
+                    <input id="deviceFullControl" type="checkbox">
+                    <label for="deviceFullControl">FULL CONTROL</label>
+                </div>
                 <div class="dialog-actions">
                     <button type="button" class="btn btn-primary" onclick="saveDeviceParameters()">Save</button>
                     <button type="button" class="btn btn-secondary" onclick="closeParameterDialog()">Cancel</button>
@@ -1544,7 +1562,7 @@
                 <div id="system-tab-devices-json" class="system-tab-panel tab-panel" role="tabpanel">
                     <div class="upload-card log-card">
                         <h3 class="upload-title">Slave /devices.json</h3>
-                        <p class="field-hint">Exact /devices.json from the slave filesystem. Restore adds only devices that are missing from that file.</p>
+                        <p class="field-hint">Slave device store. The host reads the full list; create, update, and delete send one record at a time.</p>
                         <textarea id="devicesJsonViewer" class="log-viewer" readonly></textarea>
                         <p id="devicesRestoreError" class="save-error" hidden></p>
                         <input id="devicesRestoreFile" type="file" accept=".json,application/json" hidden onchange="onDevicesRestoreFileSelected(event)">

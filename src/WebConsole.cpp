@@ -499,6 +499,10 @@ void WebConsole::handleDevicesPost(AsyncWebServerRequest *request) {
         request->send(400, "text/plain", "Device map full");
         return;
     }
+    bool parsedFullControl = false;
+    if (extractJsonBool(requestBody.c_str(), "fullControl", parsedFullControl)) {
+        entry->fullControl = parsedFullControl ? 1 : 0;
+    }
     if (foundDevices != nullptr) {
         foundDevices->removeIeee(ieee);
     }

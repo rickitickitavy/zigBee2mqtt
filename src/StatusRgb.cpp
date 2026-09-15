@@ -1,8 +1,6 @@
 #include "StatusRgb.h"
 #include "pins.h"
 
-#include "driver/gpio.h"
-
 StatusRgb STATUS_RGB;
 
 static const int kLedPins[4] = {PIN_LED1, PIN_LED2, PIN_LED3, PIN_LED4};
@@ -16,11 +14,8 @@ bool StatusRgb::allowsActivityPulse() const {
 }
 
 void StatusRgb::configureLedPin(int gpioNumber) {
-    const gpio_num_t gpioPin = (gpio_num_t)gpioNumber;
-    gpio_reset_pin(gpioPin);
-    gpio_set_direction(gpioPin, GPIO_MODE_OUTPUT);
-    gpio_set_pull_mode(gpioPin, GPIO_FLOATING);
-    gpio_set_drive_capability(gpioPin, GPIO_DRIVE_CAP_3);
+    pinMode(gpioNumber, OUTPUT);
+    digitalWrite(gpioNumber, kLedOffLevel);
 }
 
 void StatusRgb::begin() {
@@ -144,7 +139,6 @@ void StatusRgb::writeLevels(const bool levelOn[kLedCount]) {
             continue;
         }
         lastLevel[ledIndex] = level;
-        gpio_set_level((gpio_num_t)kLedPins[ledIndex], level == HIGH ? 1 : 0);
         digitalWrite(kLedPins[ledIndex], level);
     }
 }

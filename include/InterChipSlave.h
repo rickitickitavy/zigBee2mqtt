@@ -9,6 +9,14 @@ public:
     using SettingsFn = void (*)(uint8_t channel, uint8_t permitJoinSec, uint32_t unixSec);
     using PermitJoinFn = bool (*)(uint8_t seconds);
     using OnOffFn = void (*)(const uint8_t ieee[8], const char *command, uint8_t endpoint);
+    using WriteAttrFn = void (*)(
+        const uint8_t ieee[8],
+        uint8_t endpoint,
+        uint16_t clusterId,
+        uint16_t attributeId,
+        uint8_t dataType,
+        uint32_t attributeValue
+    );
     using DeviceSyncFn = void (*)(uint8_t flags, const DeviceTopicEntry *entry);
     using DevicesFileFn = String (*)();
 
@@ -26,6 +34,7 @@ public:
     void setSettingsHandler(SettingsFn handler);
     void setPermitJoinHandler(PermitJoinFn handler);
     void setOnOffHandler(OnOffFn handler);
+    void setWriteAttrHandler(WriteAttrFn handler);
     void setDeviceSyncHandler(DeviceSyncFn handler);
     void setDeviceMapSource(DeviceTopicMap *deviceMap);
     void applyHostTime(uint32_t unixSec);
@@ -52,6 +61,7 @@ private:
     SettingsFn settingsHandler = nullptr;
     PermitJoinFn permitJoinHandler = nullptr;
     OnOffFn onOffHandler = nullptr;
+    WriteAttrFn writeAttrHandler = nullptr;
     DeviceSyncFn deviceSyncHandler = nullptr;
     DeviceTopicMap *deviceMapSource = nullptr;
     DevicesFileFn devicesFileSource = nullptr;
@@ -68,6 +78,7 @@ private:
     bool settingsPending = false;
     bool permitJoinPending = false;
     bool onOffPending = false;
+    bool writeAttrPending = false;
     bool pumpPaused = false;
     uint8_t pendingChannel = 15;
     uint8_t pendingPermitJoinSec = 0;
@@ -75,6 +86,12 @@ private:
     uint8_t deferredOnOffIeee[8]{};
     char deferredOnOffCommand[SPI_DEVICE_MESSAGE_MAX]{};
     uint8_t deferredOnOffEndpoint = 255;
+    uint8_t deferredWriteIeee[8]{};
+    uint8_t deferredWriteEndpoint = 255;
+    uint16_t deferredWriteCluster = 0;
+    uint16_t deferredWriteAttribute = 0;
+    uint8_t deferredWriteType = 0;
+    uint32_t deferredWriteValue = 0;
     uint32_t pendingUnixSec = 0;
 
     bool enqueueEvent(uint8_t cmd, const uint8_t *payload, uint16_t length);

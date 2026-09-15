@@ -14,6 +14,14 @@ public:
     bool permitJoin(uint8_t seconds);
     bool closeJoin();
     bool controlOnOff(const uint8_t ieee[8], const char *command, uint8_t endpoint);
+    bool writeAttribute(
+        const uint8_t ieee[8],
+        uint8_t endpoint,
+        uint16_t clusterId,
+        uint16_t attributeId,
+        uint8_t dataType,
+        uint32_t attributeValue
+    );
     void requestRegistryPull(DeviceTopicMap *topicMap);
     void requestDevicesFile();
     String devicesFileJson() const;
@@ -30,7 +38,7 @@ public:
 
 private:
     static constexpr int kMaxDevices = 16;
-    static constexpr int kPendingChangeSlots = 16;
+    static constexpr int kPendingChangeSlots = 1;
     static constexpr unsigned long kOnlineWindowMs = 15UL * 60UL * 1000UL;
 
     struct CachedDevice {

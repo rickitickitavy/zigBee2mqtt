@@ -67,6 +67,30 @@ bool ZigbeeSpiProxy::controlOnOff(const uint8_t ieee[8], const char *command, ui
     return INTER_CHIP_HOST.tryEnqueue(SpiCmdZclOnOff, payload, length);
 }
 
+bool ZigbeeSpiProxy::writeAttribute(
+    const uint8_t ieee[8],
+    uint8_t endpoint,
+    uint16_t clusterId,
+    uint16_t attributeId,
+    uint8_t dataType,
+    uint32_t attributeValue
+) {
+    uint8_t payload[SPI_ZCL_WRITE_ATTR_LEN];
+    if (!spiPackZclWriteAttr(
+            payload,
+            sizeof(payload),
+            ieee,
+            endpoint,
+            clusterId,
+            attributeId,
+            dataType,
+            attributeValue
+        )) {
+        return false;
+    }
+    return INTER_CHIP_HOST.tryEnqueue(SpiCmdZclWriteAttr, payload, SPI_ZCL_WRITE_ATTR_LEN);
+}
+
 void ZigbeeSpiProxy::setRegistryPullDoneHandler(void (*handler)()) {
     registryPullDone = handler;
 }
@@ -136,7 +160,7 @@ bool ZigbeeSpiProxy::queueDeviceChange(uint8_t flags, const DeviceTopicEntry *en
         pendingChanges[i].entry = *entry;
         return true;
     }
-    LOGGER.warning("Device change queue full");
+    LOGGER.warning("Only one device record change at a time");
     return false;
 }
 
@@ -167,14 +191,7 @@ void ZigbeeSpiProxy::applyPendingChangeToMap(const PendingDeviceChange *change) 
         return;
     }
     if ((change->flags & SPI_DEVICE_SYNC_ENTRY) != 0) {
-        registryMap->upsert(
-            change->entry.ieee,
-            change->entry.friendlyName,
-            change->entry.stateTopic,
-            change->entry.commandTopic,
-            change->entry.availabilityTopic,
-            change->entry.channelCount
-        );
+        registryMap->upsertFromEntry(&change->entry, false);
     }
 }
 
@@ -202,6 +219,16 @@ void ZigbeeSpiProxy::pumpPendingChanges() {
 }
 
 bool ZigbeeSpiProxy::enqueueRegistryFrame(uint8_t flags, const DeviceTopicEntry *entry) {
+    if ((flags & SPI_DEVICE_SYNC_RESET) != 0) {
+        LOGGER.warning("Host cannot replace the full device store");
+        return false;
+    }
+    const bool isUpsert = (flags & SPI_DEVICE_SYNC_ENTRY) != 0;
+    const bool isDelete = (flags & SPI_DEVICE_SYNC_DELETE) != 0;
+    if (isUpsert == isDelete) {
+        LOGGER.warning("Host device change must be one create/update or one delete");
+        return false;
+    }
     uint8_t payload[SPI_DEVICE_SYNC_ENTRY_LEN];
     const size_t length = DeviceTopicMap::packSyncPayload(payload, sizeof(payload), flags, entry);
     if (length == 0) {
@@ -237,14 +264,7 @@ void ZigbeeSpiProxy::applyPulledRegistry(const SpiFrame &frame) {
         if (!pullCollecting) {
             beginPullSnapshot();
         }
-        pullMap.upsert(
-            entry.ieee,
-            entry.friendlyName,
-            entry.stateTopic,
-            entry.commandTopic,
-            entry.availabilityTopic,
-            entry.channelCount
-        );
+        pullMap.upsertFromEntry(&entry, false);
         registryPullCount++;
     }
     if ((flags & SPI_DEVICE_SYNC_LAST) != 0) {

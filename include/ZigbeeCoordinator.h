@@ -35,6 +35,14 @@ public:
     void dispatch();
     String devicesJson(DeviceTopicMap *topicMap);
     bool controlOnOff(const uint8_t ieee[8], const char *command, uint8_t endpoint);
+    bool writeAttribute(
+        const uint8_t ieee[8],
+        uint8_t endpoint,
+        uint16_t clusterId,
+        uint16_t attributeId,
+        uint8_t dataType,
+        uint32_t attributeValue
+    );
     BoundZigbeeDevice *findByIeee(const uint8_t ieee[8]);
     BoundZigbeeDevice *findByShortAddr(uint16_t shortAddr);
     void setLightStateHandler(LightStateFn handler);

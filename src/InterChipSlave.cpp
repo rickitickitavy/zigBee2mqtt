@@ -113,6 +113,10 @@ void InterChipSlave::setOnOffHandler(OnOffFn handler) {
     onOffHandler = handler;
 }
 
+void InterChipSlave::setWriteAttrHandler(WriteAttrFn handler) {
+    writeAttrHandler = handler;
+}
+
 void InterChipSlave::setDeviceSyncHandler(DeviceSyncFn handler) {
     deviceSyncHandler = handler;
 }
@@ -420,6 +424,36 @@ void InterChipSlave::handleHostFrame(const SpiFrame &frame) {
         enqueueEvent(SpiEvtCmdResult, &ok, 1);
         return;
     }
+    if (frame.cmd == SpiCmdZclWriteAttr) {
+        uint8_t ieee[8];
+        uint8_t endpoint = 255;
+        uint16_t clusterId = 0;
+        uint16_t attributeId = 0;
+        uint8_t dataType = 0;
+        uint32_t attributeValue = 0;
+        if (!spiUnpackZclWriteAttr(
+                frame.payload,
+                frame.length,
+                ieee,
+                &endpoint,
+                &clusterId,
+                &attributeId,
+                &dataType,
+                &attributeValue
+            )) {
+            return;
+        }
+        memcpy(deferredWriteIeee, ieee, 8);
+        deferredWriteEndpoint = endpoint;
+        deferredWriteCluster = clusterId;
+        deferredWriteAttribute = attributeId;
+        deferredWriteType = dataType;
+        deferredWriteValue = attributeValue;
+        writeAttrPending = true;
+        uint8_t ok = 1;
+        enqueueEvent(SpiEvtCmdResult, &ok, 1);
+        return;
+    }
     if (frame.cmd == SpiCmdSetDevice && frame.length >= 1 && deviceSyncHandler != nullptr) {
         uint8_t flags = 0;
         DeviceTopicEntry entry;
@@ -502,6 +536,17 @@ void InterChipSlave::applyDeferredRadioCommands() {
     if (onOffPending && onOffHandler != nullptr) {
         onOffHandler(deferredOnOffIeee, deferredOnOffCommand, deferredOnOffEndpoint);
         onOffPending = false;
+    }
+    if (writeAttrPending && writeAttrHandler != nullptr) {
+        writeAttrHandler(
+            deferredWriteIeee,
+            deferredWriteEndpoint,
+            deferredWriteCluster,
+            deferredWriteAttribute,
+            deferredWriteType,
+            deferredWriteValue
+        );
+        writeAttrPending = false;
     }
 }
 

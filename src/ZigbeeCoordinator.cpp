@@ -26,6 +26,23 @@ static String formatIeeeText(const uint8_t ieee[8]) {
     return String(buffer);
 }
 
+static void formatAttrEventName(
+    char *buffer,
+    size_t bufferSize,
+    uint16_t clusterId,
+    uint16_t attributeId,
+    uint32_t value
+) {
+    snprintf(
+        buffer,
+        bufferSize,
+        "cl=0x%04X,attr=0x%04X,val=0x%lX",
+        (unsigned int)clusterId,
+        (unsigned int)attributeId,
+        (unsigned long)value
+    );
+}
+
 static bool isZeroIeee(const uint8_t ieee[8]) {
     static const uint8_t kZeroIeee[8] = {0, 0, 0, 0, 0, 0, 0, 0};
     return ieee != nullptr && memcmp(ieee, kZeroIeee, 8) == 0;
@@ -497,6 +514,10 @@ bool ZigbeeCoordinator::migrateRegisteredIeee(const uint8_t previousIeee[8], con
         == nullptr) {
         return false;
     }
+    DeviceTopicEntry *moved = registeredMap->findByIeee(nextIeee);
+    if (moved != nullptr) {
+        moved->fullControl = previous->fullControl;
+    }
     registeredMap->removeByIeee(previousIeee);
     LOGGER.info(
         "Moved registered device " + String(registeredName(nextIeee) != nullptr ? registeredName(nextIeee) : "")
@@ -572,15 +593,7 @@ void ZigbeeCoordinator::upsertRegisteredDevice(const DeviceTopicEntry *entry) {
     if (registeredMap == nullptr || entry == nullptr || !entry->used) {
         return;
     }
-    if (registeredMap->upsert(
-            entry->ieee,
-            entry->friendlyName,
-            entry->stateTopic,
-            entry->commandTopic,
-            entry->availabilityTopic,
-            entry->channelCount
-        )
-        == nullptr) {
+    if (registeredMap->upsertFromEntry(entry, false) == nullptr) {
         LOGGER.warning("Registered device table full");
     }
 }
@@ -624,13 +637,13 @@ void ZigbeeCoordinator::handleIasZoneStatus(
     resolveIeeeFromSource(message->info.src_address, ieee, &shortAddr);
     adoptReportIdentity(ieee, shortAddr, message->info.src_endpoint);
     const bool alarm = (message->zone_status & ESP_ZB_ZCL_IAS_ZONE_ZONE_STATUS_ALARM1) != 0;
-    char eventName[48];
-    snprintf(
+    char eventName[64];
+    formatAttrEventName(
         eventName,
         sizeof(eventName),
-        "message %s ias=0x%04X",
-        alarm ? "LEAK" : "DRY",
-        (unsigned int)message->zone_status
+        ESP_ZB_ZCL_CLUSTER_ID_IAS_ZONE,
+        ESP_ZB_ZCL_ATTR_IAS_ZONE_ZONESTATUS_ID,
+        (uint32_t)message->zone_status
     );
     logDeviceEvent(eventName, ieee, shortAddr, message->info.src_endpoint, registeredName(ieee));
     pulseInboundDevice(ieee);
@@ -687,35 +700,18 @@ void ZigbeeCoordinator::handleAttributeReport(
     if (attribute->data.value != nullptr && attribute->data.size > 0) {
         memcpy(&value, attribute->data.value, attribute->data.size > 4 ? 4 : attribute->data.size);
     }
-    if (clusterId == ESP_ZB_ZCL_CLUSTER_ID_ON_OFF && attribute->id == ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID) {
-        const bool on = value != 0;
-        logDeviceEvent(
-            on ? "message ON" : "message OFF",
-            ieee,
-            shortAddr,
-            srcEndpoint,
-            registeredName(ieee)
-        );
-        pulseInboundDevice(ieee);
-        if (lightStateHandler != nullptr) {
-            lightStateHandler(on ? "ON" : "OFF", ieee, srcEndpoint, shortAddr);
-        }
-        return;
-    }
     char eventName[64];
-    snprintf(
-        eventName,
-        sizeof(eventName),
-        "cl=0x%04X,attr=0x%04X,val=0x%lX",
-        (unsigned int)clusterId,
-        (unsigned int)attribute->id,
-        (unsigned long)value
-    );
+    formatAttrEventName(eventName, sizeof(eventName), clusterId, attribute->id, value);
     logDeviceEvent(eventName, ieee, shortAddr, srcEndpoint, registeredName(ieee));
     pulseInboundDevice(ieee);
-    if (lightStateHandler != nullptr) {
-        lightStateHandler(eventName, ieee, srcEndpoint, shortAddr);
+    if (lightStateHandler == nullptr) {
+        return;
     }
+    if (clusterId == ESP_ZB_ZCL_CLUSTER_ID_ON_OFF && attribute->id == ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID) {
+        lightStateHandler(value != 0 ? "ON" : "OFF", ieee, srcEndpoint, shortAddr);
+        return;
+    }
+    lightStateHandler(eventName, ieee, srcEndpoint, shortAddr);
 }
 
 void ZigbeeCoordinator::handleLightStateWithSource(bool on, uint8_t endpoint, esp_zb_zcl_addr_t source) {
@@ -723,13 +719,15 @@ void ZigbeeCoordinator::handleLightStateWithSource(bool on, uint8_t endpoint, es
     uint16_t shortAddr = 0;
     resolveIeeeFromSource(source, ieee, &shortAddr);
     adoptReportIdentity(ieee, shortAddr, endpoint);
-    logDeviceEvent(
-        on ? "message ON" : "message OFF",
-        ieee,
-        shortAddr,
-        endpoint,
-        registeredName(ieee)
+    char eventName[64];
+    formatAttrEventName(
+        eventName,
+        sizeof(eventName),
+        ESP_ZB_ZCL_CLUSTER_ID_ON_OFF,
+        ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID,
+        on ? 1u : 0u
     );
+    logDeviceEvent(eventName, ieee, shortAddr, endpoint, registeredName(ieee));
     pulseInboundDevice(ieee);
     if (lightStateHandler != nullptr) {
         lightStateHandler(on ? "ON" : "OFF", ieee, endpoint, shortAddr);
@@ -801,6 +799,82 @@ bool ZigbeeCoordinator::controlOnOff(const uint8_t ieee[8], const char *command,
         STATUS_RGB.pulsePacketToDevice();
         return true;
     }
+    return true;
+}
+
+bool ZigbeeCoordinator::writeAttribute(
+    const uint8_t ieee[8],
+    uint8_t endpoint,
+    uint16_t clusterId,
+    uint16_t attributeId,
+    uint8_t dataType,
+    uint32_t attributeValue
+) {
+    if (!started) {
+        LOGGER.warning("Zigbee is not started");
+        return false;
+    }
+    BoundZigbeeDevice *device = findByIeee(ieee);
+    if (device == nullptr) {
+        LOGGER.warning("No bound Zigbee device for command");
+        return false;
+    }
+    if (registryReady && !isRegistered(ieee)) {
+        LOGGER.warning("Command ignored; device is not registered");
+        return false;
+    }
+
+    uint8_t targetEndpoint = endpoint;
+    if (!DeviceTopicMap::isUsableEndpoint(targetEndpoint)) {
+        targetEndpoint = device->endpoint;
+    }
+    if (!DeviceTopicMap::isUsableEndpoint(targetEndpoint)) {
+        LOGGER.warning("No usable Zigbee endpoint for command");
+        return false;
+    }
+
+    uint16_t valueSize = 1;
+    if (dataType == ESP_ZB_ZCL_ATTR_TYPE_U16) {
+        valueSize = 2;
+    } else if (dataType == ESP_ZB_ZCL_ATTR_TYPE_U32) {
+        valueSize = 4;
+    } else if (dataType != ESP_ZB_ZCL_ATTR_TYPE_U8) {
+        if (attributeValue > 0xFFFFu) {
+            valueSize = 4;
+        } else if (attributeValue > 0xFFu) {
+            valueSize = 2;
+        }
+    }
+
+    uint8_t valueBytes[4];
+    valueBytes[0] = (uint8_t)(attributeValue & 0xFF);
+    valueBytes[1] = (uint8_t)((attributeValue >> 8) & 0xFF);
+    valueBytes[2] = (uint8_t)((attributeValue >> 16) & 0xFF);
+    valueBytes[3] = (uint8_t)((attributeValue >> 24) & 0xFF);
+
+    esp_zb_zcl_attribute_t attribute{};
+    attribute.id = attributeId;
+    attribute.data.type = (esp_zb_zcl_attr_type_t)dataType;
+    attribute.data.size = valueSize;
+    attribute.data.value = valueBytes;
+
+    esp_zb_ieee_addr_t ieeeAddr;
+    memcpy(ieeeAddr, device->ieee, 8);
+
+    esp_zb_zcl_write_attr_cmd_t command{};
+    command.zcl_basic_cmd.src_endpoint = kSwitchEndpoint;
+    command.zcl_basic_cmd.dst_endpoint = targetEndpoint;
+    command.address_mode = ESP_ZB_APS_ADDR_MODE_64_ENDP_PRESENT;
+    memcpy(command.zcl_basic_cmd.dst_addr_u.addr_long, ieeeAddr, sizeof(esp_zb_ieee_addr_t));
+    command.clusterID = clusterId;
+    command.attr_number = 1;
+    command.attr_field = &attribute;
+
+    char eventName[64];
+    formatAttrEventName(eventName, sizeof(eventName), clusterId, attributeId, attributeValue);
+    logDeviceEvent(eventName, device->ieee, device->shortAddr, targetEndpoint, registeredName(device->ieee));
+    esp_zb_zcl_write_attr_cmd_req(&command);
+    STATUS_RGB.pulsePacketToDevice();
     return true;
 }
 

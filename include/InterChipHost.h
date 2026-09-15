@@ -14,6 +14,7 @@ public:
     void pump(); // host SPI task only
     bool tryEnqueue(uint8_t cmd, const uint8_t *payload, uint16_t length);
     bool isNormal() const;
+    bool isLinkHealthy() const;
     HostBringupState bringupState() const;
     void setSettingsSource(uint8_t channel, uint8_t permitJoinSec);
     void setClockHz(uint32_t speedHz);

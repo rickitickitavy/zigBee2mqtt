@@ -76,6 +76,10 @@ bool InterChipHost::isNormal() const {
     return state == HostBringupNormal;
 }
 
+bool InterChipHost::isLinkHealthy() const {
+    return state == HostBringupNormal && pingTimeouts == 0;
+}
+
 HostBringupState InterChipHost::bringupState() const {
     return state;
 }

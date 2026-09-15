@@ -6,6 +6,7 @@
 #include <LittleFS.h>
 #include <ctype.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 DeviceTopicMap::DeviceTopicMap(DeviceTopicEntry *deviceSlots) : slots(deviceSlots) {}
@@ -125,6 +126,108 @@ bool DeviceTopicMap::parseChannelPayload(const char *payload, uint8_t *endpoint,
     return true;
 }
 
+static bool parseNumericField(const String &text, uint32_t *outValue) {
+    if (outValue == nullptr) {
+        return false;
+    }
+    String trimmed = text;
+    trimmed.trim();
+    if (trimmed.length() == 0) {
+        return false;
+    }
+    char *endPointer = nullptr;
+    unsigned long parsed = strtoul(trimmed.c_str(), &endPointer, 0);
+    if (endPointer == trimmed.c_str()) {
+        return false;
+    }
+    *outValue = (uint32_t)parsed;
+    return true;
+}
+
+static uint8_t dataTypeFromValue(uint32_t attributeValue) {
+    if (attributeValue <= 0xFFu) {
+        return ZCL_ATTR_TYPE_U8;
+    }
+    if (attributeValue <= 0xFFFFu) {
+        return ZCL_ATTR_TYPE_U16;
+    }
+    return ZCL_ATTR_TYPE_U32;
+}
+
+bool DeviceTopicMap::parseFullControlBody(const char *body, uint8_t mappedEndpoint, ZclWriteFields *fields) {
+    if (fields == nullptr) {
+        return false;
+    }
+    fields->clusterId = 0x0006;
+    fields->attributeId = 0x0000;
+    fields->attributeValue = 0;
+    fields->endpoint = mappedEndpoint;
+    fields->dataType = ZCL_ATTR_TYPE_U8;
+    fields->parsedAny = false;
+    if (body == nullptr) {
+        return true;
+    }
+
+    String remaining = String(body);
+    remaining.trim();
+    bool sawType = false;
+    while (remaining.length() > 0) {
+        const int commaIndex = remaining.indexOf(',');
+        String token = commaIndex >= 0 ? remaining.substring(0, commaIndex) : remaining;
+        remaining = commaIndex >= 0 ? remaining.substring(commaIndex + 1) : "";
+        token.trim();
+        const int equalsIndex = token.indexOf('=');
+        if (equalsIndex <= 0) {
+            continue;
+        }
+        String key = token.substring(0, equalsIndex);
+        String fieldValue = token.substring(equalsIndex + 1);
+        key.trim();
+        key.toLowerCase();
+        fieldValue.trim();
+        uint32_t parsedNumber = 0;
+        if (key == "cl") {
+            if (!parseNumericField(fieldValue, &parsedNumber)) {
+                continue;
+            }
+            fields->clusterId = (uint16_t)parsedNumber;
+            fields->parsedAny = true;
+        } else if (key == "attr") {
+            if (!parseNumericField(fieldValue, &parsedNumber)) {
+                continue;
+            }
+            fields->attributeId = (uint16_t)parsedNumber;
+            fields->parsedAny = true;
+        } else if (key == "val") {
+            if (!parseNumericField(fieldValue, &parsedNumber)) {
+                continue;
+            }
+            fields->attributeValue = parsedNumber;
+            fields->parsedAny = true;
+        } else if (key == "ep") {
+            if (!parseNumericField(fieldValue, &parsedNumber)) {
+                continue;
+            }
+            const uint8_t parsedEndpoint = (uint8_t)parsedNumber;
+            if (isUsableEndpoint(parsedEndpoint)) {
+                fields->endpoint = parsedEndpoint;
+            }
+            fields->parsedAny = true;
+        } else if (key == "type") {
+            if (!parseNumericField(fieldValue, &parsedNumber)) {
+                continue;
+            }
+            fields->dataType = (uint8_t)parsedNumber;
+            sawType = true;
+            fields->parsedAny = true;
+        }
+    }
+    if (!sawType) {
+        fields->dataType = dataTypeFromValue(fields->attributeValue);
+    }
+    return true;
+}
+
 DeviceTopicEntry *DeviceTopicMap::findByCommandTopic(const char *topic) {
     return findByCommandTopic(topic, nullptr);
 }
@@ -175,6 +278,10 @@ DeviceTopicEntry *DeviceTopicMap::upsert(
         return nullptr;
     }
     DeviceTopicEntry *entry = findByIeee(ieee);
+    uint8_t preservedFullControl = 0;
+    if (entry != nullptr && entry->used) {
+        preservedFullControl = entry->fullControl;
+    }
     if (entry == nullptr) {
         for (int i = 0; i < DEVICE_MAP_SLOTS; i++) {
             if (!slots[i].used) {
@@ -203,6 +310,28 @@ DeviceTopicEntry *DeviceTopicMap::upsert(
         strncpy(entry->availabilityTopic, availabilityTopic, sizeof(entry->availabilityTopic) - 1);
     }
     entry->channelCount = normalizeChannelCount(channelCount);
+    entry->fullControl = preservedFullControl;
+    return entry;
+}
+
+DeviceTopicEntry *DeviceTopicMap::upsertFromEntry(const DeviceTopicEntry *source, bool keepExistingFullControl) {
+    if (source == nullptr || !source->used) {
+        return nullptr;
+    }
+    DeviceTopicEntry *entry = upsert(
+        source->ieee,
+        source->friendlyName,
+        source->stateTopic,
+        source->commandTopic,
+        source->availabilityTopic,
+        source->channelCount
+    );
+    if (entry == nullptr) {
+        return nullptr;
+    }
+    if (!keepExistingFullControl || source->fullControl) {
+        entry->fullControl = source->fullControl ? 1 : 0;
+    }
     return entry;
 }
 
@@ -231,6 +360,22 @@ void DeviceTopicMap::replaceFrom(const DeviceTopicMap *source) {
         return;
     }
     memcpy(slots, source->slots, sizeof(DeviceTopicEntry) * DEVICE_MAP_SLOTS);
+}
+
+void DeviceTopicMap::copyFullControlFrom(const DeviceTopicMap *source) {
+    if (slots == nullptr || source == nullptr) {
+        return;
+    }
+    for (int i = 0; i < DEVICE_MAP_SLOTS; i++) {
+        DeviceTopicEntry *entry = &slots[i];
+        if (!entry->used) {
+            continue;
+        }
+        const DeviceTopicEntry *previous = source->findByIeee(entry->ieee);
+        if (previous != nullptr) {
+            entry->fullControl = previous->fullControl;
+        }
+    }
 }
 
 int DeviceTopicMap::nextUsedIndex(int startIndex) const {
@@ -277,7 +422,7 @@ void DeviceTopicMap::replaceFromJson(const String &json) {
         }
         uint8_t ieee[8];
         if (ieeeText.length() > 0 && parseIeee(ieeeText.c_str(), ieee)) {
-            upsert(
+            DeviceTopicEntry *entry = upsert(
                 ieee,
                 friendlyName.c_str(),
                 stateTopic.c_str(),
@@ -285,6 +430,10 @@ void DeviceTopicMap::replaceFromJson(const String &json) {
                 availability.c_str(),
                 normalizeChannelCount(parsedChannels)
             );
+            bool parsedFullControl = false;
+            if (entry != nullptr && extractJsonBool(object.c_str(), "fullControl", parsedFullControl)) {
+                entry->fullControl = parsedFullControl ? 1 : 0;
+            }
         }
         cursor = objectEnd + 1;
     }
@@ -346,6 +495,7 @@ size_t DeviceTopicMap::packSyncPayload(
         strncpy((char *)out + 97, entry->commandTopic, SPI_DEVICE_SYNC_TOPIC_LEN - 1);
         strncpy((char *)out + 161, entry->availabilityTopic, SPI_DEVICE_SYNC_TOPIC_LEN - 1);
         out[SPI_DEVICE_SYNC_ENTRY_LEN_NO_CHANNELS] = entry->channelCount;
+        out[SPI_DEVICE_SYNC_ENTRY_LEN_WITH_CHANNELS] = entry->fullControl ? 1 : 0;
     }
     return length;
 }
@@ -374,10 +524,13 @@ bool DeviceTopicMap::unpackSyncPayload(
     strncpy(entry->stateTopic, (const char *)in + 33, sizeof(entry->stateTopic) - 1);
     strncpy(entry->commandTopic, (const char *)in + 97, sizeof(entry->commandTopic) - 1);
     strncpy(entry->availabilityTopic, (const char *)in + 161, sizeof(entry->availabilityTopic) - 1);
-    if (length >= SPI_DEVICE_SYNC_ENTRY_LEN) {
+    if (length >= SPI_DEVICE_SYNC_ENTRY_LEN_WITH_CHANNELS) {
         entry->channelCount = normalizeChannelCount(in[SPI_DEVICE_SYNC_ENTRY_LEN_NO_CHANNELS]);
     } else {
         entry->channelCount = DEVICE_CHANNEL_COUNT_DEFAULT;
+    }
+    if (length >= SPI_DEVICE_SYNC_ENTRY_LEN) {
+        entry->fullControl = in[SPI_DEVICE_SYNC_ENTRY_LEN_WITH_CHANNELS] != 0 ? 1 : 0;
     }
     entry->used = 1;
     return true;
@@ -480,6 +633,8 @@ String DeviceTopicMap::listJson(OnlineFn isOnline) {
         appendJsonEscaped(json, entry->availabilityTopic, sizeof(entry->availabilityTopic));
         json += "\",\"channels\":";
         json += String(entry->channelCount);
+        json += ",\"fullControl\":";
+        json += entry->fullControl ? "true" : "false";
         if (isOnline != nullptr) {
             json += ",\"online\":";
             json += isOnline(entry->ieee) ? "true" : "false";

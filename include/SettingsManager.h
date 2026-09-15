@@ -16,6 +16,7 @@ public:
     void saveMain(bool restart);
     bool saveDeviceSlot(int slotIndex);
     bool saveDevicesJson();
+    void loadDeviceFile();
     String devicesJsonFile();
     void applyDefaults();
     void resetWiFi();
@@ -39,7 +40,6 @@ private:
 
     void readSettings(GlobalSettings *destination);
     void writeEepromDirty(const uint8_t *nextImage, const uint8_t *previousImage, size_t length);
-    void loadDeviceFile();
     void createEmptyDeviceFile();
     void parseDevicesJson(const String &json);
     void upgradeLegacyMainFromEeprom();

@@ -4,6 +4,7 @@
 #include "JsonField.h"
 
 #include <EEPROM.h>
+#include <LittleFS.h>
 #include <stdlib.h>
 #include <string.h>
 #include <WiFi.h>
@@ -166,7 +167,11 @@ void SettingsManager::parseDevicesJson(const String &json) {
 
 void SettingsManager::loadDeviceFile() {
     memset(deviceSlots, 0, sizeof(deviceSlots));
-    LOGGER.info("Host device list waits for slave pull");
+    if (!topicMap.loadFromFile(DEVICES_STORE_PATH)) {
+        LOGGER.info("Host device list file missing; waiting for slave pull");
+        return;
+    }
+    LOGGER.info("Host device list loaded " + String(topicMap.usedCount()) + " device(s)");
 }
 
 String SettingsManager::devicesJsonFile() {
@@ -174,6 +179,11 @@ String SettingsManager::devicesJsonFile() {
 }
 
 bool SettingsManager::saveDevicesJson() {
+    if (!topicMap.saveToFile(DEVICES_STORE_PATH)) {
+        LOGGER.error("Host device list write failed");
+        return false;
+    }
+    LOGGER.info("Host device list saved " + String(topicMap.usedCount()) + " device(s)");
     return true;
 }
 

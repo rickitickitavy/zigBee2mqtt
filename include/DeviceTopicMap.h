@@ -20,6 +20,7 @@ public:
         const char *availabilityTopic,
         uint8_t channelCount = DEVICE_CHANNEL_COUNT_DEFAULT
     );
+    DeviceTopicEntry *upsertFromEntry(const DeviceTopicEntry *source, bool keepExistingFullControl);
     static uint8_t normalizeChannelCount(int raw);
     static bool usesPayloadParse(uint8_t channelCount);
     static bool usesTopicSuffix(uint8_t channelCount);
@@ -27,9 +28,20 @@ public:
     static String statePublishTopic(const DeviceTopicEntry *entry, uint8_t endpoint);
     static String statePublishPayload(const DeviceTopicEntry *entry, uint8_t endpoint, const char *message);
     static bool parseChannelPayload(const char *payload, uint8_t *endpoint, String *action);
+
+    struct ZclWriteFields {
+        uint16_t clusterId;
+        uint16_t attributeId;
+        uint32_t attributeValue;
+        uint8_t endpoint;
+        uint8_t dataType;
+        bool parsedAny;
+    };
+    static bool parseFullControlBody(const char *body, uint8_t mappedEndpoint, ZclWriteFields *fields);
     bool removeByIeee(const uint8_t ieee[8]);
     void clearAll();
     void replaceFrom(const DeviceTopicMap *source);
+    void copyFullControlFrom(const DeviceTopicMap *source);
     int slotIndex(const DeviceTopicEntry *entry) const;
     DeviceTopicEntry *slotAt(int index);
     int usedCount() const;

@@ -29,6 +29,16 @@ Each chip SHALL turn the onboard RGB **red** as soon as firmware starts, before 
 - **WHEN** the host has a usable Wi-Fi address and the slave link is in normal work
 - **THEN** host RGB is no longer held red for boot
 
+#### Scenario: Host lost the slave after boot
+
+- **WHEN** the host had finished boot and the slave SPI link is no longer healthy (not in normal work, or ping replies have timed out)
+- **THEN** the host onboard RGB stays red until that link is healthy again
+
+#### Scenario: Host slave link restored
+
+- **WHEN** the host was holding critical red for a lost slave and the slave link is healthy again
+- **THEN** host RGB is no longer held red for that error
+
 #### Scenario: Slave still preparing
 
 - **WHEN** the slave has started but has not yet applied host settings or started the coordinator
