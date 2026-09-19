@@ -7,6 +7,12 @@
 #include <stdio.h>
 #include <string.h>
 
+extern "C" {
+#include "zboss_api.h"
+#include "zcl/zb_zcl_commands.h"
+}
+#include "zcl/esp_zigbee_zcl_ias_zone.h"
+
 static constexpr uint8_t kSwitchEndpoint = 5;
 
 static String formatIeeeText(const uint8_t ieee[8]) {
@@ -49,6 +55,19 @@ static bool isZeroIeee(const uint8_t ieee[8]) {
     return ieee != nullptr && memcmp(ieee, kZeroIeee, 8) == 0;
 }
 
+static void onZclSendStatus(zb_uint8_t param) {
+    if (param == 0) {
+        return;
+    }
+    const zb_zcl_command_send_status_t *sendStatus = ZB_BUF_GET_PARAM(param, zb_zcl_command_send_status_t);
+    if (sendStatus->status == RET_OK) {
+        STATUS_RGB.pulseAckSent();
+    }
+    zb_buf_free(param);
+}
+
+static ZigbeeCoordinator *coordinatorForDefaultResponse = nullptr;
+
 static void onCoordinatorDefaultResponse(
     zb_cmd_type_t respToCmd,
     esp_zb_zcl_status_t status,
@@ -57,9 +76,9 @@ static void onCoordinatorDefaultResponse(
 ) {
     (void)respToCmd;
     (void)status;
-    (void)endpoint;
-    (void)cluster;
-    STATUS_RGB.pulseAckSent();
+    if (coordinatorForDefaultResponse != nullptr) {
+        coordinatorForDefaultResponse->noteDefaultResponse(endpoint, cluster);
+    }
 }
 
 static void logDeviceEvent(
@@ -206,6 +225,7 @@ bool ZigbeeCoordinator::begin(uint8_t channel, uint8_t permitJoinSec) {
     }
 
     started = true;
+    coordinatorForDefaultResponse = this;
     lastRefreshMs = millis();
     esp_zb_ieee_addr_t localIeee;
     memset(localIeee, 0, sizeof(localIeee));
@@ -377,6 +397,7 @@ void ZigbeeCoordinator::refreshRegisteredShorts() {
 
 void ZigbeeCoordinator::dispatch() {
     updatePairingLed();
+    serviceCommandFlights();
     if (!started) {
         return;
     }
@@ -679,7 +700,40 @@ void ZigbeeCoordinator::handleIasZoneEnroll(
     if (nextIasZoneId < 254) {
         nextIasZoneId++;
     }
-    endpoint->sendIASZoneEnrollResponse(shortAddr, message->info.src_endpoint, zoneId);
+    uint8_t enrollPayload[2];
+    enrollPayload[0] = (uint8_t)ESP_ZB_ZCL_IAS_ZONE_ENROLL_RESPONSE_CODE_SUCCESS;
+    enrollPayload[1] = zoneId;
+    bool sentEnroll = false;
+    if (!isZeroIeee(ieee)) {
+        sentEnroll = sendZclWithoutApsAck(
+            ZB_APS_ADDR_MODE_64_ENDP_PRESENT,
+            ieee,
+            0,
+            message->info.src_endpoint,
+            endpoint->getEndpoint(),
+            ESP_ZB_ZCL_CLUSTER_ID_IAS_ZONE,
+            true,
+            ESP_ZB_ZCL_CMD_IAS_ZONE_ZONE_ENROLL_RESPONSE_ID,
+            enrollPayload,
+            2
+        );
+    } else {
+        sentEnroll = sendZclWithoutApsAck(
+            ZB_APS_ADDR_MODE_16_ENDP_PRESENT,
+            nullptr,
+            shortAddr,
+            message->info.src_endpoint,
+            endpoint->getEndpoint(),
+            ESP_ZB_ZCL_CLUSTER_ID_IAS_ZONE,
+            true,
+            ESP_ZB_ZCL_CMD_IAS_ZONE_ZONE_ENROLL_RESPONSE_ID,
+            enrollPayload,
+            2
+        );
+    }
+    if (sentEnroll) {
+        STATUS_RGB.pulsePacketToDevice();
+    }
     char eventName[48];
     snprintf(
         eventName,
@@ -794,35 +848,21 @@ bool ZigbeeCoordinator::controlOnOff(const uint8_t ieee[8], const char *command,
     action.trim();
     String actionLower = action;
     actionLower.toLowerCase();
+    if (actionLower != "on" && actionLower != "1" && actionLower != "true" && actionLower != "off"
+        && actionLower != "0" && actionLower != "false" && actionLower != "toggle") {
+        return true;
+    }
 
-    esp_zb_ieee_addr_t ieeeAddr;
-    memcpy(ieeeAddr, device->ieee, 8);
-
-    char commandLabel[80];
-    snprintf(commandLabel, sizeof(commandLabel), "command %s", action.c_str());
-    logDeviceEvent(
-        commandLabel,
-        device->ieee,
-        device->shortAddr,
-        targetEndpoint,
-        registeredName(device->ieee)
-    );
-    if (actionLower == "on" || actionLower == "1" || actionLower == "true") {
-        zigbeeSwitch.lightOn(targetEndpoint, ieeeAddr);
-        STATUS_RGB.pulsePacketToDevice();
+    DestCommandSlot *slot = destSlotFor(device->ieee, targetEndpoint, true);
+    if (slot == nullptr) {
+        LOGGER.warning("No dest slot for command");
+        return false;
+    }
+    if (slot->inFlight) {
+        stashNextOnOff(slot, action.c_str());
         return true;
     }
-    if (actionLower == "off" || actionLower == "0" || actionLower == "false") {
-        zigbeeSwitch.lightOff(targetEndpoint, ieeeAddr);
-        STATUS_RGB.pulsePacketToDevice();
-        return true;
-    }
-    if (actionLower == "toggle") {
-        zigbeeSwitch.lightToggle(targetEndpoint, ieeeAddr);
-        STATUS_RGB.pulsePacketToDevice();
-        return true;
-    }
-    return true;
+    return transmitOnOff(slot, action.c_str());
 }
 
 bool ZigbeeCoordinator::writeAttribute(
@@ -856,6 +896,263 @@ bool ZigbeeCoordinator::writeAttribute(
         return false;
     }
 
+    DestCommandSlot *slot = destSlotFor(device->ieee, targetEndpoint, true);
+    if (slot == nullptr) {
+        LOGGER.warning("No dest slot for command");
+        return false;
+    }
+    if (slot->inFlight) {
+        stashNextWriteAttr(slot, clusterId, attributeId, dataType, attributeValue);
+        return true;
+    }
+    return transmitWriteAttr(slot, clusterId, attributeId, dataType, attributeValue);
+}
+
+ZigbeeCoordinator::DestCommandSlot *ZigbeeCoordinator::destSlotFor(
+    const uint8_t ieee[8],
+    uint8_t endpoint,
+    bool allocate
+) {
+    for (int i = 0; i < kMaxDestFlights; i++) {
+        DestCommandSlot *slot = &destFlights[i];
+        if (slot->occupied && memcmp(slot->ieee, ieee, 8) == 0 && slot->endpoint == endpoint) {
+            return slot;
+        }
+    }
+    if (!allocate) {
+        return nullptr;
+    }
+    for (int i = 0; i < kMaxDestFlights; i++) {
+        DestCommandSlot *slot = &destFlights[i];
+        if (slot->occupied) {
+            continue;
+        }
+        *slot = DestCommandSlot{};
+        slot->occupied = true;
+        memcpy(slot->ieee, ieee, 8);
+        slot->endpoint = endpoint;
+        return slot;
+    }
+    LOGGER.warning("Dest command table full");
+    return nullptr;
+}
+
+void ZigbeeCoordinator::markInFlight(DestCommandSlot *slot, uint16_t clusterId) {
+    slot->inFlight = true;
+    slot->inFlightCluster = clusterId;
+    slot->inFlightDeadlineMs = millis() + kCommandInFlightTimeoutMs;
+}
+
+void ZigbeeCoordinator::stashNextOnOff(DestCommandSlot *slot, const char *command) {
+    slot->hasNext = true;
+    slot->nextKind = RadioCommandKind::OnOff;
+    memset(slot->nextOnOff, 0, sizeof(slot->nextOnOff));
+    if (command != nullptr) {
+        strncpy(slot->nextOnOff, command, sizeof(slot->nextOnOff) - 1);
+    }
+}
+
+void ZigbeeCoordinator::stashNextWriteAttr(
+    DestCommandSlot *slot,
+    uint16_t clusterId,
+    uint16_t attributeId,
+    uint8_t dataType,
+    uint32_t attributeValue
+) {
+    slot->hasNext = true;
+    slot->nextKind = RadioCommandKind::WriteAttr;
+    slot->nextCluster = clusterId;
+    slot->nextAttribute = attributeId;
+    slot->nextType = dataType;
+    slot->nextValue = attributeValue;
+}
+
+bool ZigbeeCoordinator::transmitOnOff(DestCommandSlot *slot, const char *command) {
+    BoundZigbeeDevice *device = findByIeee(slot->ieee);
+    if (device == nullptr) {
+        slot->occupied = false;
+        slot->inFlight = false;
+        slot->hasNext = false;
+        return false;
+    }
+
+    const char *body = command != nullptr ? command : "";
+    String action = String(body);
+    action.trim();
+    String actionLower = action;
+    actionLower.toLowerCase();
+
+    char commandLabel[80];
+    snprintf(commandLabel, sizeof(commandLabel), "command %s", action.c_str());
+    logDeviceEvent(
+        commandLabel,
+        device->ieee,
+        device->shortAddr,
+        slot->endpoint,
+        registeredName(device->ieee)
+    );
+    if (actionLower == "on" || actionLower == "1" || actionLower == "true") {
+        if (!sendZclToDevice(
+                device,
+                slot->endpoint,
+                ESP_ZB_ZCL_CLUSTER_ID_ON_OFF,
+                true,
+                ESP_ZB_ZCL_CMD_ON_OFF_ON_ID,
+                nullptr,
+                0
+            )) {
+            return false;
+        }
+        STATUS_RGB.pulsePacketToDevice();
+        markInFlight(slot, ESP_ZB_ZCL_CLUSTER_ID_ON_OFF);
+        return true;
+    }
+    if (actionLower == "off" || actionLower == "0" || actionLower == "false") {
+        if (!sendZclToDevice(
+                device,
+                slot->endpoint,
+                ESP_ZB_ZCL_CLUSTER_ID_ON_OFF,
+                true,
+                ESP_ZB_ZCL_CMD_ON_OFF_OFF_ID,
+                nullptr,
+                0
+            )) {
+            return false;
+        }
+        STATUS_RGB.pulsePacketToDevice();
+        markInFlight(slot, ESP_ZB_ZCL_CLUSTER_ID_ON_OFF);
+        return true;
+    }
+    if (actionLower == "toggle") {
+        if (!sendZclToDevice(
+                device,
+                slot->endpoint,
+                ESP_ZB_ZCL_CLUSTER_ID_ON_OFF,
+                true,
+                ESP_ZB_ZCL_CMD_ON_OFF_TOGGLE_ID,
+                nullptr,
+                0
+            )) {
+            return false;
+        }
+        STATUS_RGB.pulsePacketToDevice();
+        markInFlight(slot, ESP_ZB_ZCL_CLUSTER_ID_ON_OFF);
+        return true;
+    }
+    return true;
+}
+
+bool ZigbeeCoordinator::sendZclToDevice(
+    BoundZigbeeDevice *device,
+    uint8_t dstEndpoint,
+    uint16_t clusterId,
+    bool clusterSpecific,
+    uint8_t commandId,
+    const uint8_t *payload,
+    uint16_t payloadLength
+) {
+    if (device == nullptr) {
+        return false;
+    }
+    const bool haveShort = device->shortAddr != 0 && device->shortAddr != 0xFFFF;
+    return sendZclWithoutApsAck(
+        haveShort ? ZB_APS_ADDR_MODE_16_ENDP_PRESENT : ZB_APS_ADDR_MODE_64_ENDP_PRESENT,
+        device->ieee,
+        haveShort ? device->shortAddr : 0,
+        dstEndpoint,
+        kSwitchEndpoint,
+        clusterId,
+        clusterSpecific,
+        commandId,
+        payload,
+        payloadLength
+    );
+}
+
+bool ZigbeeCoordinator::sendZclWithoutApsAck(
+    uint8_t addressMode,
+    const uint8_t ieee[8],
+    uint16_t shortAddr,
+    uint8_t dstEndpoint,
+    uint8_t srcEndpoint,
+    uint16_t clusterId,
+    bool clusterSpecific,
+    uint8_t commandId,
+    const uint8_t *payload,
+    uint16_t payloadLength
+) {
+    if (!esp_zb_lock_acquire(portMAX_DELAY)) {
+        LOGGER.warning("Zigbee lock failed for ZCL send");
+        return false;
+    }
+    const zb_bufid_t buffer = zb_buf_get_out();
+    if (buffer == 0) {
+        esp_zb_lock_release();
+        LOGGER.warning("No Zigbee buffer for ZCL send");
+        return false;
+    }
+    const zb_uint8_t frameType =
+        clusterSpecific ? ZB_ZCL_FRAME_TYPE_CLUSTER_SPECIFIC : ZB_ZCL_FRAME_TYPE_COMMON;
+    const zb_uint8_t frameControl = ZB_ZCL_CONSTRUCT_FRAME_CONTROL(
+        frameType,
+        ZB_ZCL_NOT_MANUFACTURER_SPECIFIC,
+        ZB_ZCL_FRAME_DIRECTION_TO_SRV,
+        ZB_ZCL_DISABLE_DEFAULT_RESPONSE
+    );
+    zb_uint8_t *payloadPtr = (zb_uint8_t *)zb_zcl_start_command_header(
+        buffer,
+        frameControl,
+        0,
+        commandId,
+        nullptr
+    );
+    if (payload != nullptr && payloadLength > 0) {
+        memcpy(payloadPtr, payload, payloadLength);
+        payloadPtr += payloadLength;
+    }
+    zb_addr_u destAddr{};
+    if (addressMode == ZB_APS_ADDR_MODE_16_ENDP_PRESENT) {
+        destAddr.addr_short = shortAddr;
+    } else if (ieee != nullptr) {
+        memcpy(destAddr.addr_long, ieee, 8);
+    }
+    const zb_ret_t sendResult = zb_zcl_finish_and_send_packet_new(
+        buffer,
+        payloadPtr,
+        &destAddr,
+        addressMode,
+        dstEndpoint,
+        srcEndpoint,
+        ZB_AF_HA_PROFILE_ID,
+        clusterId,
+        onZclSendStatus,
+        ZB_FALSE,
+        ZB_TRUE,
+        0
+    );
+    esp_zb_lock_release();
+    if (sendResult != RET_OK) {
+        LOGGER.warning("ZCL send failed status=" + String((int)sendResult));
+        return false;
+    }
+    return true;
+}
+
+bool ZigbeeCoordinator::transmitWriteAttr(
+    DestCommandSlot *slot,
+    uint16_t clusterId,
+    uint16_t attributeId,
+    uint8_t dataType,
+    uint32_t attributeValue
+) {
+    BoundZigbeeDevice *device = findByIeee(slot->ieee);
+    if (device == nullptr) {
+        slot->occupied = false;
+        slot->inFlight = false;
+        slot->hasNext = false;
+        return false;
+    }
+
     uint16_t valueSize = 1;
     if (dataType == ESP_ZB_ZCL_ATTR_TYPE_U16) {
         valueSize = 2;
@@ -869,36 +1166,92 @@ bool ZigbeeCoordinator::writeAttribute(
         }
     }
 
-    uint8_t valueBytes[4];
-    valueBytes[0] = (uint8_t)(attributeValue & 0xFF);
-    valueBytes[1] = (uint8_t)((attributeValue >> 8) & 0xFF);
-    valueBytes[2] = (uint8_t)((attributeValue >> 16) & 0xFF);
-    valueBytes[3] = (uint8_t)((attributeValue >> 24) & 0xFF);
-
-    esp_zb_zcl_attribute_t attribute{};
-    attribute.id = attributeId;
-    attribute.data.type = (esp_zb_zcl_attr_type_t)dataType;
-    attribute.data.size = valueSize;
-    attribute.data.value = valueBytes;
-
-    esp_zb_ieee_addr_t ieeeAddr;
-    memcpy(ieeeAddr, device->ieee, 8);
-
-    esp_zb_zcl_write_attr_cmd_t command{};
-    command.zcl_basic_cmd.src_endpoint = kSwitchEndpoint;
-    command.zcl_basic_cmd.dst_endpoint = targetEndpoint;
-    command.address_mode = ESP_ZB_APS_ADDR_MODE_64_ENDP_PRESENT;
-    memcpy(command.zcl_basic_cmd.dst_addr_u.addr_long, ieeeAddr, sizeof(esp_zb_ieee_addr_t));
-    command.clusterID = clusterId;
-    command.attr_number = 1;
-    command.attr_field = &attribute;
+    uint8_t writePayload[2 + 1 + 4];
+    writePayload[0] = (uint8_t)(attributeId & 0xFF);
+    writePayload[1] = (uint8_t)((attributeId >> 8) & 0xFF);
+    writePayload[2] = dataType;
+    writePayload[3] = (uint8_t)(attributeValue & 0xFF);
+    writePayload[4] = (uint8_t)((attributeValue >> 8) & 0xFF);
+    writePayload[5] = (uint8_t)((attributeValue >> 16) & 0xFF);
+    writePayload[6] = (uint8_t)((attributeValue >> 24) & 0xFF);
+    const uint16_t writeLength = (uint16_t)(3 + valueSize);
 
     char eventName[64];
     formatAttrEventName(eventName, sizeof(eventName), clusterId, attributeId, attributeValue);
-    logDeviceEvent(eventName, device->ieee, device->shortAddr, targetEndpoint, registeredName(device->ieee));
-    esp_zb_zcl_write_attr_cmd_req(&command);
+    logDeviceEvent(eventName, device->ieee, device->shortAddr, slot->endpoint, registeredName(device->ieee));
+    if (!sendZclToDevice(
+            device,
+            slot->endpoint,
+            clusterId,
+            false,
+            ZB_ZCL_CMD_WRITE_ATTRIB,
+            writePayload,
+            writeLength
+        )) {
+        return false;
+    }
     STATUS_RGB.pulsePacketToDevice();
+    markInFlight(slot, clusterId);
     return true;
+}
+
+void ZigbeeCoordinator::sendNextIfReady(DestCommandSlot *slot) {
+    if (slot == nullptr || slot->inFlight || !slot->hasNext) {
+        return;
+    }
+    const RadioCommandKind kind = slot->nextKind;
+    char onOffCopy[SPI_DEVICE_MESSAGE_MAX];
+    memcpy(onOffCopy, slot->nextOnOff, sizeof(onOffCopy));
+    const uint16_t clusterId = slot->nextCluster;
+    const uint16_t attributeId = slot->nextAttribute;
+    const uint8_t dataType = slot->nextType;
+    const uint32_t attributeValue = slot->nextValue;
+    slot->hasNext = false;
+    slot->nextKind = RadioCommandKind::None;
+    if (kind == RadioCommandKind::OnOff) {
+        transmitOnOff(slot, onOffCopy);
+        return;
+    }
+    if (kind == RadioCommandKind::WriteAttr) {
+        transmitWriteAttr(slot, clusterId, attributeId, dataType, attributeValue);
+    }
+}
+
+void ZigbeeCoordinator::serviceCommandFlights() {
+    const unsigned long nowMs = millis();
+    for (int i = 0; i < kMaxDestFlights; i++) {
+        DestCommandSlot *slot = &destFlights[i];
+        if (!slot->occupied) {
+            continue;
+        }
+        if (slot->inFlight && (long)(nowMs - slot->inFlightDeadlineMs) >= 0) {
+            slot->inFlight = false;
+        }
+        sendNextIfReady(slot);
+        if (!slot->inFlight && !slot->hasNext) {
+            slot->occupied = false;
+        }
+    }
+}
+
+void ZigbeeCoordinator::noteDefaultResponse(uint8_t endpoint, uint16_t cluster) {
+    DestCommandSlot *bestSlot = nullptr;
+    for (int i = 0; i < kMaxDestFlights; i++) {
+        DestCommandSlot *slot = &destFlights[i];
+        if (!slot->occupied || !slot->inFlight) {
+            continue;
+        }
+        if (slot->endpoint != endpoint || slot->inFlightCluster != cluster) {
+            continue;
+        }
+        if (bestSlot == nullptr
+            || (long)(slot->inFlightDeadlineMs - bestSlot->inFlightDeadlineMs) < 0) {
+            bestSlot = slot;
+        }
+    }
+    if (bestSlot != nullptr) {
+        bestSlot->inFlight = false;
+    }
 }
 
 String ZigbeeCoordinator::devicesJson(DeviceTopicMap *topicMap) {

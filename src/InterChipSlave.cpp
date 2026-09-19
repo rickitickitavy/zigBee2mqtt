@@ -386,6 +386,79 @@ bool InterChipSlave::takeOutbound(SpiFrame &frame) {
     return true;
 }
 
+InterChipSlave::DeferredDeviceCommand *InterChipSlave::findDeferredDeviceCommand(
+    const uint8_t ieee[8],
+    uint8_t endpoint
+) {
+    for (int i = 0; i < kMaxDeferredDeviceCommands; i++) {
+        DeferredDeviceCommand *slot = &deferredDeviceCommands[i];
+        if (slot->occupied && memcmp(slot->ieee, ieee, 8) == 0 && slot->endpoint == endpoint) {
+            return slot;
+        }
+    }
+    return nullptr;
+}
+
+InterChipSlave::DeferredDeviceCommand *InterChipSlave::allocDeferredDeviceCommand(
+    const uint8_t ieee[8],
+    uint8_t endpoint
+) {
+    DeferredDeviceCommand *existing = findDeferredDeviceCommand(ieee, endpoint);
+    if (existing != nullptr) {
+        return existing;
+    }
+    for (int i = 0; i < kMaxDeferredDeviceCommands; i++) {
+        DeferredDeviceCommand *slot = &deferredDeviceCommands[i];
+        if (slot->occupied) {
+            continue;
+        }
+        *slot = DeferredDeviceCommand{};
+        slot->occupied = true;
+        memcpy(slot->ieee, ieee, 8);
+        slot->endpoint = endpoint;
+        return slot;
+    }
+    LOGGER.warning("Deferred device command table full");
+    DeferredDeviceCommand *fallback = &deferredDeviceCommands[kMaxDeferredDeviceCommands - 1];
+    *fallback = DeferredDeviceCommand{};
+    fallback->occupied = true;
+    memcpy(fallback->ieee, ieee, 8);
+    fallback->endpoint = endpoint;
+    return fallback;
+}
+
+void InterChipSlave::stashDeferredOnOff(
+    const uint8_t ieee[8],
+    uint8_t endpoint,
+    const char *command,
+    size_t commandLength
+) {
+    DeferredDeviceCommand *slot = allocDeferredDeviceCommand(ieee, endpoint);
+    slot->kind = DeferredDeviceKind::OnOff;
+    memset(slot->onOffCommand, 0, sizeof(slot->onOffCommand));
+    const size_t bounded =
+        commandLength >= sizeof(slot->onOffCommand) ? sizeof(slot->onOffCommand) - 1 : commandLength;
+    if (command != nullptr && bounded > 0) {
+        memcpy(slot->onOffCommand, command, bounded);
+    }
+}
+
+void InterChipSlave::stashDeferredWriteAttr(
+    const uint8_t ieee[8],
+    uint8_t endpoint,
+    uint16_t clusterId,
+    uint16_t attributeId,
+    uint8_t dataType,
+    uint32_t attributeValue
+) {
+    DeferredDeviceCommand *slot = allocDeferredDeviceCommand(ieee, endpoint);
+    slot->kind = DeferredDeviceKind::WriteAttr;
+    slot->clusterId = clusterId;
+    slot->attributeId = attributeId;
+    slot->dataType = dataType;
+    slot->attributeValue = attributeValue;
+}
+
 void InterChipSlave::handleHostFrame(const SpiFrame &frame) {
     if (frame.cmd == SpiCmdPing) {
         enqueueReply(SpiEvtPong, frame.seq, nullptr, 0);
@@ -423,14 +496,9 @@ void InterChipSlave::handleHostFrame(const SpiFrame &frame) {
         return;
     }
     if (frame.cmd == SpiCmdZclOnOff && frame.length >= 10) {
-        memcpy(deferredOnOffIeee, frame.payload, 8);
-        deferredOnOffEndpoint = frame.payload[8];
-        memset(deferredOnOffCommand, 0, sizeof(deferredOnOffCommand));
-        const size_t commandLength = frame.length - 9;
-        const size_t bounded =
-            commandLength >= sizeof(deferredOnOffCommand) ? sizeof(deferredOnOffCommand) - 1 : commandLength;
-        memcpy(deferredOnOffCommand, frame.payload + 9, bounded);
-        onOffPending = true;
+        uint8_t ieee[8];
+        memcpy(ieee, frame.payload, 8);
+        stashDeferredOnOff(ieee, frame.payload[8], (const char *)frame.payload + 9, frame.length - 9);
         uint8_t ok = 1;
         enqueueEvent(SpiEvtCmdResult, &ok, 1);
         return;
@@ -454,13 +522,7 @@ void InterChipSlave::handleHostFrame(const SpiFrame &frame) {
             )) {
             return;
         }
-        memcpy(deferredWriteIeee, ieee, 8);
-        deferredWriteEndpoint = endpoint;
-        deferredWriteCluster = clusterId;
-        deferredWriteAttribute = attributeId;
-        deferredWriteType = dataType;
-        deferredWriteValue = attributeValue;
-        writeAttrPending = true;
+        stashDeferredWriteAttr(ieee, endpoint, clusterId, attributeId, dataType, attributeValue);
         uint8_t ok = 1;
         enqueueEvent(SpiEvtCmdResult, &ok, 1);
         return;
@@ -544,20 +606,24 @@ void InterChipSlave::applyDeferredRadioCommands() {
             permitJoinPending = false;
         }
     }
-    if (onOffPending && onOffHandler != nullptr) {
-        onOffHandler(deferredOnOffIeee, deferredOnOffCommand, deferredOnOffEndpoint);
-        onOffPending = false;
-    }
-    if (writeAttrPending && writeAttrHandler != nullptr) {
-        writeAttrHandler(
-            deferredWriteIeee,
-            deferredWriteEndpoint,
-            deferredWriteCluster,
-            deferredWriteAttribute,
-            deferredWriteType,
-            deferredWriteValue
-        );
-        writeAttrPending = false;
+    for (int i = 0; i < kMaxDeferredDeviceCommands; i++) {
+        DeferredDeviceCommand *slot = &deferredDeviceCommands[i];
+        if (!slot->occupied) {
+            continue;
+        }
+        if (slot->kind == DeferredDeviceKind::OnOff && onOffHandler != nullptr) {
+            onOffHandler(slot->ieee, slot->onOffCommand, slot->endpoint);
+        } else if (slot->kind == DeferredDeviceKind::WriteAttr && writeAttrHandler != nullptr) {
+            writeAttrHandler(
+                slot->ieee,
+                slot->endpoint,
+                slot->clusterId,
+                slot->attributeId,
+                slot->dataType,
+                slot->attributeValue
+            );
+        }
+        slot->occupied = false;
     }
 }
 

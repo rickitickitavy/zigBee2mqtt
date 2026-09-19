@@ -22,6 +22,17 @@ static bool commandExpectsReply(uint8_t cmd) {
     return cmd == SpiCmdPing || cmd == SpiCmdGetStatus || cmd == SpiCmdSetSettings || cmd == SpiCmdTimeSync;
 }
 
+static bool isDeviceControlCommand(uint8_t cmd) {
+    return cmd == SpiCmdZclOnOff || cmd == SpiCmdZclWriteAttr;
+}
+
+static bool sameDeviceControlDest(const SpiFrame &frame, const uint8_t *payload, uint16_t length) {
+    if (payload == nullptr || length < 9 || frame.length < 9) {
+        return false;
+    }
+    return memcmp(frame.payload, payload, 8) == 0 && frame.payload[8] == payload[8];
+}
+
 void InterChipHost::resetSlaveSynchronous() {
     pinMode(PIN_SLAVE_RST, OUTPUT);
     digitalWrite(PIN_SLAVE_RST, LOW);
@@ -106,9 +117,37 @@ void InterChipHost::requestTimeSync() {
     enqueueInternal(SpiCmdTimeSync, payload, 4, true);
 }
 
+bool InterChipHost::tryCoalesceDeviceControl(
+    uint8_t cmd,
+    const uint8_t *payload,
+    uint16_t length,
+    bool expectReply
+) {
+    if (!isDeviceControlCommand(cmd) || payload == nullptr || length < 9) {
+        return false;
+    }
+    for (int i = 0; i < kOutQueue; i++) {
+        if (!outbound[i].used || !isDeviceControlCommand(outbound[i].frame.cmd)) {
+            continue;
+        }
+        if (!sameDeviceControlDest(outbound[i].frame, payload, length)) {
+            continue;
+        }
+        outbound[i].expectReply = expectReply;
+        outbound[i].frame.cmd = cmd;
+        outbound[i].frame.length = length;
+        memcpy(outbound[i].frame.payload, payload, length);
+        return true;
+    }
+    return false;
+}
+
 bool InterChipHost::enqueueInternal(uint8_t cmd, const uint8_t *payload, uint16_t length, bool expectReply) {
     if (length > SPI_MAX_PAYLOAD) {
         return false;
+    }
+    if (tryCoalesceDeviceControl(cmd, payload, length, expectReply)) {
+        return true;
     }
     for (int i = 0; i < kOutQueue; i++) {
         if (outbound[i].used) {
