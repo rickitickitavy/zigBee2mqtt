@@ -19,8 +19,8 @@ Onboard WS2812 is GPIO8. External red LEDs (GPIO HIGH = on): LED1 GPIO18, LED2 G
 |-----------|------|--------|
 | LED1 | 0.1 s: MQTT device command received | 0.1 s: packet from an **unknown** device |
 | LED2 | 0.1 s: MQTT device state published | 0.1 s: packet from a **known** device |
-| LED3 | Unused | 0.1 s: ZCL default-response ACK |
-| LED4 | Unused | 0.1 s: **only** command sent to a device |
+| LED3 | Unused | 0.1 s: radio ACK that our command was delivered |
+| LED4 | Unused | 0.1 s: **only** command actually sent on the radio |
 | RGB red | Boot, and lost/unhealthy slave SPI link | Boot and critical error |
 | RGB green | On while MQTT is connected | On when the chip is ready (off while boot/critical red) |
 | RGB blue | — | Blinks while pairing/join is open |

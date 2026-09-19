@@ -193,4 +193,13 @@ private:
     void sendNextIfReady(DestCommandSlot *slot);
     void serviceCommandFlights();
     void markInFlight(DestCommandSlot *slot, uint16_t clusterId);
+    bool sendZclToDevice(
+        BoundZigbeeDevice *device,
+        uint8_t dstEndpoint,
+        uint16_t clusterId,
+        bool clusterSpecific,
+        uint8_t commandId,
+        const uint8_t *payload,
+        uint16_t payloadLength
+    );
 };

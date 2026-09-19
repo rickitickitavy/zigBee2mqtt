@@ -102,8 +102,8 @@ After slave boot red is cleared, and while no critical error is present:
 
 - LED1 for 0.1 seconds when a packet is received from an **unregistered** device
 - LED2 for 0.1 seconds when a packet is received from a **registered** device
-- LED3 for 0.1 seconds when a ZCL default-response ACK is processed
-- LED4 for 0.1 seconds **only** when a Zigbee command is sent to a device
+- LED3 for 0.1 seconds when the radio confirms delivery of an outbound command (MAC ACK of our TX)
+- LED4 for 0.1 seconds **only** when a Zigbee command is actually handed to the radio
 
 LED1 SHALL NOT pulse for a registered-device packet. RGB green SHALL NOT flash for a command send.
 
@@ -124,7 +124,7 @@ LED1 SHALL NOT pulse for a registered-device packet. RGB green SHALL NOT flash f
 
 #### Scenario: ACK for a command
 
-- **WHEN** the slave is ready and a ZCL default response for a command is processed
+- **WHEN** the slave is ready and the radio reports success for an outbound command
 - **THEN** LED3 is on for 0.1 seconds
 
 ### Requirement: Slave pairing blinks the onboard blue LED

@@ -55,6 +55,17 @@ static bool isZeroIeee(const uint8_t ieee[8]) {
     return ieee != nullptr && memcmp(ieee, kZeroIeee, 8) == 0;
 }
 
+static void onZclSendStatus(zb_uint8_t param) {
+    if (param == 0) {
+        return;
+    }
+    const zb_zcl_command_send_status_t *sendStatus = ZB_BUF_GET_PARAM(param, zb_zcl_command_send_status_t);
+    if (sendStatus->status == RET_OK) {
+        STATUS_RGB.pulseAckSent();
+    }
+    zb_buf_free(param);
+}
+
 static ZigbeeCoordinator *coordinatorForDefaultResponse = nullptr;
 
 static void onCoordinatorDefaultResponse(
@@ -65,7 +76,6 @@ static void onCoordinatorDefaultResponse(
 ) {
     (void)respToCmd;
     (void)status;
-    STATUS_RGB.pulseAckSent();
     if (coordinatorForDefaultResponse != nullptr) {
         coordinatorForDefaultResponse->noteDefaultResponse(endpoint, cluster);
     }
@@ -693,8 +703,9 @@ void ZigbeeCoordinator::handleIasZoneEnroll(
     uint8_t enrollPayload[2];
     enrollPayload[0] = (uint8_t)ESP_ZB_ZCL_IAS_ZONE_ENROLL_RESPONSE_CODE_SUCCESS;
     enrollPayload[1] = zoneId;
+    bool sentEnroll = false;
     if (!isZeroIeee(ieee)) {
-        sendZclWithoutApsAck(
+        sentEnroll = sendZclWithoutApsAck(
             ZB_APS_ADDR_MODE_64_ENDP_PRESENT,
             ieee,
             0,
@@ -707,7 +718,7 @@ void ZigbeeCoordinator::handleIasZoneEnroll(
             2
         );
     } else {
-        sendZclWithoutApsAck(
+        sentEnroll = sendZclWithoutApsAck(
             ZB_APS_ADDR_MODE_16_ENDP_PRESENT,
             nullptr,
             shortAddr,
@@ -719,6 +730,9 @@ void ZigbeeCoordinator::handleIasZoneEnroll(
             enrollPayload,
             2
         );
+    }
+    if (sentEnroll) {
+        STATUS_RGB.pulsePacketToDevice();
     }
     char eventName[48];
     snprintf(
@@ -978,12 +992,9 @@ bool ZigbeeCoordinator::transmitOnOff(DestCommandSlot *slot, const char *command
         registeredName(device->ieee)
     );
     if (actionLower == "on" || actionLower == "1" || actionLower == "true") {
-        if (!sendZclWithoutApsAck(
-                ZB_APS_ADDR_MODE_64_ENDP_PRESENT,
-                device->ieee,
-                0,
+        if (!sendZclToDevice(
+                device,
                 slot->endpoint,
-                kSwitchEndpoint,
                 ESP_ZB_ZCL_CLUSTER_ID_ON_OFF,
                 true,
                 ESP_ZB_ZCL_CMD_ON_OFF_ON_ID,
@@ -997,12 +1008,9 @@ bool ZigbeeCoordinator::transmitOnOff(DestCommandSlot *slot, const char *command
         return true;
     }
     if (actionLower == "off" || actionLower == "0" || actionLower == "false") {
-        if (!sendZclWithoutApsAck(
-                ZB_APS_ADDR_MODE_64_ENDP_PRESENT,
-                device->ieee,
-                0,
+        if (!sendZclToDevice(
+                device,
                 slot->endpoint,
-                kSwitchEndpoint,
                 ESP_ZB_ZCL_CLUSTER_ID_ON_OFF,
                 true,
                 ESP_ZB_ZCL_CMD_ON_OFF_OFF_ID,
@@ -1016,12 +1024,9 @@ bool ZigbeeCoordinator::transmitOnOff(DestCommandSlot *slot, const char *command
         return true;
     }
     if (actionLower == "toggle") {
-        if (!sendZclWithoutApsAck(
-                ZB_APS_ADDR_MODE_64_ENDP_PRESENT,
-                device->ieee,
-                0,
+        if (!sendZclToDevice(
+                device,
                 slot->endpoint,
-                kSwitchEndpoint,
                 ESP_ZB_ZCL_CLUSTER_ID_ON_OFF,
                 true,
                 ESP_ZB_ZCL_CMD_ON_OFF_TOGGLE_ID,
@@ -1035,6 +1040,33 @@ bool ZigbeeCoordinator::transmitOnOff(DestCommandSlot *slot, const char *command
         return true;
     }
     return true;
+}
+
+bool ZigbeeCoordinator::sendZclToDevice(
+    BoundZigbeeDevice *device,
+    uint8_t dstEndpoint,
+    uint16_t clusterId,
+    bool clusterSpecific,
+    uint8_t commandId,
+    const uint8_t *payload,
+    uint16_t payloadLength
+) {
+    if (device == nullptr) {
+        return false;
+    }
+    const bool haveShort = device->shortAddr != 0 && device->shortAddr != 0xFFFF;
+    return sendZclWithoutApsAck(
+        haveShort ? ZB_APS_ADDR_MODE_16_ENDP_PRESENT : ZB_APS_ADDR_MODE_64_ENDP_PRESENT,
+        device->ieee,
+        haveShort ? device->shortAddr : 0,
+        dstEndpoint,
+        kSwitchEndpoint,
+        clusterId,
+        clusterSpecific,
+        commandId,
+        payload,
+        payloadLength
+    );
 }
 
 bool ZigbeeCoordinator::sendZclWithoutApsAck(
@@ -1065,7 +1097,7 @@ bool ZigbeeCoordinator::sendZclWithoutApsAck(
         frameType,
         ZB_ZCL_NOT_MANUFACTURER_SPECIFIC,
         ZB_ZCL_FRAME_DIRECTION_TO_SRV,
-        ZB_ZCL_ENABLE_DEFAULT_RESPONSE
+        ZB_ZCL_DISABLE_DEFAULT_RESPONSE
     );
     zb_uint8_t *payloadPtr = (zb_uint8_t *)zb_zcl_start_command_header(
         buffer,
@@ -1093,7 +1125,7 @@ bool ZigbeeCoordinator::sendZclWithoutApsAck(
         srcEndpoint,
         ZB_AF_HA_PROFILE_ID,
         clusterId,
-        nullptr,
+        onZclSendStatus,
         ZB_FALSE,
         ZB_TRUE,
         0
@@ -1147,12 +1179,9 @@ bool ZigbeeCoordinator::transmitWriteAttr(
     char eventName[64];
     formatAttrEventName(eventName, sizeof(eventName), clusterId, attributeId, attributeValue);
     logDeviceEvent(eventName, device->ieee, device->shortAddr, slot->endpoint, registeredName(device->ieee));
-    if (!sendZclWithoutApsAck(
-            ZB_APS_ADDR_MODE_64_ENDP_PRESENT,
-            device->ieee,
-            0,
+    if (!sendZclToDevice(
+            device,
             slot->endpoint,
-            kSwitchEndpoint,
             clusterId,
             false,
             ZB_ZCL_CMD_WRITE_ATTRIB,
