@@ -66,6 +66,7 @@ private:
     void pulseResetStart();
     void pulseResetFinishIfDue();
     bool enqueueInternal(uint8_t cmd, const uint8_t *payload, uint16_t length, bool expectReply);
+    bool tryCoalesceDeviceControl(uint8_t cmd, const uint8_t *payload, uint16_t length, bool expectReply);
     void transferOnce(const SpiFrame *hostFrame);
     void handleInbound(const SpiFrame &frame);
     void emitLocalTimeout();

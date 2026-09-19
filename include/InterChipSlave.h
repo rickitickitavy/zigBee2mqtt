@@ -58,6 +58,24 @@ public:
 private:
     static constexpr int kQueue = 16;
     static constexpr int kHwSlots = 2;
+    static constexpr int kMaxDeferredDeviceCommands = 16;
+
+    enum class DeferredDeviceKind : uint8_t {
+        OnOff = 0,
+        WriteAttr = 1
+    };
+
+    struct DeferredDeviceCommand {
+        bool occupied = false;
+        DeferredDeviceKind kind = DeferredDeviceKind::OnOff;
+        uint8_t ieee[8]{};
+        uint8_t endpoint = 255;
+        char onOffCommand[SPI_DEVICE_MESSAGE_MAX]{};
+        uint16_t clusterId = 0;
+        uint16_t attributeId = 0;
+        uint8_t dataType = 0;
+        uint32_t attributeValue = 0;
+    };
 
     struct QueuedFrame {
         SpiFrame frame{};
@@ -84,21 +102,11 @@ private:
     bool spiReady = false;
     bool settingsPending = false;
     bool permitJoinPending = false;
-    bool onOffPending = false;
-    bool writeAttrPending = false;
     bool pumpPaused = false;
     uint8_t pendingChannel = 15;
     uint8_t pendingPermitJoinSec = 0;
     uint8_t deferredPermitSeconds = 0;
-    uint8_t deferredOnOffIeee[8]{};
-    char deferredOnOffCommand[SPI_DEVICE_MESSAGE_MAX]{};
-    uint8_t deferredOnOffEndpoint = 255;
-    uint8_t deferredWriteIeee[8]{};
-    uint8_t deferredWriteEndpoint = 255;
-    uint16_t deferredWriteCluster = 0;
-    uint16_t deferredWriteAttribute = 0;
-    uint8_t deferredWriteType = 0;
-    uint32_t deferredWriteValue = 0;
+    DeferredDeviceCommand deferredDeviceCommands[kMaxDeferredDeviceCommands]{};
     uint32_t pendingUnixSec = 0;
 
     bool enqueueEvent(uint8_t cmd, const uint8_t *payload, uint16_t length);
@@ -113,6 +121,17 @@ private:
     void fillHardwareQueue();
     void serviceSpi();
     bool initializeBus();
+    DeferredDeviceCommand *findDeferredDeviceCommand(const uint8_t ieee[8], uint8_t endpoint);
+    DeferredDeviceCommand *allocDeferredDeviceCommand(const uint8_t ieee[8], uint8_t endpoint);
+    void stashDeferredOnOff(const uint8_t ieee[8], uint8_t endpoint, const char *command, size_t commandLength);
+    void stashDeferredWriteAttr(
+        const uint8_t ieee[8],
+        uint8_t endpoint,
+        uint16_t clusterId,
+        uint16_t attributeId,
+        uint8_t dataType,
+        uint32_t attributeValue
+    );
 };
 
 extern InterChipSlave INTER_CHIP_SLAVE;

@@ -7,6 +7,7 @@
 #include <Arduino.h>
 #include <Zigbee.h>
 #include "DeviceTopicMap.h"
+#include "SpiProtocol.h"
 
 struct BoundZigbeeDevice {
     uint8_t ieee[8];
@@ -65,6 +66,7 @@ public:
         uint8_t srcEndpoint,
         esp_zb_zcl_addr_t srcAddress
     );
+    void noteDefaultResponse(uint8_t endpoint, uint16_t cluster);
     void setRegisteredMap(DeviceTopicMap *deviceMap);
     void clearRegisteredDevices();
     void upsertRegisteredDevice(const DeviceTopicEntry *entry);
@@ -74,6 +76,8 @@ public:
     const char *registeredName(const uint8_t ieee[8]) const;
 
     static constexpr int kMaxBoundDevices = 16;
+    static constexpr int kMaxDestFlights = 16;
+    static constexpr unsigned long kCommandInFlightTimeoutMs = 1500UL;
 
 private:
     class CoordinatorSwitch : public ZigbeeSwitch {
@@ -106,6 +110,28 @@ private:
         void zbIASZoneEnrollRequest(const esp_zb_zcl_ias_zone_enroll_request_message_t *message) override;
     };
 
+    enum class RadioCommandKind : uint8_t {
+        None = 0,
+        OnOff = 1,
+        WriteAttr = 2
+    };
+
+    struct DestCommandSlot {
+        bool occupied = false;
+        bool inFlight = false;
+        bool hasNext = false;
+        uint8_t ieee[8]{};
+        uint8_t endpoint = 255;
+        uint16_t inFlightCluster = 0;
+        unsigned long inFlightDeadlineMs = 0;
+        RadioCommandKind nextKind = RadioCommandKind::None;
+        char nextOnOff[SPI_DEVICE_MESSAGE_MAX]{};
+        uint16_t nextCluster = 0;
+        uint16_t nextAttribute = 0;
+        uint8_t nextType = 0;
+        uint32_t nextValue = 0;
+    };
+
     CoordinatorSwitch zigbeeSwitch;
     IasCieEndpoint iasCie;
     BoundZigbeeDevice boundDevices[kMaxBoundDevices];
@@ -121,6 +147,7 @@ private:
     unsigned long pairingLedToggleMs = 0;
     bool pairingLedOn = false;
     bool started = false;
+    DestCommandSlot destFlights[kMaxDestFlights]{};
 
     void startPairingWindow(uint8_t seconds);
     void stopPairingWindow();
@@ -134,4 +161,36 @@ private:
     bool migrateRegisteredIeee(const uint8_t previousIeee[8], const uint8_t nextIeee[8]);
     void pulseInboundDevice(const uint8_t ieee[8]);
     int8_t rssiForShortAddr(uint16_t shortAddr) const;
+    DestCommandSlot *destSlotFor(const uint8_t ieee[8], uint8_t endpoint, bool allocate);
+    bool transmitOnOff(DestCommandSlot *slot, const char *command);
+    bool sendZclWithoutApsAck(
+        uint8_t addressMode,
+        const uint8_t ieee[8],
+        uint16_t shortAddr,
+        uint8_t dstEndpoint,
+        uint8_t srcEndpoint,
+        uint16_t clusterId,
+        bool clusterSpecific,
+        uint8_t commandId,
+        const uint8_t *payload,
+        uint16_t payloadLength
+    );
+    bool transmitWriteAttr(
+        DestCommandSlot *slot,
+        uint16_t clusterId,
+        uint16_t attributeId,
+        uint8_t dataType,
+        uint32_t attributeValue
+    );
+    void stashNextOnOff(DestCommandSlot *slot, const char *command);
+    void stashNextWriteAttr(
+        DestCommandSlot *slot,
+        uint16_t clusterId,
+        uint16_t attributeId,
+        uint8_t dataType,
+        uint32_t attributeValue
+    );
+    void sendNextIfReady(DestCommandSlot *slot);
+    void serviceCommandFlights();
+    void markInFlight(DestCommandSlot *slot, uint16_t clusterId);
 };
