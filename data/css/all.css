@@ -394,6 +394,40 @@ html, body {
     height: 0.75rem;
 }
 
+.firmware-phase-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.firmware-phase {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+}
+
+.firmware-phase-label {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 0.5rem;
+    font-size: 0.875rem;
+    font-weight: 600;
+}
+
+.firmware-phase-percent {
+    color: var(--muted);
+    font-weight: 600;
+}
+
+.firmware-reboot-timer {
+    margin: 0;
+    text-align: center;
+    font-size: 2rem;
+    font-weight: 700;
+    color: var(--accent);
+}
+
 .log-viewer {
     width: 100%;
     flex: 1;

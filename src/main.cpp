@@ -5,6 +5,7 @@
 #include <time.h>
 
 #include "pins.h"
+#include "FirmwareOta.h"
 #include "Defines.h"
 #include "Logger.h"
 #include "SettingsManager.h"
@@ -199,6 +200,7 @@ static void onLightState(const char *message, const uint8_t ieee[8], uint8_t end
 }
 
 static void onHostSpiEvent(const SpiFrame &frame) {
+    FIRMWARE_OTA.onSpiFrame(frame);
     ZIGBEE_SPI_PROXY.onSpiEvent(frame);
     if (frame.cmd == SpiEvtDeviceJoin && foundDevices != nullptr && topicMap != nullptr) {
         if (foundDevices->noteJoin(frame, topicMap)) {
@@ -281,6 +283,10 @@ static String hostGatewayStatusJson() {
     json += String((unsigned long)ZIGBEE_SPI_PROXY.packetsSent());
     json += ",\"version\":\"";
     json += FIRMWARE_VERSION;
+    json += "\",\"masterVersion\":\"";
+    json += FIRMWARE_VERSION;
+    json += "\",\"slaveVersion\":\"";
+    json += INTER_CHIP_HOST.slaveFirmwareVersion();
     json += "\",\"pairingActive\":";
     json += ZIGBEE_SPI_PROXY.pairingActive() ? "true" : "false";
     json += "}";
@@ -769,6 +775,36 @@ static void setupHost() {
             || packedWrite[8] != 4) {
             LOGGER.error("Write-attr pack fixture failed");
         }
+        uint8_t otaPacked[SPI_MAX_PAYLOAD];
+        uint8_t otaSize[4] = {0x00, 0x10, 0x00, 0x00};
+        const uint16_t otaBeginLen = spiPackFirmwareOta(
+            otaPacked,
+            sizeof(otaPacked),
+            SPI_OTA_BEGIN,
+            otaSize,
+            4
+        );
+        uint8_t otaChunk[8];
+        memset(otaChunk, 0xA5, sizeof(otaChunk));
+        const uint16_t otaDataLen = spiPackFirmwareOta(
+            otaPacked,
+            sizeof(otaPacked),
+            SPI_OTA_END,
+            otaChunk,
+            sizeof(otaChunk)
+        );
+        uint32_t unpackedSize = 0;
+        uint8_t otaBeginPayload[SPI_OTA_BEGIN_LEN];
+        otaBeginPayload[0] = SPI_OTA_BEGIN;
+        memcpy(otaBeginPayload + 1, otaSize, 4);
+        if (SpiCmdFirmwareOta == SpiCmdZclWriteAttr || otaBeginLen != SPI_OTA_BEGIN_LEN
+            || otaDataLen != 1 + sizeof(otaChunk)
+            || !spiUnpackFirmwareOtaSize(otaBeginPayload, SPI_OTA_BEGIN_LEN, &unpackedSize)
+            || unpackedSize != 0x1000) {
+            LOGGER.error("Firmware OTA pack fixture failed");
+        } else {
+            LOGGER.info("Firmware OTA pack fixture ok");
+        }
     }
     LOGGER.info("role=host");
     LOGGER.info("z2m-gateway " FIRMWARE_VERSION);
@@ -887,6 +923,15 @@ void setup() {
 void loop() {
     if (boardRole == BoardRoleHost) {
         settingsManager->handlePendingRestart(400);
+        FIRMWARE_OTA.pump();
+        if (FIRMWARE_OTA.consumeHostRestart()) {
+            settingsManager->requestRestart();
+        }
+        if (FIRMWARE_OTA.isUpdatingSlave()) {
+            wifiController->update();
+            delay(0);
+            return;
+        }
         wifiController->update();
         maybeStartNtp();
         mqttClient->dispatch(wifiController->isStaConnected());
@@ -904,6 +949,16 @@ void loop() {
         return;
     }
 
+    FIRMWARE_OTA.pump();
+    if (FIRMWARE_OTA.isApplyingImage()) {
+        if (FIRMWARE_OTA.consumeFirmwareRestart()) {
+            delay(300);
+            ESP.restart();
+        }
+        delay(0);
+        return;
+    }
+
     if (zigbeeCoordinator != nullptr && zigbeeCoordinator->isStarted()) {
         STATUS_RGB.setBootHeld(false);
     }
@@ -915,6 +970,10 @@ void loop() {
         deviceStore->persistIfDue();
     }
     INTER_CHIP_SLAVE.pumpDevicesFileDump();
+    if (FIRMWARE_OTA.consumeFirmwareRestart()) {
+        delay(300);
+        ESP.restart();
+    }
     if (zigbeeCoordinator != nullptr) {
         zigbeeCoordinator->dispatch();
     }

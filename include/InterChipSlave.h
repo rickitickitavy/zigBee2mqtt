@@ -55,6 +55,7 @@ public:
     void setDevicesFileSource(DevicesFileFn handler);
     void setPumpPaused(bool paused);
     void resumeAfterRadioPause();
+    bool completeCommandResult(uint8_t seq, bool ok);
 
 private:
     static constexpr int kQueue = 16;
@@ -109,6 +110,9 @@ private:
     uint8_t deferredPermitSeconds = 0;
     DeferredDeviceCommand deferredDeviceCommands[kMaxDeferredDeviceCommands]{};
     uint32_t pendingUnixSec = 0;
+    uint8_t firmwareOtaLastSeq = 0;
+    bool firmwareOtaLastOk = false;
+    bool firmwareOtaResultValid = false;
 
     bool enqueueEvent(uint8_t cmd, const uint8_t *payload, uint16_t length);
     bool enqueueReply(uint8_t cmd, uint8_t seq, const uint8_t *payload, uint16_t length);
@@ -117,6 +121,7 @@ private:
     bool dropOldestAttrReport();
     bool enqueueDeviceMap(const uint8_t *payload, uint16_t length);
     void removeOutboundAt(int index);
+    void clearOutbound();
     void updateIrq();
     void handleHostFrame(const SpiFrame &frame);
     bool takeOutbound(SpiFrame &frame);

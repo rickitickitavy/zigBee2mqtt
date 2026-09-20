@@ -13,6 +13,8 @@ public:
     void resetSlaveSynchronous();
     void pump(); // host SPI task only
     bool tryEnqueue(uint8_t cmd, const uint8_t *payload, uint16_t length);
+    bool tryEnqueueWithSeq(uint8_t cmd, uint8_t seq, const uint8_t *payload, uint16_t length);
+    uint8_t lastEnqueuedSeq() const;
     bool isNormal() const;
     bool isLinkHealthy() const;
     HostBringupState bringupState() const;
@@ -21,13 +23,19 @@ public:
     uint32_t clockHz() const;
     void setEventHandler(EventFn handler);
     void requestTimeSync();
+    void noteKeepaliveQuiet();
+    void holdForFirmwareOta();
+    const char *slaveFirmwareVersion() const;
 
 private:
     static constexpr int kOutQueue = 8;
     static constexpr unsigned long kReadyTimeoutMs = 10000UL;
     static constexpr unsigned long kReplyTimeoutMs = 3000UL;
+    static constexpr unsigned long kOtaBeginReplyTimeoutMs = 180000UL;
+    static constexpr unsigned long kOtaChunkReplyTimeoutMs = 250UL;
     static constexpr unsigned long kPollMs = 50UL;
     static constexpr unsigned long kPingPeriodMs = 10000UL;
+    static constexpr unsigned long kStatusPeriodMs = 10000UL;
     static constexpr unsigned long kTimeSyncMs = 30000UL;
     static constexpr unsigned long kMinTransferGapUs = 2000UL;
     static constexpr unsigned long kRstPulseMs = 15UL;
@@ -43,6 +51,7 @@ private:
     EventFn eventHandler = nullptr;
     HostBringupState state = HostBringupReset;
     uint8_t nextSeq = 1;
+    uint8_t lastQueuedSeq = 1;
     uint8_t zigbeeChannel = 15;
     uint8_t permitJoinSec = 0;
     volatile uint32_t spiClockHz = DEFAULT_SPI_SPEED_HZ;
@@ -50,7 +59,9 @@ private:
     unsigned long waitStartedMs = 0;
     unsigned long lastPollMs = 0;
     unsigned long lastPingMs = 0;
+    unsigned long lastStatusMs = 0;
     unsigned long lastPongMs = 0;
+    char slaveVersionText[SPI_STATUS_VERSION_MAX + 1]{};
     unsigned long lastTimeSyncMs = 0;
     unsigned long lastSettingsOkMs = 0;
     bool resetAsserting = false;
@@ -65,7 +76,7 @@ private:
 
     void pulseResetStart();
     void pulseResetFinishIfDue();
-    bool enqueueInternal(uint8_t cmd, const uint8_t *payload, uint16_t length, bool expectReply);
+    bool enqueueInternal(uint8_t cmd, const uint8_t *payload, uint16_t length, bool expectReply, uint8_t seq);
     bool tryCoalesceDeviceControl(uint8_t cmd, const uint8_t *payload, uint16_t length, bool expectReply);
     void transferOnce(const SpiFrame *hostFrame);
     void handleInbound(const SpiFrame &frame);

@@ -85,6 +85,9 @@
             if (name == "hardware") {
                 loadHardware();
             }
+            if (name == "update") {
+                loadVersion();
+            }
         }
 
         function setupPasswordToggle(inputId, buttonId) {
@@ -131,7 +134,6 @@
             var onlineLabel = document.getElementById("statusOnline");
             var packetsRxLabel = document.getElementById("statusPacketsRx");
             var packetsTxLabel = document.getElementById("statusPacketsTx");
-            var versionLabel = document.getElementById("statusFirmwareVersion");
             if (devicesLabel) {
                 devicesLabel.textContent = payload && payload.devices != null ? String(payload.devices) : "—";
             }
@@ -144,8 +146,14 @@
             if (packetsTxLabel) {
                 packetsTxLabel.textContent = payload && payload.packetsTx != null ? String(payload.packetsTx) : "—";
             }
-            if (versionLabel) {
-                versionLabel.textContent = payload && payload.version ? payload.version : "—";
+            var masterVersion = payload && payload.masterVersion
+                ? payload.masterVersion
+                : (payload && payload.version ? payload.version : "");
+            var slaveVersion = payload && payload.slaveVersion ? payload.slaveVersion : "";
+            applyChipFirmwareVersion(masterVersion);
+            var slaveLabel = document.getElementById("statusSlaveFirmwareVersion");
+            if (slaveLabel) {
+                slaveLabel.textContent = slaveVersion ? slaveVersion : "—";
             }
         }
 
@@ -693,46 +701,369 @@
             });
         }
 
+        function applyChipFirmwareVersion(versionText) {
+            var chipVersion = versionText ? String(versionText) : "—";
+            var updateLabel = document.getElementById("firmwareVersion");
+            var statusLabel = document.getElementById("statusMasterFirmwareVersion");
+            if (updateLabel) {
+                updateLabel.textContent = chipVersion;
+            }
+            if (statusLabel) {
+                statusLabel.textContent = chipVersion;
+            }
+        }
+
         function loadVersion() {
-            fetch("/api/version").then(function (response) {
+            fetch("/api/version", { cache: "no-store" }).then(function (response) {
+                if (!response.ok) {
+                    throw new Error("version unavailable");
+                }
                 return response.json();
             }).then(function (payload) {
-                var versionLabel = document.getElementById("firmwareVersion");
-                if (versionLabel) {
-                    versionLabel.textContent = payload.version || "";
-                }
+                applyChipFirmwareVersion(payload && payload.version ? payload.version : "");
             }).catch(function () {
             });
         }
 
         function uploadFirmware() {
             var fileInput = document.getElementById("updateCodeFile");
-            var progressBar = document.getElementById("updateCodeProgress");
-            var statusLine = document.getElementById("updateCodeStatus");
+            var cardStatus = document.getElementById("updateCodeStatus");
             if (!fileInput.files || fileInput.files.length == 0) {
-                statusLine.textContent = "Choose a .bin file first.";
+                if (cardStatus) {
+                    cardStatus.textContent = "Choose a .bin file first.";
+                }
                 return;
             }
             var formData = new FormData();
             formData.append("firmware", fileInput.files[0], fileInput.files[0].name);
             var xhr = new XMLHttpRequest();
             xhr.open("POST", "/update", true);
-            progressBar.hidden = false;
-            progressBar.value = 0;
+            firmwareUpdateReachedHost = false;
+            firmwareUpdateCanClose = false;
+            openFirmwareUpdateDialog();
+            setFirmwarePhasePercent("firmwareUploadProgress", "firmwareUploadPercent", 0);
+            setFirmwarePhasePercent("firmwareSlaveProgress", "firmwareSlavePercent", 0);
+            setFirmwarePhasePercent("firmwareHostProgress", "firmwareHostPercent", 0);
+            setFirmwareUpdateStatus("Uploading firmware to master...");
             xhr.upload.onprogress = function (event) {
-                if (event.lengthComputable) {
-                    progressBar.value = (event.loaded / event.total) * 100;
+                if (event.lengthComputable && event.total > 0) {
+                    setFirmwarePhasePercent(
+                        "firmwareUploadProgress",
+                        "firmwareUploadPercent",
+                        (event.loaded / event.total) * 100
+                    );
                 }
             };
             xhr.onload = function () {
-                statusLine.textContent = xhr.status === 200
-                    ? (xhr.responseText || "Update started. Device will restart.")
-                    : (xhr.responseText || ("Update failed (HTTP " + xhr.status + ")"));
+                if (xhr.status !== 200) {
+                    setFirmwareUpdateStatus(xhr.responseText || ("Update failed (HTTP " + xhr.status + ")"));
+                    markFirmwareUpdateCloseable();
+                    return;
+                }
+                setFirmwarePhasePercent("firmwareUploadProgress", "firmwareUploadPercent", 100);
+                setFirmwareUpdateStatus(xhr.responseText || "Firmware stored. Updating slave, then host.");
+                startFirmwareStatusPoll();
             };
             xhr.onerror = function () {
-                statusLine.textContent = "Update failed (network error)";
+                setFirmwareUpdateStatus("Update failed (network error)");
+                markFirmwareUpdateCloseable();
             };
             xhr.send(formData);
+        }
+
+        var firmwareStatusTimer = null;
+        var firmwareUpdateReachedHost = false;
+        var firmwareUpdateCanClose = false;
+        var firmwareRebootWaitMs = 30000;
+        var firmwareRebootAcceptPingAfterMs = 0;
+        var firmwareRebootDeadlineMs = 0;
+        var firmwareRebootCountdownTimer = null;
+        var firmwareRebootPingTimer = null;
+        var firmwareRebootSawOffline = false;
+        var firmwareRebootPingOk = false;
+        var firmwareRebootSettled = false;
+        var firmwareRebootWaitActive = false;
+
+        function setFirmwareUpdateStatus(message) {
+            var dialogStatus = document.getElementById("firmwareUpdateStatus");
+            var cardStatus = document.getElementById("updateCodeStatus");
+            if (dialogStatus) {
+                dialogStatus.textContent = message;
+            }
+            if (cardStatus) {
+                cardStatus.textContent = message;
+            }
+        }
+
+        function markFirmwareUpdateCloseable() {
+            firmwareUpdateCanClose = true;
+            var closeButton = document.getElementById("firmwareUpdateCloseBtn");
+            if (closeButton) {
+                closeButton.hidden = false;
+            }
+        }
+
+        function openFirmwareUpdateDialog() {
+            firmwareRebootWaitActive = false;
+            firmwareRebootSettled = false;
+            firmwareRebootPingOk = false;
+            firmwareUpdateCanClose = false;
+            stopFirmwareRebootWait();
+            var overlay = document.getElementById("firmwareUpdateDialog");
+            var rebootBlock = document.getElementById("firmwareRebootWait");
+            var successLine = document.getElementById("firmwareRebootSuccess");
+            var errorLine = document.getElementById("firmwareRebootError");
+            var closeButton = document.getElementById("firmwareUpdateCloseBtn");
+            if (overlay) {
+                overlay.hidden = false;
+            }
+            if (rebootBlock) {
+                rebootBlock.hidden = true;
+            }
+            if (successLine) {
+                successLine.hidden = true;
+                successLine.textContent = "";
+            }
+            if (errorLine) {
+                errorLine.hidden = true;
+                errorLine.textContent = "";
+            }
+            if (closeButton) {
+                closeButton.hidden = true;
+            }
+        }
+
+        function setFirmwarePhasePercent(progressId, percentId, percentValue) {
+            var clamped = Math.max(0, Math.min(100, Math.round(percentValue)));
+            var progressBar = document.getElementById(progressId);
+            var percentLabel = document.getElementById(percentId);
+            if (progressBar) {
+                progressBar.value = clamped;
+            }
+            if (percentLabel) {
+                percentLabel.textContent = clamped + "%";
+            }
+        }
+
+        function applyFirmwareStatusPercents(payload) {
+            if (!payload) {
+                return;
+            }
+            if (payload.uploadPercent != null) {
+                setFirmwarePhasePercent("firmwareUploadProgress", "firmwareUploadPercent", payload.uploadPercent);
+            }
+            if (payload.slavePercent != null) {
+                setFirmwarePhasePercent("firmwareSlaveProgress", "firmwareSlavePercent", payload.slavePercent);
+            }
+            if (payload.hostPercent != null) {
+                setFirmwarePhasePercent("firmwareHostProgress", "firmwareHostPercent", payload.hostPercent);
+            }
+        }
+
+        function firmwareStatusMessage(payload) {
+            var phase = payload && payload.phase ? payload.phase : "";
+            if (phase === "receiving") {
+                return "Uploading firmware to master...";
+            }
+            if (phase === "slave") {
+                return "Sending firmware from master to slave...";
+            }
+            if (phase === "host") {
+                return "Writing firmware on master...";
+            }
+            if (phase === "rebooting") {
+                return "Master firmware written. Router is going to reboot.";
+            }
+            if (phase === "done") {
+                return "Firmware written. Router is going to reboot.";
+            }
+            if (phase === "failed") {
+                return payload.error || "Slave or host firmware update failed.";
+            }
+            return "Waiting for firmware update...";
+        }
+
+        function stopFirmwareStatusPoll() {
+            if (firmwareStatusTimer) {
+                clearInterval(firmwareStatusTimer);
+                firmwareStatusTimer = null;
+            }
+        }
+
+        function stopFirmwareRebootWait() {
+            if (firmwareRebootCountdownTimer) {
+                clearInterval(firmwareRebootCountdownTimer);
+                firmwareRebootCountdownTimer = null;
+            }
+            if (firmwareRebootPingTimer) {
+                clearInterval(firmwareRebootPingTimer);
+                firmwareRebootPingTimer = null;
+            }
+        }
+
+        function firmwareRebootRemainingSeconds() {
+            var remainingMs = firmwareRebootDeadlineMs - Date.now();
+            if (remainingMs <= 0) {
+                return 0;
+            }
+            return Math.ceil(remainingMs / 1000);
+        }
+
+        function updateFirmwareRebootTimerLabel() {
+            var timerLabel = document.getElementById("firmwareRebootTimer");
+            if (timerLabel) {
+                timerLabel.textContent = String(firmwareRebootRemainingSeconds());
+            }
+        }
+
+        function settleFirmwareReboot(success, message) {
+            if (firmwareRebootSettled) {
+                return;
+            }
+            stopFirmwareRebootWait();
+            firmwareRebootSettled = true;
+            var successLine = document.getElementById("firmwareRebootSuccess");
+            var errorLine = document.getElementById("firmwareRebootError");
+            var timerLabel = document.getElementById("firmwareRebootTimer");
+            if (success) {
+                if (successLine) {
+                    successLine.hidden = false;
+                    successLine.textContent = message;
+                }
+                if (errorLine) {
+                    errorLine.hidden = true;
+                }
+                if (timerLabel) {
+                    timerLabel.textContent = "0";
+                }
+                loadVersion();
+            } else {
+                if (errorLine) {
+                    errorLine.hidden = false;
+                    errorLine.textContent = message;
+                }
+                if (successLine) {
+                    successLine.hidden = true;
+                }
+            }
+            setFirmwareUpdateStatus(message);
+            markFirmwareUpdateCloseable();
+        }
+
+        function pingFirmwareRouter() {
+            if (firmwareRebootSettled) {
+                return;
+            }
+            fetch("/api/version", { cache: "no-store" }).then(function (response) {
+                if (!response.ok) {
+                    throw new Error("not ready");
+                }
+                return response.json();
+            }).then(function () {
+                if (firmwareRebootSettled) {
+                    return;
+                }
+                if (Date.now() < firmwareRebootAcceptPingAfterMs) {
+                    return;
+                }
+                firmwareRebootPingOk = true;
+                settleFirmwareReboot(true, "Firmware update finished. Router is ready.");
+            }).catch(function () {
+                firmwareRebootSawOffline = true;
+                firmwareRebootPingOk = false;
+            });
+        }
+
+        function onFirmwareRebootCountdown() {
+            if (firmwareRebootSettled) {
+                return;
+            }
+            updateFirmwareRebootTimerLabel();
+            if (firmwareRebootRemainingSeconds() > 0) {
+                return;
+            }
+            settleFirmwareReboot(false, "Wait timeout: the router did not come back.");
+        }
+
+        function startFirmwareRebootWait() {
+            if (firmwareRebootWaitActive) {
+                return;
+            }
+            firmwareRebootWaitActive = true;
+            firmwareRebootSettled = false;
+            firmwareRebootSawOffline = false;
+            firmwareRebootPingOk = false;
+            firmwareRebootDeadlineMs = Date.now() + firmwareRebootWaitMs;
+            firmwareRebootAcceptPingAfterMs = Date.now() + 5000;
+            stopFirmwareStatusPoll();
+            var rebootBlock = document.getElementById("firmwareRebootWait");
+            var successLine = document.getElementById("firmwareRebootSuccess");
+            var errorLine = document.getElementById("firmwareRebootError");
+            var overlay = document.getElementById("firmwareUpdateDialog");
+            if (overlay) {
+                overlay.hidden = false;
+            }
+            if (rebootBlock) {
+                rebootBlock.hidden = false;
+            }
+            if (successLine) {
+                successLine.hidden = true;
+                successLine.textContent = "";
+            }
+            if (errorLine) {
+                errorLine.hidden = true;
+                errorLine.textContent = "";
+            }
+            setFirmwareUpdateStatus("The router is going to reboot. Wait up to 30 seconds.");
+            updateFirmwareRebootTimerLabel();
+            stopFirmwareRebootWait();
+            firmwareRebootCountdownTimer = setInterval(onFirmwareRebootCountdown, 250);
+            firmwareRebootPingTimer = setInterval(pingFirmwareRouter, 1000);
+            pingFirmwareRouter();
+        }
+
+        function closeFirmwareUpdateDialog() {
+            if (!firmwareUpdateCanClose) {
+                return;
+            }
+            stopFirmwareRebootWait();
+            firmwareRebootWaitActive = false;
+            var overlay = document.getElementById("firmwareUpdateDialog");
+            if (overlay) {
+                overlay.hidden = true;
+            }
+        }
+
+        function startFirmwareStatusPoll() {
+            stopFirmwareStatusPoll();
+            firmwareStatusTimer = setInterval(function () {
+                fetch("/api/update/status", { cache: "no-store" }).then(function (response) {
+                    if (!response.ok) {
+                        throw new Error("status unavailable");
+                    }
+                    return response.json();
+                }).then(function (payload) {
+                    applyFirmwareStatusPercents(payload);
+                    if (payload.phase === "host" || payload.phase === "rebooting" || payload.phase === "done") {
+                        firmwareUpdateReachedHost = true;
+                    }
+                    setFirmwareUpdateStatus(firmwareStatusMessage(payload));
+                    if (payload.phase === "rebooting" || payload.phase === "done") {
+                        startFirmwareRebootWait();
+                        return;
+                    }
+                    if (payload.phase === "failed" || payload.phase === "idle") {
+                        stopFirmwareStatusPoll();
+                        if (payload.phase === "failed") {
+                            markFirmwareUpdateCloseable();
+                        }
+                    }
+                }).catch(function () {
+                    if (firmwareUpdateReachedHost) {
+                        startFirmwareRebootWait();
+                    }
+                });
+            }, 500);
         }
 
         function uploadFilesystem() {
@@ -1441,6 +1772,13 @@
                 closeDeleteConfirmDialog();
                 return true;
             }
+            if (dialogId === "firmwareUpdateDialog") {
+                if (!firmwareUpdateCanClose) {
+                    return false;
+                }
+                closeFirmwareUpdateDialog();
+                return true;
+            }
             return false;
         }
 
@@ -1502,8 +1840,12 @@
                     <p id="statusPacketsTx" class="status-value">—</p>
                 </div>
                 <div class="field">
-                    <label>VERSION</label>
-                    <p id="statusFirmwareVersion" class="status-value">—</p>
+                    <label>MASTER VERSION</label>
+                    <p id="statusMasterFirmwareVersion" class="status-value">—</p>
+                </div>
+                <div class="field">
+                    <label>SLAVE VERSION</label>
+                    <p id="statusSlaveFirmwareVersion" class="status-value">—</p>
                 </div>
             </div>
         </section>
@@ -1787,6 +2129,45 @@
             </div>
         </div>
 
+        <div id="firmwareUpdateDialog" class="dialog-overlay dialog-overlay-front" hidden>
+            <div class="dialog-panel" role="dialog" aria-label="Firmware update">
+                <h3 class="upload-title">Firmware update</h3>
+                <div id="firmwarePhaseList" class="firmware-phase-list">
+                    <div class="firmware-phase">
+                        <div class="firmware-phase-label">
+                            <span>Upload to master</span>
+                            <span id="firmwareUploadPercent" class="firmware-phase-percent">0%</span>
+                        </div>
+                        <progress id="firmwareUploadProgress" class="progress-bar" max="100" value="0"></progress>
+                    </div>
+                    <div class="firmware-phase">
+                        <div class="firmware-phase-label">
+                            <span>Master to slave</span>
+                            <span id="firmwareSlavePercent" class="firmware-phase-percent">0%</span>
+                        </div>
+                        <progress id="firmwareSlaveProgress" class="progress-bar" max="100" value="0"></progress>
+                    </div>
+                    <div class="firmware-phase">
+                        <div class="firmware-phase-label">
+                            <span>Write on master</span>
+                            <span id="firmwareHostPercent" class="firmware-phase-percent">0%</span>
+                        </div>
+                        <progress id="firmwareHostProgress" class="progress-bar" max="100" value="0"></progress>
+                    </div>
+                </div>
+                <p id="firmwareUpdateStatus" class="upload-status"></p>
+                <div id="firmwareRebootWait" hidden>
+                    <p class="field-hint">The router is going to reboot. Wait up to 30 seconds.</p>
+                    <p id="firmwareRebootTimer" class="firmware-reboot-timer">30</p>
+                    <p id="firmwareRebootError" class="save-error" hidden></p>
+                    <p id="firmwareRebootSuccess" class="save-success" hidden></p>
+                </div>
+                <div class="dialog-actions">
+                    <button type="button" id="firmwareUpdateCloseBtn" class="btn btn-primary" onclick="closeFirmwareUpdateDialog()" hidden>Close</button>
+                </div>
+            </div>
+        </div>
+
         <section id="section-system" class="section-panel" aria-label="System">
             <h2 class="section-title">System</h2>
             <nav class="tabs system-tabs" role="tablist" aria-label="System groups">
@@ -1827,7 +2208,6 @@
                         <p class="field-hint">Running version: <span id="firmwareVersion">—</span></p>
                         <p class="field-hint">PlatformIO: <code>.pio/build/esp32-c6-devkitc-1/firmware.bin</code></p>
                         <input id="updateCodeFile" type="file" accept=".bin,application/octet-stream">
-                        <progress id="updateCodeProgress" class="progress-bar" max="100" value="0" hidden></progress>
                         <p id="updateCodeStatus" class="upload-status"></p>
                         <button type="button" class="btn btn-primary btn-inline" onclick="uploadFirmware()">Upload firmware</button>
                     </div>

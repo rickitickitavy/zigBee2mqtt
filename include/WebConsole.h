@@ -71,6 +71,7 @@ private:
     void appendRequestBody(uint8_t *data, size_t len, size_t index);
     void handleLogGet(AsyncWebServerRequest *request);
     void handleVersionGet(AsyncWebServerRequest *request);
+    void handleFirmwareUpdateStatusGet(AsyncWebServerRequest *request);
     void handleOtaUpload(
         AsyncWebServerRequest *request,
         const String &filename,
