@@ -49,6 +49,7 @@ struct DeviceTopicEntry {
     char availabilityTopic[64];
     uint8_t channelCount;
     uint8_t fullControl;
+    uint8_t zigbeeType;
     uint8_t used;
 };
 

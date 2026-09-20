@@ -2,8 +2,10 @@
 #include "Logger.h"
 #include "Defines.h"
 #include "StatusRgb.h"
+#include "ZigbeeCluster.h"
 
 #include <nwk/esp_zigbee_nwk.h>
+#include <zdo/esp_zigbee_zdo_command.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -12,6 +14,7 @@ extern "C" {
 #include "zcl/zb_zcl_commands.h"
 }
 #include "zcl/esp_zigbee_zcl_ias_zone.h"
+#include "zcl/esp_zigbee_zcl_power_config.h"
 
 static constexpr uint8_t kSwitchEndpoint = 5;
 
@@ -40,6 +43,19 @@ static void formatAttrEventName(
     uint16_t attributeId,
     uint32_t value
 ) {
+    const char *clusterName = zigbeeClusterName(clusterId);
+    if (clusterName != nullptr && clusterName[0] != '\0') {
+        snprintf(
+            buffer,
+            bufferSize,
+            "%s cl=0x%04X,attr=0x%04X,val=0x%lX",
+            clusterName,
+            (unsigned int)clusterId,
+            (unsigned int)attributeId,
+            (unsigned long)value
+        );
+        return;
+    }
     snprintf(
         buffer,
         bufferSize,
@@ -113,6 +129,17 @@ static void addIasZoneClient(esp_zb_cluster_list_t *clusterList) {
 ZigbeeCoordinator::CoordinatorSwitch::CoordinatorSwitch(uint8_t endpoint, ZigbeeCoordinator *coordinator)
     : ZigbeeSwitch(endpoint), owner(coordinator) {
     addIasZoneClient(_cluster_list);
+}
+
+void ZigbeeCoordinator::CoordinatorSwitch::zbAttributeRead(
+    uint16_t clusterId,
+    const esp_zb_zcl_attribute_t *attribute,
+    uint8_t srcEndpoint,
+    esp_zb_zcl_addr_t srcAddress
+) {
+    if (owner != nullptr) {
+        owner->handleAttributeReport(clusterId, attribute, srcEndpoint, srcAddress);
+    }
 }
 
 void ZigbeeCoordinator::CoordinatorSwitch::zbIASZoneStatusChangeNotification(
@@ -342,6 +369,7 @@ void ZigbeeCoordinator::storeBoundDevice(zb_device_params_t *device) {
         memcpy(slot->ieee, device->ieee_addr, 8);
         slot->shortAddr = shortAddr;
         slot->endpoint = endpoint;
+        slot->lastEmittedType = kZigbeeDeviceTypeNeverEmitted;
         slot->occupied = true;
         LOGGER.info(
             "Ignoring incomplete join ieee=" + formatIeeeText(slot->ieee)
@@ -353,22 +381,180 @@ void ZigbeeCoordinator::storeBoundDevice(zb_device_params_t *device) {
     if (isNewDevice) {
         memset(slot, 0, sizeof(BoundZigbeeDevice));
         memcpy(slot->ieee, device->ieee_addr, 8);
+        slot->lastEmittedType = kZigbeeDeviceTypeNeverEmitted;
     }
     const bool wasIncomplete = !isNewDevice
         && (slot->shortAddr == 0 || slot->shortAddr == 0xFFFF
             || !DeviceTopicMap::isUsableEndpoint(slot->endpoint));
-    const bool addressChanged = !isNewDevice
-        && (slot->shortAddr != shortAddr || slot->endpoint != endpoint);
     slot->shortAddr = shortAddr;
     slot->endpoint = endpoint;
     slot->occupied = true;
     if (isNewDevice || wasIncomplete) {
         logDeviceEvent("join", slot->ieee, slot->shortAddr, slot->endpoint, registeredName(slot->ieee));
     }
-    if (deviceBoundHandler != nullptr && (isNewDevice || addressChanged || wasIncomplete || !slot->pairingOffered)) {
-        slot->pairingOffered = true;
-        deviceBoundHandler(slot);
+    if (slot->lastEmittedType == kZigbeeDeviceTypeNeverEmitted
+        || slot->zigbeeType == ZigbeeDeviceTypeUnknown) {
+        startDescriptorProbe(slot);
     }
+}
+
+void ZigbeeCoordinator::emitDeviceJoin(BoundZigbeeDevice *slot) {
+    if (slot == nullptr || deviceBoundHandler == nullptr) {
+        return;
+    }
+    if (!zigbeeJoinShouldEmit(slot->lastEmittedType, slot->zigbeeType)) {
+        return;
+    }
+    deviceBoundHandler(slot);
+    slot->lastEmittedType = slot->zigbeeType;
+    slot->pairingOffered = true;
+    if (slot->zigbeeType != ZigbeeDeviceTypeUnknown) {
+        slot->typeProbeDeadlineMs = 0;
+    }
+    char pairingEvent[40];
+    snprintf(
+        pairingEvent,
+        sizeof(pairingEvent),
+        "pairing type=%s",
+        zigbeeDeviceTypeJsonId(slot->zigbeeType)
+    );
+    logDeviceEvent(pairingEvent, slot->ieee, slot->shortAddr, slot->endpoint, registeredName(slot->ieee));
+}
+
+void ZigbeeCoordinator::mergeBoundDeviceType(BoundZigbeeDevice *slot, uint8_t incomingType) {
+    if (slot == nullptr) {
+        return;
+    }
+    const uint8_t merged = mergeZigbeeDeviceType(slot->zigbeeType, incomingType);
+    if (merged == slot->zigbeeType) {
+        return;
+    }
+    slot->zigbeeType = merged;
+    if (slot->zigbeeType != ZigbeeDeviceTypeUnknown) {
+        emitDeviceJoin(slot);
+    }
+}
+
+ZigbeeCoordinator::DescriptorProbe *ZigbeeCoordinator::allocDescriptorProbe(uint16_t shortAddr) {
+    for (int i = 0; i < kMaxDescriptorProbes; i++) {
+        if (!descriptorProbes[i].occupied) {
+            descriptorProbes[i].occupied = true;
+            descriptorProbes[i].owner = this;
+            descriptorProbes[i].shortAddr = shortAddr;
+            return &descriptorProbes[i];
+        }
+    }
+    return nullptr;
+}
+
+void ZigbeeCoordinator::requestSimpleDescriptor(uint16_t shortAddr, uint8_t endpoint) {
+    if (!DeviceTopicMap::isUsableEndpoint(endpoint)) {
+        return;
+    }
+    DescriptorProbe *probe = allocDescriptorProbe(shortAddr);
+    if (probe == nullptr) {
+        return;
+    }
+    esp_zb_zdo_simple_desc_req_param_t request{};
+    request.addr_of_interest = shortAddr;
+    request.endpoint = endpoint;
+    const bool tookLock = esp_zb_lock_acquire(pdMS_TO_TICKS(20));
+    esp_zb_zdo_simple_desc_req(&request, onSimpleDescriptor, probe);
+    if (tookLock) {
+        esp_zb_lock_release();
+    }
+}
+
+void ZigbeeCoordinator::requestActiveEndpoints(uint16_t shortAddr) {
+    DescriptorProbe *probe = allocDescriptorProbe(shortAddr);
+    if (probe == nullptr) {
+        return;
+    }
+    esp_zb_zdo_active_ep_req_param_t request{};
+    request.addr_of_interest = shortAddr;
+    const bool tookLock = esp_zb_lock_acquire(pdMS_TO_TICKS(20));
+    esp_zb_zdo_active_ep_req(&request, onActiveEndpoints, probe);
+    if (tookLock) {
+        esp_zb_lock_release();
+    }
+}
+
+void ZigbeeCoordinator::startDescriptorProbe(BoundZigbeeDevice *slot) {
+    if (slot == nullptr || slot->shortAddr == 0 || slot->shortAddr == 0xFFFF) {
+        return;
+    }
+    if (slot->typeProbeDeadlineMs != 0) {
+        return;
+    }
+    slot->typeProbeDeadlineMs = millis() + kTypeProbeTimeoutMs;
+    requestActiveEndpoints(slot->shortAddr);
+}
+
+void ZigbeeCoordinator::serviceTypeProbes() {
+    const unsigned long nowMs = millis();
+    for (int i = 0; i < kMaxBoundDevices; i++) {
+        BoundZigbeeDevice *slot = &boundDevices[i];
+        if (!slot->occupied || slot->typeProbeDeadlineMs == 0) {
+            continue;
+        }
+        if ((long)(nowMs - slot->typeProbeDeadlineMs) < 0) {
+            continue;
+        }
+        slot->typeProbeDeadlineMs = 0;
+        emitDeviceJoin(slot);
+    }
+}
+
+void ZigbeeCoordinator::onActiveEndpoints(
+    esp_zb_zdp_status_t zdoStatus,
+    uint8_t epCount,
+    uint8_t *epIdList,
+    void *userCtx
+) {
+    DescriptorProbe *probe = static_cast<DescriptorProbe *>(userCtx);
+    if (probe == nullptr || probe->owner == nullptr) {
+        return;
+    }
+    ZigbeeCoordinator *coordinator = probe->owner;
+    const uint16_t shortAddr = probe->shortAddr;
+    probe->occupied = false;
+    BoundZigbeeDevice *slot = coordinator->findByShortAddr(shortAddr);
+    if (zdoStatus != ESP_ZB_ZDP_STATUS_SUCCESS || epIdList == nullptr || epCount == 0) {
+        if (slot != nullptr) {
+            coordinator->requestSimpleDescriptor(shortAddr, slot->endpoint);
+        }
+        return;
+    }
+    for (uint8_t i = 0; i < epCount; i++) {
+        coordinator->requestSimpleDescriptor(shortAddr, epIdList[i]);
+    }
+}
+
+void ZigbeeCoordinator::onSimpleDescriptor(
+    esp_zb_zdp_status_t zdoStatus,
+    esp_zb_af_simple_desc_1_1_t *simpleDesc,
+    void *userCtx
+) {
+    DescriptorProbe *probe = static_cast<DescriptorProbe *>(userCtx);
+    if (probe == nullptr || probe->owner == nullptr) {
+        return;
+    }
+    ZigbeeCoordinator *coordinator = probe->owner;
+    const uint16_t shortAddr = probe->shortAddr;
+    probe->occupied = false;
+    if (zdoStatus != ESP_ZB_ZDP_STATUS_SUCCESS || simpleDesc == nullptr) {
+        return;
+    }
+    BoundZigbeeDevice *slot = coordinator->findByShortAddr(shortAddr);
+    if (slot == nullptr) {
+        return;
+    }
+    const uint8_t classified = classifyZigbeeDeviceTypeFromClusterList(
+        simpleDesc->app_cluster_list,
+        simpleDesc->app_input_cluster_count,
+        simpleDesc->app_output_cluster_count
+    );
+    coordinator->mergeBoundDeviceType(slot, classified);
 }
 
 void ZigbeeCoordinator::refreshBoundDevices() {
@@ -408,6 +594,7 @@ void ZigbeeCoordinator::refreshRegisteredShorts() {
 void ZigbeeCoordinator::dispatch() {
     updatePairingLed();
     serviceCommandFlights();
+    serviceTypeProbes();
     if (!started) {
         return;
     }
@@ -452,6 +639,7 @@ void ZigbeeCoordinator::rememberShortIeee(uint16_t shortAddr, const uint8_t ieee
             if (!boundDevices[i].occupied) {
                 slot = &boundDevices[i];
                 memset(slot, 0, sizeof(BoundZigbeeDevice));
+                slot->lastEmittedType = kZigbeeDeviceTypeNeverEmitted;
                 break;
             }
         }
@@ -593,6 +781,8 @@ bool ZigbeeCoordinator::migrateRegisteredIeee(const uint8_t previousIeee[8], con
     if (previous == nullptr || registeredMap->findByIeee(nextIeee) != nullptr) {
         return false;
     }
+    const uint8_t preservedZigbeeType = previous->zigbeeType;
+    const uint8_t preservedFullControl = previous->fullControl;
     if (registeredMap->upsert(
             nextIeee,
             previous->friendlyName,
@@ -606,7 +796,8 @@ bool ZigbeeCoordinator::migrateRegisteredIeee(const uint8_t previousIeee[8], con
     }
     DeviceTopicEntry *moved = registeredMap->findByIeee(nextIeee);
     if (moved != nullptr) {
-        moved->fullControl = previous->fullControl;
+        moved->fullControl = preservedFullControl;
+        moved->zigbeeType = preservedZigbeeType;
     }
     registeredMap->removeByIeee(previousIeee);
     LOGGER.info(
@@ -621,7 +812,7 @@ bool ZigbeeCoordinator::migrateRegisteredIeee(const uint8_t previousIeee[8], con
 
 void ZigbeeCoordinator::offerPairingIfNeeded(const uint8_t ieee[8]) {
     BoundZigbeeDevice *slot = findByIeee(ieee);
-    if (slot == nullptr || deviceBoundHandler == nullptr || slot->pairingOffered) {
+    if (slot == nullptr) {
         return;
     }
     const bool usableIdentity = slot->shortAddr != 0 && slot->shortAddr != 0xFFFF
@@ -629,12 +820,10 @@ void ZigbeeCoordinator::offerPairingIfNeeded(const uint8_t ieee[8]) {
     if (!usableIdentity) {
         return;
     }
-    slot->pairingOffered = true;
-    if (!isRegistered(slot->ieee)) {
-        logDeviceEvent("join", slot->ieee, slot->shortAddr, slot->endpoint, registeredName(slot->ieee));
+    if (slot->lastEmittedType == kZigbeeDeviceTypeNeverEmitted
+        || slot->zigbeeType == ZigbeeDeviceTypeUnknown) {
+        startDescriptorProbe(slot);
     }
-    pulseInboundDevice(slot->ieee);
-    deviceBoundHandler(slot);
 }
 
 void ZigbeeCoordinator::adoptReportIdentity(const uint8_t ieee[8], uint16_t shortAddr, uint8_t endpoint) {
@@ -727,7 +916,7 @@ void ZigbeeCoordinator::handleIasZoneStatus(
     resolveIeeeFromSource(message->info.src_address, ieee, &shortAddr);
     adoptReportIdentity(ieee, shortAddr, message->info.src_endpoint);
     const bool alarm = (message->zone_status & ESP_ZB_ZCL_IAS_ZONE_ZONE_STATUS_ALARM1) != 0;
-    char eventName[64];
+    char eventName[96];
     formatAttrEventName(
         eventName,
         sizeof(eventName),
@@ -804,6 +993,15 @@ void ZigbeeCoordinator::handleIasZoneEnroll(
     );
     logDeviceEvent(eventName, ieee, shortAddr, message->info.src_endpoint, registeredName(ieee));
     pulseInboundDevice(ieee);
+    if (!isZeroIeee(ieee) && DeviceTopicMap::isUsableEndpoint(message->info.src_endpoint)) {
+        zb_device_params_t enrollDevice{};
+        memcpy(enrollDevice.ieee_addr, ieee, 8);
+        enrollDevice.short_addr = shortAddr;
+        enrollDevice.endpoint = message->info.src_endpoint;
+        storeBoundDevice(&enrollDevice);
+        BoundZigbeeDevice *slot = findByIeee(ieee);
+        mergeBoundDeviceType(slot, ZigbeeDeviceTypeIasZone);
+    }
 }
 
 void ZigbeeCoordinator::handleAttributeReport(
@@ -819,11 +1017,13 @@ void ZigbeeCoordinator::handleAttributeReport(
     uint16_t shortAddr = 0;
     resolveIeeeFromSource(srcAddress, ieee, &shortAddr);
     adoptReportIdentity(ieee, shortAddr, srcEndpoint);
+    BoundZigbeeDevice *slot = findByIeee(ieee);
+    mergeBoundDeviceType(slot, zigbeeDeviceTypeFromCluster(clusterId));
     uint32_t value = 0;
     if (attribute->data.value != nullptr && attribute->data.size > 0) {
         memcpy(&value, attribute->data.value, attribute->data.size > 4 ? 4 : attribute->data.size);
     }
-    char eventName[64];
+    char eventName[96];
     formatAttrEventName(eventName, sizeof(eventName), clusterId, attribute->id, value);
     logDeviceEvent(eventName, ieee, shortAddr, srcEndpoint, registeredName(ieee));
     pulseInboundDevice(ieee);
@@ -834,6 +1034,19 @@ void ZigbeeCoordinator::handleAttributeReport(
         lightStateHandler(value != 0 ? "ON" : "OFF", ieee, srcEndpoint, shortAddr, rssiForShortAddr(shortAddr));
         return;
     }
+    if (clusterId == ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG
+        && attribute->id == ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID
+        && zigbeeBatteryPercentageRemainingValid(value)) {
+        char batteryMessage[16];
+        snprintf(
+            batteryMessage,
+            sizeof(batteryMessage),
+            "BATTERY %u",
+            zigbeeBatteryPercentageFromRemaining(value)
+        );
+        lightStateHandler(batteryMessage, ieee, srcEndpoint, shortAddr, rssiForShortAddr(shortAddr));
+        return;
+    }
     lightStateHandler(eventName, ieee, srcEndpoint, shortAddr, rssiForShortAddr(shortAddr));
 }
 
@@ -842,7 +1055,9 @@ void ZigbeeCoordinator::handleLightStateWithSource(bool on, uint8_t endpoint, es
     uint16_t shortAddr = 0;
     resolveIeeeFromSource(source, ieee, &shortAddr);
     adoptReportIdentity(ieee, shortAddr, endpoint);
-    char eventName[64];
+    BoundZigbeeDevice *onOffSlot = findByIeee(ieee);
+    mergeBoundDeviceType(onOffSlot, ZigbeeDeviceTypeOnOff);
+    char eventName[96];
     formatAttrEventName(
         eventName,
         sizeof(eventName),
@@ -1236,7 +1451,7 @@ bool ZigbeeCoordinator::transmitWriteAttr(
     writePayload[6] = (uint8_t)((attributeValue >> 24) & 0xFF);
     const uint16_t writeLength = (uint16_t)(3 + valueSize);
 
-    char eventName[64];
+    char eventName[96];
     formatAttrEventName(eventName, sizeof(eventName), clusterId, attributeId, attributeValue);
     logDeviceEvent(eventName, device->ieee, device->shortAddr, slot->endpoint, registeredName(device->ieee));
     if (!sendZclToDevice(

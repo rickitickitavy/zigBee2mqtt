@@ -21,6 +21,8 @@
 #include "ZigbeeSpiProxy.h"
 #include "FoundDeviceList.h"
 #include "DeviceStore.h"
+#include "ZigbeeDeviceType.h"
+#include "ZigbeeCluster.h"
 
 #include <stddef.h>
 #include <stdlib.h>
@@ -199,7 +201,9 @@ static void onLightState(const char *message, const uint8_t ieee[8], uint8_t end
 static void onHostSpiEvent(const SpiFrame &frame) {
     ZIGBEE_SPI_PROXY.onSpiEvent(frame);
     if (frame.cmd == SpiEvtDeviceJoin && foundDevices != nullptr && topicMap != nullptr) {
-        foundDevices->noteJoin(frame, topicMap);
+        if (foundDevices->noteJoin(frame, topicMap)) {
+            persistHostDeviceList();
+        }
     }
     if (frame.cmd == SpiEvtAttrReport && frame.length >= SPI_ATTR_REPORT_MESSAGE_OFFSET + 1
         && foundDevices != nullptr && topicMap != nullptr) {
@@ -207,7 +211,16 @@ static void onHostSpiEvent(const SpiFrame &frame) {
         memcpy(ieee, frame.payload, 8);
         const uint8_t endpoint = frame.payload[8];
         const uint16_t shortAddr = (uint16_t)frame.payload[9] | ((uint16_t)frame.payload[10] << 8);
-        foundDevices->noteIdentity(ieee, shortAddr, endpoint, "", "", topicMap);
+        const char *reportMessage = (const char *)frame.payload + SPI_ATTR_REPORT_MESSAGE_OFFSET;
+        foundDevices->noteIdentity(
+            ieee,
+            shortAddr,
+            endpoint,
+            "",
+            "",
+            topicMap,
+            zigbeeDeviceTypeFromAttrMessage(reportMessage)
+        );
     }
     if (frame.cmd == SpiEvtSettingsOk && topicMap != nullptr) {
         ZIGBEE_SPI_PROXY.requestRegistryPull(topicMap);
@@ -316,23 +329,81 @@ static void runDeviceRegistryFixtures() {
     if (foundDevices == nullptr || topicMap == nullptr) {
         return;
     }
+
+    const uint16_t onOffOnlyClusters[] = { kZigbeeClusterOnOff };
+    const uint16_t iasWithOnOffClusters[] = { kZigbeeClusterOnOff, kZigbeeClusterIasZone };
+    const uint16_t tempOnlyClusters[] = { 0x0402 };
+    const uint16_t coveringClusters[] = { kZigbeeClusterWindowCovering };
+    const uint16_t leakDetectorClusters[] = {
+        kZigbeeClusterPowerConfig,
+        kZigbeeClusterIasZone
+    };
+    const uint16_t batteryOnlyClusters[] = { kZigbeeClusterPowerConfig };
+    const uint16_t coveringOutClusters[] = { kZigbeeClusterWindowCovering };
+    if (classifyZigbeeDeviceTypeFromInClusters(onOffOnlyClusters, 1) != ZigbeeDeviceTypeOnOff
+        || classifyZigbeeDeviceTypeFromInClusters(iasWithOnOffClusters, 2) != ZigbeeDeviceTypeIasZone
+        || classifyZigbeeDeviceTypeFromInClusters(leakDetectorClusters, 2) != ZigbeeDeviceTypeIasZone
+        || classifyZigbeeDeviceTypeFromInClusters(batteryOnlyClusters, 1) != ZigbeeDeviceTypeUnknown
+        || classifyZigbeeDeviceTypeFromInClusters(tempOnlyClusters, 1) != ZigbeeDeviceTypeUnknown
+        || classifyZigbeeDeviceTypeFromInClusters(coveringClusters, 1) != ZigbeeDeviceTypeWindowCovering
+        || classifyZigbeeDeviceTypeFromClusterList(coveringOutClusters, 0, 1) != ZigbeeDeviceTypeWindowCovering
+        || zigbeeDeviceTypeFromCluster(kZigbeeClusterWindowCovering) != ZigbeeDeviceTypeWindowCovering
+        || zigbeeDeviceTypeFromAttrMessage("Window covering cl=0x0102,attr=0x0008,val=0x0")
+            != ZigbeeDeviceTypeWindowCovering
+        || strcmp(zigbeeClusterName(kZigbeeClusterPowerConfig), "Power configuration") != 0
+        || strcmp(zigbeeClusterName(kZigbeeClusterIasZone), "IAS Zone") != 0
+        || zigbeeBatteryPercentageFromRemaining(0x86) != 67
+        || !zigbeeJoinShouldEmit(kZigbeeDeviceTypeNeverEmitted, ZigbeeDeviceTypeUnknown)
+        || !zigbeeJoinShouldEmit(ZigbeeDeviceTypeUnknown, ZigbeeDeviceTypeOnOff)
+        || zigbeeJoinShouldEmit(ZigbeeDeviceTypeOnOff, ZigbeeDeviceTypeOnOff)) {
+        LOGGER.error("Device type classifier fixture failed");
+    } else {
+        LOGGER.info("Device type classifier fixture ok");
+    }
+
+    uint8_t packedJoin[SPI_DEVICE_JOIN_LEN];
+    uint8_t packIeee[8];
+    memset(packIeee, 0, sizeof(packIeee));
+    packIeee[0] = 0xCC;
+    if (!spiPackDeviceJoin(packedJoin, sizeof(packedJoin), packIeee, 0x1234, 1, "Acme", "Plug", ZigbeeDeviceTypeOnOff)
+        || packedJoin[0] != 0xCC
+        || packedJoin[SPI_DEVICE_JOIN_MANUFACTURER_OFFSET] != 'A'
+        || packedJoin[SPI_DEVICE_JOIN_MODEL_OFFSET] != 'P'
+        || packedJoin[SPI_DEVICE_JOIN_TYPE_OFFSET] != ZigbeeDeviceTypeOnOff
+        || spiDeviceJoinType(packedJoin, SPI_DEVICE_JOIN_MIN_LEN) != ZigbeeDeviceTypeUnknown) {
+        LOGGER.error("Device join pack fixture failed");
+    } else {
+        LOGGER.info("Device join pack fixture ok");
+    }
+
     foundDevices->clear();
     SpiFrame joinFrame;
     memset(&joinFrame, 0, sizeof(joinFrame));
     joinFrame.cmd = SpiEvtDeviceJoin;
-    joinFrame.length = 75;
+    joinFrame.length = SPI_DEVICE_JOIN_MIN_LEN;
     joinFrame.payload[0] = 0xAA;
-    joinFrame.payload[8] = 0x34;
-    joinFrame.payload[9] = 0x12;
-    joinFrame.payload[10] = 1;
-    strncpy((char *)joinFrame.payload + 11, "Acme", 31);
-    strncpy((char *)joinFrame.payload + 43, "Plug", 31);
+    joinFrame.payload[SPI_DEVICE_JOIN_NWK_OFFSET] = 0x34;
+    joinFrame.payload[SPI_DEVICE_JOIN_NWK_OFFSET + 1] = 0x12;
+    joinFrame.payload[SPI_DEVICE_JOIN_ENDPOINT_OFFSET] = 1;
+    strncpy((char *)joinFrame.payload + SPI_DEVICE_JOIN_MANUFACTURER_OFFSET, "Acme", 31);
+    strncpy((char *)joinFrame.payload + SPI_DEVICE_JOIN_MODEL_OFFSET, "Plug", 31);
     foundDevices->noteJoin(joinFrame, topicMap);
     String foundJson = foundDevices->listJson(topicMap);
-    if (foundJson.indexOf("AA") < 0) {
+    if (foundJson.indexOf("AA") < 0 || foundJson.indexOf("\"type\":\"unknown\"") < 0) {
         LOGGER.error("Found-join fixture failed");
     } else {
         LOGGER.info("Found-join fixture ok");
+    }
+
+    foundDevices->clear();
+    memcpy(joinFrame.payload, packedJoin, SPI_DEVICE_JOIN_LEN);
+    joinFrame.length = SPI_DEVICE_JOIN_LEN;
+    foundDevices->noteJoin(joinFrame, topicMap);
+    foundJson = foundDevices->listJson(topicMap);
+    if (foundJson.indexOf("\"type\":\"onOff\"") < 0) {
+        LOGGER.error("Found type JSON fixture failed");
+    } else {
+        LOGGER.info("Found type JSON fixture ok");
     }
 
     uint8_t registeredIeee[8];
@@ -345,6 +416,7 @@ static void runDeviceRegistryFixtures() {
     }
     foundDevices->clear();
     joinFrame.payload[0] = 0xBB;
+    joinFrame.length = SPI_DEVICE_JOIN_MIN_LEN;
     foundDevices->noteJoin(joinFrame, topicMap);
     foundJson = foundDevices->listJson(topicMap);
     if (foundJson.indexOf("BB") >= 0) {
@@ -352,6 +424,97 @@ static void runDeviceRegistryFixtures() {
     } else {
         LOGGER.info("Registered join skipped found list");
     }
+
+    if (probe != nullptr) {
+        probe->zigbeeType = ZigbeeDeviceTypeUnknown;
+    }
+    uint8_t coveringIeee[8];
+    memset(coveringIeee, 0, sizeof(coveringIeee));
+    coveringIeee[0] = 0xDD;
+    DeviceTopicEntry *coveringEntry = topicMap->upsert(coveringIeee, "cover-fixture", "", "", "");
+    if (coveringEntry != nullptr) {
+        coveringEntry->zigbeeType = ZigbeeDeviceTypeUnknown;
+        spiPackDeviceJoin(
+            joinFrame.payload,
+            sizeof(joinFrame.payload),
+            coveringIeee,
+            0x2222,
+            1,
+            "Acme",
+            "Shade",
+            ZigbeeDeviceTypeWindowCovering
+        );
+        joinFrame.length = SPI_DEVICE_JOIN_LEN;
+        const bool filledType = foundDevices->noteJoin(joinFrame, topicMap);
+        foundJson = foundDevices->listJson(topicMap);
+        if (!filledType || coveringEntry->zigbeeType != ZigbeeDeviceTypeWindowCovering
+            || foundJson.indexOf("DD") >= 0) {
+            LOGGER.error("Registered unknown type fill fixture failed");
+        } else {
+            LOGGER.info("Registered unknown type fill fixture ok");
+        }
+        memset(coveringEntry, 0, sizeof(DeviceTopicEntry));
+    }
+
+    uint8_t persistIeee[8];
+    memset(persistIeee, 0, sizeof(persistIeee));
+    persistIeee[0] = 0xEE;
+    DeviceTopicEntry *persistEntry = topicMap->upsert(persistIeee, "type-fixture", "", "", "");
+    if (persistEntry != nullptr) {
+        persistEntry->zigbeeType = ZigbeeDeviceTypeOnOff;
+        String storedJson = topicMap->listJson();
+        const uint8_t storedType = persistEntry->zigbeeType;
+        persistEntry->zigbeeType = storedType != ZigbeeDeviceTypeUnknown
+            ? storedType
+            : ZigbeeDeviceTypeIasZone;
+        if (persistEntry->zigbeeType != ZigbeeDeviceTypeOnOff || storedJson.indexOf("\"type\":\"onOff\"") < 0) {
+            LOGGER.error("Device type persist fixture failed");
+        } else {
+            LOGGER.info("Device type persist fixture ok");
+        }
+        topicMap->replaceFromJson(
+            "[{\"ieee\":\"00:00:00:00:00:00:00:EE\",\"name\":\"cover\",\"state\":\"z2m/cover/state\",\"type\":\"windowCovering\"}]"
+        );
+        DeviceTopicEntry *reloadedEntry = topicMap->findByIeee(persistIeee);
+        if (reloadedEntry == nullptr || reloadedEntry->zigbeeType != ZigbeeDeviceTypeWindowCovering) {
+            LOGGER.error("Window covering type JSON fixture failed");
+        } else {
+            LOGGER.info("Window covering type JSON fixture ok");
+        }
+        topicMap->replaceFromJson("[{\"ieee\":\"00:00:00:00:00:00:00:EE\",\"name\":\"legacy\"}]");
+        DeviceTopicEntry *legacyEntry = topicMap->findByIeee(persistIeee);
+        if (legacyEntry == nullptr || legacyEntry->zigbeeType != ZigbeeDeviceTypeUnknown) {
+            LOGGER.error("Missing type JSON fixture failed");
+        } else {
+            LOGGER.info("Missing type JSON fixture ok");
+        }
+        memset(legacyEntry, 0, sizeof(DeviceTopicEntry));
+    }
+
+    DeviceTopicEntry syncSource;
+    memset(&syncSource, 0, sizeof(syncSource));
+    syncSource.used = 1;
+    syncSource.ieee[0] = 0xAB;
+    strncpy(syncSource.friendlyName, "sync-type", sizeof(syncSource.friendlyName) - 1);
+    syncSource.channelCount = DEVICE_CHANNEL_COUNT_DEFAULT;
+    syncSource.zigbeeType = ZigbeeDeviceTypeIasZone;
+    uint8_t syncPacked[SPI_DEVICE_SYNC_ENTRY_LEN];
+    const size_t syncPackedLen = DeviceTopicMap::packSyncPayload(
+        syncPacked,
+        sizeof(syncPacked),
+        SPI_DEVICE_SYNC_ENTRY,
+        &syncSource
+    );
+    DeviceTopicEntry syncUnpacked;
+    uint8_t syncFlags = 0;
+    if (syncPackedLen != SPI_DEVICE_SYNC_ENTRY_LEN
+        || !DeviceTopicMap::unpackSyncPayload(syncPacked, (uint16_t)syncPackedLen, &syncFlags, &syncUnpacked)
+        || syncUnpacked.zigbeeType != ZigbeeDeviceTypeIasZone) {
+        LOGGER.error("Device type SPI sync fixture failed");
+    } else {
+        LOGGER.info("Device type SPI sync fixture ok");
+    }
+
     if (createdProbe && probe != nullptr) {
         memset(probe, 0, sizeof(DeviceTopicEntry));
     }
@@ -472,7 +635,8 @@ static void createSlaveCoordinator() {
                 device->shortAddr,
                 device->endpoint,
                 device->manufacturer,
-                device->model
+                device->model,
+                device->zigbeeType
             );
         }
     );

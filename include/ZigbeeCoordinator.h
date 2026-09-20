@@ -8,6 +8,7 @@
 #include <Zigbee.h>
 #include "DeviceTopicMap.h"
 #include "SpiProtocol.h"
+#include "ZigbeeDeviceType.h"
 
 struct BoundZigbeeDevice {
     uint8_t ieee[8];
@@ -15,6 +16,9 @@ struct BoundZigbeeDevice {
     uint8_t endpoint;
     char manufacturer[32];
     char model[32];
+    uint8_t zigbeeType;
+    uint8_t lastEmittedType;
+    unsigned long typeProbeDeadlineMs;
     bool occupied;
     bool pairingOffered;
 };
@@ -76,8 +80,10 @@ public:
     const char *registeredName(const uint8_t ieee[8]) const;
 
     static constexpr int kMaxBoundDevices = 16;
+    static constexpr int kMaxDescriptorProbes = 32;
     static constexpr int kMaxDestFlights = 16;
     static constexpr unsigned long kCommandInFlightTimeoutMs = 1500UL;
+    static constexpr unsigned long kTypeProbeTimeoutMs = 2000UL;
 
 private:
     class CoordinatorSwitch : public ZigbeeSwitch {
@@ -86,6 +92,12 @@ private:
 
     private:
         ZigbeeCoordinator *owner;
+        void zbAttributeRead(
+            uint16_t clusterId,
+            const esp_zb_zcl_attribute_t *attribute,
+            uint8_t srcEndpoint,
+            esp_zb_zcl_addr_t srcAddress
+        ) override;
         void zbIASZoneStatusChangeNotification(
             const esp_zb_zcl_ias_zone_status_change_notification_message_t *message
         ) override;
@@ -132,6 +144,12 @@ private:
         uint32_t nextValue = 0;
     };
 
+    struct DescriptorProbe {
+        bool occupied = false;
+        ZigbeeCoordinator *owner = nullptr;
+        uint16_t shortAddr = 0;
+    };
+
     CoordinatorSwitch zigbeeSwitch;
     IasCieEndpoint iasCie;
     BoundZigbeeDevice boundDevices[kMaxBoundDevices];
@@ -148,11 +166,25 @@ private:
     bool pairingLedOn = false;
     bool started = false;
     DestCommandSlot destFlights[kMaxDestFlights]{};
+    DescriptorProbe descriptorProbes[kMaxDescriptorProbes]{};
 
     void startPairingWindow(uint8_t seconds);
     void stopPairingWindow();
     void updatePairingLed();
     void storeBoundDevice(zb_device_params_t *device);
+    void emitDeviceJoin(BoundZigbeeDevice *slot);
+    void mergeBoundDeviceType(BoundZigbeeDevice *slot, uint8_t incomingType);
+    void startDescriptorProbe(BoundZigbeeDevice *slot);
+    void requestActiveEndpoints(uint16_t shortAddr);
+    void requestSimpleDescriptor(uint16_t shortAddr, uint8_t endpoint);
+    void serviceTypeProbes();
+    DescriptorProbe *allocDescriptorProbe(uint16_t shortAddr);
+    static void onActiveEndpoints(esp_zb_zdp_status_t zdoStatus, uint8_t epCount, uint8_t *epIdList, void *userCtx);
+    static void onSimpleDescriptor(
+        esp_zb_zdp_status_t zdoStatus,
+        esp_zb_af_simple_desc_1_1_t *simpleDesc,
+        void *userCtx
+    );
     void refreshRegisteredShorts();
     void resolveIeeeFromSource(esp_zb_zcl_addr_t source, uint8_t ieee[8], uint16_t *shortAddr);
     void rememberShortIeee(uint16_t shortAddr, const uint8_t ieee[8], uint8_t endpoint);

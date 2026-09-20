@@ -42,6 +42,7 @@ public:
     void clearAll();
     void replaceFrom(const DeviceTopicMap *source);
     void copyFullControlFrom(const DeviceTopicMap *source);
+    void copyZigbeeTypeFrom(const DeviceTopicMap *source);
     int slotIndex(const DeviceTopicEntry *entry) const;
     DeviceTopicEntry *slotAt(int index);
     int usedCount() const;

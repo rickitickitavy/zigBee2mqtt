@@ -2,6 +2,7 @@
 #include "JsonField.h"
 #include "SpiProtocol.h"
 #include "Defines.h"
+#include "ZigbeeDeviceType.h"
 
 #include <LittleFS.h>
 #include <ctype.h>
@@ -279,8 +280,10 @@ DeviceTopicEntry *DeviceTopicMap::upsert(
     }
     DeviceTopicEntry *entry = findByIeee(ieee);
     uint8_t preservedFullControl = 0;
+    uint8_t preservedZigbeeType = ZigbeeDeviceTypeUnknown;
     if (entry != nullptr && entry->used) {
         preservedFullControl = entry->fullControl;
+        preservedZigbeeType = entry->zigbeeType;
     }
     if (entry == nullptr) {
         for (int i = 0; i < DEVICE_MAP_SLOTS; i++) {
@@ -311,6 +314,7 @@ DeviceTopicEntry *DeviceTopicMap::upsert(
     }
     entry->channelCount = normalizeChannelCount(channelCount);
     entry->fullControl = preservedFullControl;
+    entry->zigbeeType = preservedZigbeeType;
     return entry;
 }
 
@@ -331,6 +335,9 @@ DeviceTopicEntry *DeviceTopicMap::upsertFromEntry(const DeviceTopicEntry *source
     }
     if (!keepExistingFullControl || source->fullControl) {
         entry->fullControl = source->fullControl ? 1 : 0;
+    }
+    if (source->zigbeeType != ZigbeeDeviceTypeUnknown) {
+        entry->zigbeeType = source->zigbeeType;
     }
     return entry;
 }
@@ -375,6 +382,23 @@ void DeviceTopicMap::copyFullControlFrom(const DeviceTopicMap *source) {
         if (previous != nullptr) {
             entry->fullControl = previous->fullControl;
         }
+    }
+}
+
+void DeviceTopicMap::copyZigbeeTypeFrom(const DeviceTopicMap *source) {
+    if (slots == nullptr || source == nullptr) {
+        return;
+    }
+    for (int i = 0; i < DEVICE_MAP_SLOTS; i++) {
+        DeviceTopicEntry *entry = &slots[i];
+        if (!entry->used) {
+            continue;
+        }
+        const DeviceTopicEntry *previous = source->findByIeee(entry->ieee);
+        if (previous == nullptr) {
+            continue;
+        }
+        entry->zigbeeType = mergeZigbeeDeviceType(entry->zigbeeType, previous->zigbeeType);
     }
 }
 
@@ -433,6 +457,13 @@ void DeviceTopicMap::replaceFromJson(const String &json) {
             bool parsedFullControl = false;
             if (entry != nullptr && extractJsonBool(object.c_str(), "fullControl", parsedFullControl)) {
                 entry->fullControl = parsedFullControl ? 1 : 0;
+            }
+            const char *typeKey = strstr(object.c_str(), "\"type\":");
+            if (entry != nullptr && typeKey != nullptr) {
+                String typeText;
+                if (extractJsonString(typeKey, "type", typeText)) {
+                    entry->zigbeeType = zigbeeDeviceTypeFromJsonId(typeText.c_str());
+                }
             }
         }
         cursor = objectEnd + 1;
@@ -496,6 +527,7 @@ size_t DeviceTopicMap::packSyncPayload(
         strncpy((char *)out + 161, entry->availabilityTopic, SPI_DEVICE_SYNC_TOPIC_LEN - 1);
         out[SPI_DEVICE_SYNC_ENTRY_LEN_NO_CHANNELS] = entry->channelCount;
         out[SPI_DEVICE_SYNC_ENTRY_LEN_WITH_CHANNELS] = entry->fullControl ? 1 : 0;
+        out[SPI_DEVICE_SYNC_ENTRY_LEN_WITH_FULL_CONTROL] = entry->zigbeeType;
     }
     return length;
 }
@@ -529,8 +561,11 @@ bool DeviceTopicMap::unpackSyncPayload(
     } else {
         entry->channelCount = DEVICE_CHANNEL_COUNT_DEFAULT;
     }
-    if (length >= SPI_DEVICE_SYNC_ENTRY_LEN) {
+    if (length >= SPI_DEVICE_SYNC_ENTRY_LEN_WITH_FULL_CONTROL) {
         entry->fullControl = in[SPI_DEVICE_SYNC_ENTRY_LEN_WITH_CHANNELS] != 0 ? 1 : 0;
+    }
+    if (length >= SPI_DEVICE_SYNC_ENTRY_LEN) {
+        entry->zigbeeType = in[SPI_DEVICE_SYNC_ENTRY_LEN_WITH_FULL_CONTROL];
     }
     entry->used = 1;
     return true;
@@ -639,6 +674,9 @@ String DeviceTopicMap::listJson(OnlineFn isOnline, LastRssiFn lastRssi) {
         json += String(entry->channelCount);
         json += ",\"fullControl\":";
         json += entry->fullControl ? "true" : "false";
+        json += ",\"type\":\"";
+        json += zigbeeDeviceTypeJsonId(entry->zigbeeType);
+        json += "\"";
         if (isOnline != nullptr) {
             json += ",\"online\":";
             json += isOnline(entry->ieee) ? "true" : "false";

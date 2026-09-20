@@ -36,7 +36,8 @@ public:
         uint16_t shortAddr,
         uint8_t endpoint,
         const char *manufacturer,
-        const char *model
+        const char *model,
+        uint8_t zigbeeType
     );
     void setSettingsHandler(SettingsFn handler);
     void setPermitJoinHandler(PermitJoinFn handler);
@@ -113,6 +114,7 @@ private:
     bool enqueueReply(uint8_t cmd, uint8_t seq, const uint8_t *payload, uint16_t length);
     bool tryEnqueue(uint8_t cmd, uint8_t seq, const uint8_t *payload, uint16_t length);
     bool dropOldestLogRecord();
+    bool dropOldestAttrReport();
     bool enqueueDeviceMap(const uint8_t *payload, uint16_t length);
     void removeOutboundAt(int index);
     void updateIrq();
