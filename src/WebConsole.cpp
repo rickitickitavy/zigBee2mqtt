@@ -2,6 +2,7 @@
 #include "Logger.h"
 #include "Defines.h"
 #include "JsonField.h"
+#include "ZigbeeDeviceType.h"
 
 #include <LittleFS.h>
 #include <Update.h>
@@ -496,6 +497,9 @@ void WebConsole::handleDevicesPost(AsyncWebServerRequest *request) {
         request->send(400, "text/plain", "Bad IEEE");
         return;
     }
+    DeviceTopicEntry *existing = deviceMap->findByIeee(ieee);
+    const uint8_t storedType =
+        existing != nullptr && existing->used ? existing->zigbeeType : ZigbeeDeviceTypeUnknown;
     DeviceTopicEntry *entry = deviceMap->upsert(
         ieee,
         friendlyName.c_str(),
@@ -511,6 +515,17 @@ void WebConsole::handleDevicesPost(AsyncWebServerRequest *request) {
     bool parsedFullControl = false;
     if (extractJsonBool(requestBody.c_str(), "fullControl", parsedFullControl)) {
         entry->fullControl = parsedFullControl ? 1 : 0;
+    }
+    if (storedType != ZigbeeDeviceTypeUnknown) {
+        entry->zigbeeType = storedType;
+    } else if (foundDevices != nullptr) {
+        entry->zigbeeType = foundDevices->zigbeeTypeForIeee(ieee);
+    }
+    if (entry->zigbeeType == ZigbeeDeviceTypeUnknown) {
+        String typeText;
+        if (extractJsonString(requestBody.c_str(), "type", typeText)) {
+            entry->zigbeeType = zigbeeDeviceTypeFromJsonId(typeText.c_str());
+        }
     }
     if (foundDevices != nullptr) {
         foundDevices->removeIeee(ieee);

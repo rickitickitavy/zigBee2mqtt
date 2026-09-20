@@ -681,6 +681,10 @@ html, body {
     display: none !important;
 }
 
+.dialog-overlay.dialog-overlay-front {
+    z-index: 21;
+}
+
 .dialog-panel {
     width: min(36rem, 100%);
     max-height: 90vh;

@@ -308,6 +308,7 @@ void ZigbeeSpiProxy::finishRegistryPull() {
         if (receivedCount == 0 && registryMap != nullptr && registryMap->usedCount() > 0) {
             LOGGER.warning("Ignoring empty device dump; keeping current list");
         } else if (registryMap != nullptr) {
+            pullMap.copyZigbeeTypeFrom(registryMap);
             registryMap->replaceFrom(&pullMap);
         }
     }

@@ -292,6 +292,16 @@ bool InterChipSlave::dropOldestLogRecord() {
     return false;
 }
 
+bool InterChipSlave::dropOldestAttrReport() {
+    for (int i = 0; i < outboundCount; i++) {
+        if (outbound[i].frame.cmd == SpiEvtAttrReport) {
+            removeOutboundAt(i);
+            return true;
+        }
+    }
+    return false;
+}
+
 bool InterChipSlave::enqueueDeviceMap(const uint8_t *payload, uint16_t length) {
     if (tryEnqueue(SpiEvtDeviceMap, 0, payload, length)) {
         return true;
@@ -355,21 +365,30 @@ void InterChipSlave::enqueueDeviceJoin(
     uint16_t shortAddr,
     uint8_t endpoint,
     const char *manufacturer,
-    const char *model
+    const char *model,
+    uint8_t zigbeeType
 ) {
-    uint8_t payload[8 + 2 + 1 + 32 + 32];
-    memset(payload, 0, sizeof(payload));
-    memcpy(payload, ieee, 8);
-    payload[8] = (uint8_t)(shortAddr & 0xFF);
-    payload[9] = (uint8_t)((shortAddr >> 8) & 0xFF);
-    payload[10] = endpoint;
-    if (manufacturer != nullptr) {
-        strncpy((char *)payload + 11, manufacturer, 31);
+    uint8_t payload[SPI_DEVICE_JOIN_LEN];
+    if (!spiPackDeviceJoin(
+            payload,
+            sizeof(payload),
+            ieee,
+            shortAddr,
+            endpoint,
+            manufacturer,
+            model,
+            zigbeeType
+        )) {
+        return;
     }
-    if (model != nullptr) {
-        strncpy((char *)payload + 43, model, 31);
+    if (tryEnqueue(SpiEvtDeviceJoin, 0, payload, SPI_DEVICE_JOIN_LEN)) {
+        return;
     }
-    enqueueEvent(SpiEvtDeviceJoin, payload, sizeof(payload));
+    while (dropOldestLogRecord() || dropOldestAttrReport()) {
+        if (tryEnqueue(SpiEvtDeviceJoin, 0, payload, SPI_DEVICE_JOIN_LEN)) {
+            return;
+        }
+    }
 }
 
 void InterChipSlave::updateIrq() {

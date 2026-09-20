@@ -39,7 +39,8 @@ constexpr size_t SPI_DEVICE_SYNC_TOPIC_LEN = 64;
 constexpr size_t SPI_DEVICE_SYNC_ENTRY_LEN_NO_CHANNELS =
     1 + 8 + SPI_DEVICE_SYNC_NAME_LEN + (SPI_DEVICE_SYNC_TOPIC_LEN * 3);
 constexpr size_t SPI_DEVICE_SYNC_ENTRY_LEN_WITH_CHANNELS = SPI_DEVICE_SYNC_ENTRY_LEN_NO_CHANNELS + 1;
-constexpr size_t SPI_DEVICE_SYNC_ENTRY_LEN = SPI_DEVICE_SYNC_ENTRY_LEN_WITH_CHANNELS + 1;
+constexpr size_t SPI_DEVICE_SYNC_ENTRY_LEN_WITH_FULL_CONTROL = SPI_DEVICE_SYNC_ENTRY_LEN_WITH_CHANNELS + 1;
+constexpr size_t SPI_DEVICE_SYNC_ENTRY_LEN = SPI_DEVICE_SYNC_ENTRY_LEN_WITH_FULL_CONTROL + 1;
 constexpr size_t SPI_DEVICE_MESSAGE_MAX = 64;
 constexpr size_t SPI_ATTR_REPORT_RSSI_OFFSET = 11;
 constexpr size_t SPI_ATTR_REPORT_MESSAGE_OFFSET = 12;
@@ -50,7 +51,50 @@ constexpr uint8_t ZCL_ATTR_TYPE_U32 = 0x23;
 constexpr uint8_t SPI_FILE_FIRST = 0x01;
 constexpr uint8_t SPI_FILE_LAST = 0x02;
 constexpr size_t SPI_FILE_CHUNK_MAX = SPI_MAX_PAYLOAD - 1;
+constexpr size_t SPI_DEVICE_JOIN_NWK_OFFSET = 8;
+constexpr size_t SPI_DEVICE_JOIN_ENDPOINT_OFFSET = 10;
+constexpr size_t SPI_DEVICE_JOIN_MANUFACTURER_OFFSET = 11;
+constexpr size_t SPI_DEVICE_JOIN_MODEL_OFFSET = 43;
+constexpr size_t SPI_DEVICE_JOIN_TYPE_OFFSET = 75;
+constexpr size_t SPI_DEVICE_JOIN_MIN_LEN = 75;
+constexpr size_t SPI_DEVICE_JOIN_LEN = 76;
 static_assert(SPI_DEVICE_SYNC_ENTRY_LEN <= SPI_MAX_PAYLOAD, "device sync frame must fit SPI payload");
+static_assert(SPI_DEVICE_JOIN_LEN <= SPI_MAX_PAYLOAD, "device join frame must fit SPI payload");
+
+inline bool spiPackDeviceJoin(
+    uint8_t *out,
+    size_t outMax,
+    const uint8_t ieee[8],
+    uint16_t shortAddr,
+    uint8_t endpoint,
+    const char *manufacturer,
+    const char *model,
+    uint8_t zigbeeType
+) {
+    if (out == nullptr || ieee == nullptr || outMax < SPI_DEVICE_JOIN_LEN) {
+        return false;
+    }
+    memset(out, 0, SPI_DEVICE_JOIN_LEN);
+    memcpy(out, ieee, 8);
+    out[SPI_DEVICE_JOIN_NWK_OFFSET] = (uint8_t)(shortAddr & 0xFF);
+    out[SPI_DEVICE_JOIN_NWK_OFFSET + 1] = (uint8_t)((shortAddr >> 8) & 0xFF);
+    out[SPI_DEVICE_JOIN_ENDPOINT_OFFSET] = endpoint;
+    if (manufacturer != nullptr) {
+        strncpy((char *)out + SPI_DEVICE_JOIN_MANUFACTURER_OFFSET, manufacturer, 31);
+    }
+    if (model != nullptr) {
+        strncpy((char *)out + SPI_DEVICE_JOIN_MODEL_OFFSET, model, 31);
+    }
+    out[SPI_DEVICE_JOIN_TYPE_OFFSET] = zigbeeType;
+    return true;
+}
+
+inline uint8_t spiDeviceJoinType(const uint8_t *in, uint16_t length) {
+    if (in == nullptr || length < SPI_DEVICE_JOIN_LEN) {
+        return 0;
+    }
+    return in[SPI_DEVICE_JOIN_TYPE_OFFSET];
+}
 
 enum SpiEvent : uint8_t {
     SpiEvtPong = 0x81,
