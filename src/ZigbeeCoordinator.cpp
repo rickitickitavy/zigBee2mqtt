@@ -393,6 +393,16 @@ void ZigbeeCoordinator::refreshRegisteredShorts() {
         }
         slotIndex = registeredMap->nextUsedIndex(slotIndex + 1);
     }
+    esp_zb_nwk_info_iterator_t iterator = ESP_ZB_NWK_INFO_ITERATOR_INIT;
+    esp_zb_nwk_neighbor_info_t neighbor{};
+    while (esp_zb_nwk_get_next_neighbor(&iterator, &neighbor) == ESP_OK) {
+        if (isZeroIeee(neighbor.ieee_addr) || neighbor.short_addr == 0 || neighbor.short_addr == 0xFFFF) {
+            continue;
+        }
+        if (registeredMap->findByIeee(neighbor.ieee_addr) != nullptr) {
+            rememberShortIeee(neighbor.short_addr, neighbor.ieee_addr, 0);
+        }
+    }
 }
 
 void ZigbeeCoordinator::dispatch() {
@@ -457,6 +467,49 @@ void ZigbeeCoordinator::rememberShortIeee(uint16_t shortAddr, const uint8_t ieee
     slot->occupied = true;
 }
 
+bool ZigbeeCoordinator::fillIeeeFromNeighbor(uint16_t shortAddr, uint8_t ieee[8]) const {
+    if (ieee == nullptr || shortAddr == 0 || shortAddr == 0xFFFF) {
+        return false;
+    }
+    esp_zb_nwk_info_iterator_t iterator = ESP_ZB_NWK_INFO_ITERATOR_INIT;
+    esp_zb_nwk_neighbor_info_t neighbor{};
+    while (esp_zb_nwk_get_next_neighbor(&iterator, &neighbor) == ESP_OK) {
+        if (neighbor.short_addr != shortAddr || isZeroIeee(neighbor.ieee_addr)) {
+            continue;
+        }
+        memcpy(ieee, neighbor.ieee_addr, 8);
+        return true;
+    }
+    return false;
+}
+
+bool ZigbeeCoordinator::fillIeeeFromUniqueUnresolved(uint8_t ieee[8]) {
+    if (ieee == nullptr || registeredMap == nullptr) {
+        return false;
+    }
+    const DeviceTopicEntry *orphan = nullptr;
+    int orphanCount = 0;
+    int slotIndex = registeredMap->nextUsedIndex(0);
+    while (slotIndex >= 0) {
+        DeviceTopicEntry *entry = registeredMap->slotAt(slotIndex);
+        if (entry != nullptr && entry->used && !isZeroIeee(entry->ieee)) {
+            const uint16_t mappedShort = esp_zb_address_short_by_ieee(entry->ieee);
+            BoundZigbeeDevice *known = findByIeee(entry->ieee);
+            const bool hasBoundShort = known != nullptr && known->shortAddr != 0 && known->shortAddr != 0xFFFF;
+            if ((mappedShort == 0 || mappedShort == 0xFFFF) && !hasBoundShort) {
+                orphan = entry;
+                orphanCount++;
+            }
+        }
+        slotIndex = registeredMap->nextUsedIndex(slotIndex + 1);
+    }
+    if (orphanCount != 1 || orphan == nullptr) {
+        return false;
+    }
+    memcpy(ieee, orphan->ieee, 8);
+    return true;
+}
+
 void ZigbeeCoordinator::resolveIeeeFromSource(esp_zb_zcl_addr_t source, uint8_t ieee[8], uint16_t *shortAddr) {
     memset(ieee, 0, 8);
     *shortAddr = 0;
@@ -518,6 +571,13 @@ void ZigbeeCoordinator::resolveIeeeFromSource(esp_zb_zcl_addr_t source, uint8_t 
                     return;
                 }
             }
+        }
+        if (fillIeeeFromNeighbor(*shortAddr, ieee)) {
+            rememberShortIeee(*shortAddr, ieee, 0);
+            return;
+        }
+        if (fillIeeeFromUniqueUnresolved(ieee)) {
+            rememberShortIeee(*shortAddr, ieee, 0);
         }
     }
 }

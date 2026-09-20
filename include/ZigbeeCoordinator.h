@@ -156,6 +156,8 @@ private:
     void refreshRegisteredShorts();
     void resolveIeeeFromSource(esp_zb_zcl_addr_t source, uint8_t ieee[8], uint16_t *shortAddr);
     void rememberShortIeee(uint16_t shortAddr, const uint8_t ieee[8], uint8_t endpoint);
+    bool fillIeeeFromNeighbor(uint16_t shortAddr, uint8_t ieee[8]) const;
+    bool fillIeeeFromUniqueUnresolved(uint8_t ieee[8]);
     void adoptReportIdentity(const uint8_t ieee[8], uint16_t shortAddr, uint8_t endpoint);
     void offerPairingIfNeeded(const uint8_t ieee[8]);
     bool migrateRegisteredIeee(const uint8_t previousIeee[8], const uint8_t nextIeee[8]);
