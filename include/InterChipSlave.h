@@ -17,6 +17,12 @@ public:
         uint8_t dataType,
         uint32_t attributeValue
     );
+    using ReadAttrFn = void (*)(
+        const uint8_t ieee[8],
+        uint8_t endpoint,
+        uint16_t clusterId,
+        uint16_t attributeId
+    );
     using DeviceSyncFn = void (*)(uint8_t flags, const DeviceTopicEntry *entry);
     using DevicesFileFn = String (*)();
 
@@ -43,6 +49,7 @@ public:
     void setPermitJoinHandler(PermitJoinFn handler);
     void setOnOffHandler(OnOffFn handler);
     void setWriteAttrHandler(WriteAttrFn handler);
+    void setReadAttrHandler(ReadAttrFn handler);
     void setDeviceSyncHandler(DeviceSyncFn handler);
     void setDeviceMapSource(DeviceTopicMap *deviceMap);
     void applyHostTime(uint32_t unixSec);
@@ -64,7 +71,8 @@ private:
 
     enum class DeferredDeviceKind : uint8_t {
         OnOff = 0,
-        WriteAttr = 1
+        WriteAttr = 1,
+        ReadAttr = 2
     };
 
     struct DeferredDeviceCommand {
@@ -89,6 +97,7 @@ private:
     PermitJoinFn permitJoinHandler = nullptr;
     OnOffFn onOffHandler = nullptr;
     WriteAttrFn writeAttrHandler = nullptr;
+    ReadAttrFn readAttrHandler = nullptr;
     DeviceSyncFn deviceSyncHandler = nullptr;
     DeviceTopicMap *deviceMapSource = nullptr;
     DevicesFileFn devicesFileSource = nullptr;
@@ -138,6 +147,12 @@ private:
         uint16_t attributeId,
         uint8_t dataType,
         uint32_t attributeValue
+    );
+    void stashDeferredReadAttr(
+        const uint8_t ieee[8],
+        uint8_t endpoint,
+        uint16_t clusterId,
+        uint16_t attributeId
     );
 };
 

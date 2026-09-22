@@ -645,6 +645,10 @@ String DeviceTopicMap::listJson(OnlineFn isOnline) {
 }
 
 String DeviceTopicMap::listJson(OnlineFn isOnline, LastRssiFn lastRssi) {
+    return listJson(isOnline, lastRssi, nullptr);
+}
+
+String DeviceTopicMap::listJson(OnlineFn isOnline, LastRssiFn lastRssi, ListTelemetryFn telemetry) {
     String json = "[";
     bool first = true;
     if (slots == nullptr) {
@@ -687,6 +691,9 @@ String DeviceTopicMap::listJson(OnlineFn isOnline, LastRssiFn lastRssi) {
                 json += ",\"rssi\":";
                 json += String((int)rssiDbm);
             }
+        }
+        if (telemetry != nullptr) {
+            telemetry(entry->ieee, json);
         }
         json += "}";
     }

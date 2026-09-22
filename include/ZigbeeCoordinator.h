@@ -21,6 +21,9 @@ struct BoundZigbeeDevice {
     unsigned long typeProbeDeadlineMs;
     bool occupied;
     bool pairingOffered;
+    bool hasPowerConfig;
+    uint8_t knownEndpointCount;
+    uint8_t knownEndpoints[DEVICE_CHANNEL_COUNT_MAX];
 };
 
 class ZigbeeCoordinator {
@@ -54,6 +57,12 @@ public:
         uint16_t attributeId,
         uint8_t dataType,
         uint32_t attributeValue
+    );
+    bool readAttribute(
+        const uint8_t ieee[8],
+        uint8_t endpoint,
+        uint16_t clusterId,
+        uint16_t attributeId
     );
     BoundZigbeeDevice *findByIeee(const uint8_t ieee[8]);
     BoundZigbeeDevice *findByShortAddr(uint16_t shortAddr);
@@ -125,7 +134,8 @@ private:
     enum class RadioCommandKind : uint8_t {
         None = 0,
         OnOff = 1,
-        WriteAttr = 2
+        WriteAttr = 2,
+        ReadAttr = 3
     };
 
     struct DestCommandSlot {
@@ -165,6 +175,7 @@ private:
     unsigned long pairingLedToggleMs = 0;
     bool pairingLedOn = false;
     bool started = false;
+    bool statusRefreshStarted = false;
     DestCommandSlot destFlights[kMaxDestFlights]{};
     DescriptorProbe descriptorProbes[kMaxDescriptorProbes]{};
 
@@ -224,6 +235,12 @@ private:
         uint8_t dataType,
         uint32_t attributeValue
     );
+    void stashNextReadAttr(DestCommandSlot *slot, uint16_t clusterId, uint16_t attributeId);
+    bool transmitReadAttr(DestCommandSlot *slot, uint16_t clusterId, uint16_t attributeId);
+    void addKnownEndpoint(BoundZigbeeDevice *slot, uint8_t endpoint);
+    void maybeStartStatusRefresh();
+    void enqueueRegisteredStatusReads();
+    void enqueueTypeStatusRead(const DeviceTopicEntry *entry, uint8_t endpoint);
     void sendNextIfReady(DestCommandSlot *slot);
     void serviceCommandFlights();
     void markInFlight(DestCommandSlot *slot, uint16_t clusterId);

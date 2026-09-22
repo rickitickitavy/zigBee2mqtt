@@ -119,6 +119,10 @@ void InterChipSlave::setWriteAttrHandler(WriteAttrFn handler) {
     writeAttrHandler = handler;
 }
 
+void InterChipSlave::setReadAttrHandler(ReadAttrFn handler) {
+    readAttrHandler = handler;
+}
+
 void InterChipSlave::setDeviceSyncHandler(DeviceSyncFn handler) {
     deviceSyncHandler = handler;
 }
@@ -496,6 +500,20 @@ void InterChipSlave::stashDeferredWriteAttr(
     slot->attributeValue = attributeValue;
 }
 
+void InterChipSlave::stashDeferredReadAttr(
+    const uint8_t ieee[8],
+    uint8_t endpoint,
+    uint16_t clusterId,
+    uint16_t attributeId
+) {
+    DeferredDeviceCommand *slot = allocDeferredDeviceCommand(ieee, endpoint);
+    slot->kind = DeferredDeviceKind::ReadAttr;
+    slot->clusterId = clusterId;
+    slot->attributeId = attributeId;
+    slot->dataType = 0;
+    slot->attributeValue = 0;
+}
+
 void InterChipSlave::handleHostFrame(const SpiFrame &frame) {
     if (frame.cmd == SpiCmdFirmwareOta) {
         if (firmwareOtaResultValid && frame.seq == firmwareOtaLastSeq && firmwareOtaLastOk) {
@@ -581,6 +599,19 @@ void InterChipSlave::handleHostFrame(const SpiFrame &frame) {
             return;
         }
         stashDeferredWriteAttr(ieee, endpoint, clusterId, attributeId, dataType, attributeValue);
+        uint8_t ok = 1;
+        enqueueEvent(SpiEvtCmdResult, &ok, 1);
+        return;
+    }
+    if (frame.cmd == SpiCmdZclReadAttr) {
+        uint8_t ieee[8];
+        uint8_t endpoint = 255;
+        uint16_t clusterId = 0;
+        uint16_t attributeId = 0;
+        if (!spiUnpackZclReadAttr(frame.payload, frame.length, ieee, &endpoint, &clusterId, &attributeId)) {
+            return;
+        }
+        stashDeferredReadAttr(ieee, endpoint, clusterId, attributeId);
         uint8_t ok = 1;
         enqueueEvent(SpiEvtCmdResult, &ok, 1);
         return;
@@ -681,6 +712,8 @@ void InterChipSlave::applyDeferredRadioCommands() {
                 slot->dataType,
                 slot->attributeValue
             );
+        } else if (slot->kind == DeferredDeviceKind::ReadAttr && readAttrHandler != nullptr) {
+            readAttrHandler(slot->ieee, slot->endpoint, slot->clusterId, slot->attributeId);
         }
         slot->occupied = false;
     }

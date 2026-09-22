@@ -52,10 +52,12 @@ public:
     bool parseIeee(const char *text, uint8_t ieee[8]);
     using OnlineFn = bool (*)(const uint8_t ieee[8]);
     using LastRssiFn = bool (*)(const uint8_t ieee[8], int8_t *rssiDbm);
+    using ListTelemetryFn = void (*)(const uint8_t ieee[8], String &json);
 
     String listJson();
     String listJson(OnlineFn isOnline);
     String listJson(OnlineFn isOnline, LastRssiFn lastRssi);
+    String listJson(OnlineFn isOnline, LastRssiFn lastRssi, ListTelemetryFn telemetry);
     String listStoreJson();
     void replaceFromJson(const String &json);
     bool loadFromFile(const char *path);

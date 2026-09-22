@@ -28,6 +28,8 @@ constexpr uint16_t kZigbeeClusterIasWd = 0x0502;
 constexpr uint16_t kZigbeeClusterMetering = 0x0702;
 constexpr uint16_t kZigbeeClusterElectricalMeasurement = 0x0B04;
 constexpr uint16_t kZigbeeAttrBatteryPercentageRemaining = 0x0021;
+constexpr uint16_t kZigbeeAttrIasZoneStatus = 0x0002;
+constexpr uint16_t kZigbeeAttrCurrentPositionLiftPercentage = 0x0008;
 constexpr uint8_t kZigbeeBatteryPercentageRemainingMax = 200;
 
 inline const char *zigbeeClusterName(uint16_t clusterId) {

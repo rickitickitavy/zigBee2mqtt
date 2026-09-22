@@ -53,6 +53,12 @@ static bool slaveZigbeeStarted = false;
 static bool slaveZigbeeStarting = false;
 static bool persistHostDeviceList();
 static bool hostPreparationLatched = false;
+static void applyRegisteredDeviceCommand(
+    DeviceTopicEntry *entry,
+    const char *payload,
+    uint8_t topicEndpoint
+);
+static int applyManualDeviceCommand(const char *ieeeText, const char *payload, int channel);
 
 static BoardRole readBoardRole() {
     pinMode(PIN_BOARD_ROLE, INPUT);
@@ -118,6 +124,81 @@ static void applyDeviceConfigPayload(const char *payload) {
     LOGGER.info("Configured topics for " + ieeeText);
 }
 
+static void applyRegisteredDeviceCommand(
+    DeviceTopicEntry *entry,
+    const char *payload,
+    uint8_t topicEndpoint
+) {
+    if (entry == nullptr) {
+        return;
+    }
+    String action = String(payload != nullptr ? payload : "");
+    uint8_t commandEndpoint = topicEndpoint;
+    if (DeviceTopicMap::usesPayloadParse(entry->channelCount)) {
+        uint8_t parsedEndpoint = 0;
+        String parsedAction;
+        if (!DeviceTopicMap::parseChannelPayload(payload, &parsedEndpoint, &parsedAction)) {
+            LOGGER.warning("MQTT command ignored; expected ch-<ep>##ON");
+            return;
+        }
+        commandEndpoint = parsedEndpoint;
+        action = parsedAction;
+    } else if (DeviceTopicMap::usesTopicSuffix(entry->channelCount) && commandEndpoint == 0) {
+        commandEndpoint = 1;
+    }
+    LOGGER.info(String("MQTT recv data=") + (payload != nullptr ? payload : ""));
+    if (entry->fullControl) {
+        DeviceTopicMap::ZclWriteFields fields;
+        if (DeviceTopicMap::parseFullControlBody(action.c_str(), commandEndpoint, &fields) && fields.parsedAny) {
+            ZIGBEE_SPI_PROXY.writeAttribute(
+                entry->ieee,
+                fields.endpoint,
+                fields.clusterId,
+                fields.attributeId,
+                fields.dataType,
+                fields.attributeValue
+            );
+            return;
+        }
+    }
+    ZIGBEE_SPI_PROXY.controlOnOff(entry->ieee, action.c_str(), commandEndpoint);
+}
+
+static int applyManualDeviceCommand(const char *ieeeText, const char *payload, int channel) {
+    if (topicMap == nullptr) {
+        return 400;
+    }
+    uint8_t ieee[8];
+    if (ieeeText == nullptr || !topicMap->parseIeee(ieeeText, ieee)) {
+        return 400;
+    }
+    DeviceTopicEntry *entry = topicMap->findByIeee(ieee);
+    if (entry == nullptr) {
+        return 404;
+    }
+    String body = String(payload != nullptr ? payload : "");
+    body.trim();
+    if (body.length() == 0) {
+        return 400;
+    }
+    uint8_t topicEndpoint = 0;
+    String wrapped;
+    const char *applyPayload = body.c_str();
+    if (DeviceTopicMap::usesPayloadParse(entry->channelCount)) {
+        const uint8_t parsedEndpoint = channel > 0 ? (uint8_t)channel : 1;
+        wrapped = "ch-";
+        wrapped += String((unsigned)parsedEndpoint);
+        wrapped += "##";
+        wrapped += body;
+        applyPayload = wrapped.c_str();
+        topicEndpoint = 0;
+    } else if (DeviceTopicMap::usesTopicSuffix(entry->channelCount)) {
+        topicEndpoint = channel > 0 ? (uint8_t)channel : 1;
+    }
+    applyRegisteredDeviceCommand(entry, applyPayload, topicEndpoint);
+    return 200;
+}
+
 static void onMqttLogicalMessage(const char *topic, const char *payload) {
     if (strcmp(topic, mqttClient->permitJoinTopic().c_str()) == 0) {
         String body = String(payload);
@@ -153,36 +234,7 @@ static void onMqttLogicalMessage(const char *topic, const char *payload) {
     if (entry == nullptr) {
         return;
     }
-    String action = String(payload);
-    uint8_t commandEndpoint = topicEndpoint;
-    if (DeviceTopicMap::usesPayloadParse(entry->channelCount)) {
-        uint8_t parsedEndpoint = 0;
-        String parsedAction;
-        if (!DeviceTopicMap::parseChannelPayload(payload, &parsedEndpoint, &parsedAction)) {
-            LOGGER.warning("MQTT command ignored; expected ch-<ep>##ON");
-            return;
-        }
-        commandEndpoint = parsedEndpoint;
-        action = parsedAction;
-    } else if (DeviceTopicMap::usesTopicSuffix(entry->channelCount) && commandEndpoint == 0) {
-        commandEndpoint = 1;
-    }
-    LOGGER.info(String("MQTT recv topic=") + topic + " data=" + payload);
-    if (entry->fullControl) {
-        DeviceTopicMap::ZclWriteFields fields;
-        if (DeviceTopicMap::parseFullControlBody(action.c_str(), commandEndpoint, &fields) && fields.parsedAny) {
-            ZIGBEE_SPI_PROXY.writeAttribute(
-                entry->ieee,
-                fields.endpoint,
-                fields.clusterId,
-                fields.attributeId,
-                fields.dataType,
-                fields.attributeValue
-            );
-            return;
-        }
-    }
-    ZIGBEE_SPI_PROXY.controlOnOff(entry->ieee, action.c_str(), commandEndpoint);
+    applyRegisteredDeviceCommand(entry, payload, topicEndpoint);
 }
 
 static void onLightState(const char *message, const uint8_t ieee[8], uint8_t endpoint, uint16_t shortAddr) {
@@ -730,6 +782,18 @@ static void onSlaveWriteAttr(
     zigbeeCoordinator->writeAttribute(ieee, endpoint, clusterId, attributeId, dataType, attributeValue);
 }
 
+static void onSlaveReadAttr(
+    const uint8_t ieee[8],
+    uint8_t endpoint,
+    uint16_t clusterId,
+    uint16_t attributeId
+) {
+    if (zigbeeCoordinator == nullptr) {
+        return;
+    }
+    zigbeeCoordinator->readAttribute(ieee, endpoint, clusterId, attributeId);
+}
+
 static void setupHost() {
     INTER_CHIP_HOST.resetSlaveSynchronous();
     STATUS_RGB.setBootHeld(true);
@@ -774,6 +838,27 @@ static void setupHost() {
             )
             || packedWrite[8] != 4) {
             LOGGER.error("Write-attr pack fixture failed");
+        }
+        uint8_t packedRead[SPI_ZCL_READ_ATTR_LEN];
+        uint8_t unpackedIeee[8];
+        uint8_t unpackedEndpoint = 0;
+        uint16_t unpackedCluster = 0;
+        uint16_t unpackedAttribute = 0;
+        if (!spiPackZclReadAttr(packedRead, sizeof(packedRead), fixtureIeee, 2, 0x0006, 0x0000)
+            || packedRead[8] != 2
+            || !spiUnpackZclReadAttr(
+                packedRead,
+                SPI_ZCL_READ_ATTR_LEN,
+                unpackedIeee,
+                &unpackedEndpoint,
+                &unpackedCluster,
+                &unpackedAttribute
+            )
+            || unpackedEndpoint != 2 || unpackedCluster != 0x0006 || unpackedAttribute != 0x0000
+            || memcmp(unpackedIeee, fixtureIeee, 8) != 0) {
+            LOGGER.error("Read-attr pack fixture failed");
+        } else {
+            LOGGER.info("Read-attr pack fixture ok");
         }
         uint8_t otaPacked[SPI_MAX_PAYLOAD];
         uint8_t otaSize[4] = {0x00, 0x10, 0x00, 0x00};
@@ -843,6 +928,10 @@ static void setupHost() {
         return ZIGBEE_SPI_PROXY.isOnline(ieee);
     });
     webConsole->setDeviceRssiHandler(hostLastDeviceRssi);
+    webConsole->setDeviceTelemetryHandler([](const uint8_t ieee[8], String &json) {
+        ZIGBEE_SPI_PROXY.appendListTelemetry(ieee, json);
+    });
+    webConsole->setDeviceCommandHandler(applyManualDeviceCommand);
     webConsole->setGatewayStatusHandler(hostGatewayStatusJson);
     webConsole->setDevicesFileHandler([]() {
         ZIGBEE_SPI_PROXY.requestDevicesFile();
@@ -885,6 +974,7 @@ static void setupSlave() {
     INTER_CHIP_SLAVE.setPermitJoinHandler(onSlavePermitJoin);
     INTER_CHIP_SLAVE.setOnOffHandler(onSlaveOnOff);
     INTER_CHIP_SLAVE.setWriteAttrHandler(onSlaveWriteAttr);
+    INTER_CHIP_SLAVE.setReadAttrHandler(onSlaveReadAttr);
     INTER_CHIP_SLAVE.setDeviceSyncHandler(onSlaveDeviceSync);
     deviceStore = new DeviceStore();
     deviceStore->begin();

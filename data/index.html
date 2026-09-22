@@ -1188,11 +1188,15 @@
             var hasSelection = selectedRegisteredIeee.length > 0 && findRegisteredDevice(selectedRegisteredIeee) != null;
             var editButton = document.getElementById("deviceEditBtn");
             var deleteButton = document.getElementById("deviceDeleteBtn");
+            var commandButton = document.getElementById("deviceManualCommandBtn");
             if (editButton) {
                 editButton.disabled = !hasSelection;
             }
             if (deleteButton) {
                 deleteButton.disabled = !hasSelection;
+            }
+            if (commandButton) {
+                commandButton.disabled = !hasSelection;
             }
         }
 
@@ -1211,6 +1215,255 @@
                 }
             }
             updateDeviceActionButtons();
+        }
+
+        var manualCommandIeee = "";
+        var lastManualStatusKey = "";
+
+        function statusEntriesForDevice(device) {
+            var entries = [];
+            var raw = device && device.status;
+            if (!raw || !raw.length) {
+                return entries;
+            }
+            var index;
+            for (index = 0; index < raw.length; index++) {
+                entries.push({
+                    ep: raw[index].ep,
+                    state: raw[index].state || ""
+                });
+            }
+            entries.sort(function (left, right) {
+                return (left.ep || 0) - (right.ep || 0);
+            });
+            return entries;
+        }
+
+        function findStatusState(entries, endpoint) {
+            var index;
+            for (index = 0; index < entries.length; index++) {
+                if (entries[index].ep == endpoint) {
+                    return entries[index].state;
+                }
+            }
+            return "";
+        }
+
+        function appendOnOffCircle(cell, state) {
+            var circle = document.createElement("span");
+            var isOn = String(state).toUpperCase() === "ON";
+            circle.className = isOn ? "device-channel-dot is-on" : "device-channel-dot";
+            if (state) {
+                circle.title = state;
+            }
+            cell.appendChild(circle);
+        }
+
+        function fillDeviceStatusCell(cell, device) {
+            var entries = statusEntriesForDevice(device);
+            var typeId = device.type || "unknown";
+            var channels = device.channels;
+            if (channels === undefined || channels === null || channels === "") {
+                channels = 1;
+            }
+            if (typeId == "onOff") {
+                if (channels == 0) {
+                    var parseIndex;
+                    for (parseIndex = 0; parseIndex < entries.length; parseIndex++) {
+                        appendOnOffCircle(cell, entries[parseIndex].state);
+                    }
+                    return;
+                }
+                var channelCount = channels >= 2 ? channels : 1;
+                var channel;
+                for (channel = 1; channel <= channelCount; channel++) {
+                    appendOnOffCircle(cell, findStatusState(entries, channel));
+                }
+                return;
+            }
+            var textParts = [];
+            var textIndex;
+            for (textIndex = 0; textIndex < entries.length; textIndex++) {
+                if (entries[textIndex].state) {
+                    textParts.push(entries[textIndex].state);
+                }
+            }
+            cell.textContent = textParts.join(" ");
+        }
+
+        function appendManualAnswers(device) {
+            var answers = document.getElementById("manualCommandAnswers");
+            if (!answers || !device || (device.ieee || "") != manualCommandIeee) {
+                return;
+            }
+            var key = JSON.stringify({
+                battery: device.battery,
+                status: device.status || []
+            });
+            if (key == lastManualStatusKey) {
+                return;
+            }
+            lastManualStatusKey = key;
+            var line = "";
+            var entries = statusEntriesForDevice(device);
+            var index;
+            for (index = 0; index < entries.length; index++) {
+                if (line.length) {
+                    line += " ";
+                }
+                line += "ep" + entries[index].ep + "=" + entries[index].state;
+            }
+            if (device.battery !== undefined && device.battery !== null && device.battery !== "") {
+                if (line.length) {
+                    line += " ";
+                }
+                line += "battery=" + device.battery;
+            }
+            if (!line.length) {
+                return;
+            }
+            answers.value = answers.value ? (answers.value + "\n" + line) : line;
+            answers.scrollTop = answers.scrollHeight;
+        }
+
+        function closeManualCommandDialog() {
+            var dialog = document.getElementById("manualCommandDialog");
+            if (dialog) {
+                dialog.hidden = true;
+            }
+            manualCommandIeee = "";
+            lastManualStatusKey = "";
+        }
+
+        function openManualCommandDialog() {
+            var device = findRegisteredDevice(selectedRegisteredIeee);
+            var dialog = document.getElementById("manualCommandDialog");
+            var answers = document.getElementById("manualCommandAnswers");
+            var input = document.getElementById("manualCommandInput");
+            var channelField = document.getElementById("manualCommandChannelField");
+            var channelSelect = document.getElementById("manualCommandChannel");
+            var errorLine = document.getElementById("manualCommandError");
+            if (!device || !dialog) {
+                return;
+            }
+            manualCommandIeee = device.ieee || "";
+            lastManualStatusKey = "";
+            if (answers) {
+                answers.value = "";
+            }
+            if (input) {
+                input.value = "";
+            }
+            if (errorLine) {
+                errorLine.hidden = true;
+                errorLine.textContent = "";
+            }
+            var channels = device.channels;
+            if (channels === undefined || channels === null || channels === "") {
+                channels = 1;
+            }
+            var multiChannel = channels == 0 || channels >= 2;
+            if (channelField) {
+                channelField.hidden = !multiChannel;
+            }
+            if (channelSelect) {
+                channelSelect.innerHTML = "";
+                if (channels == 0) {
+                    var parseOption = document.createElement("option");
+                    parseOption.value = "1";
+                    parseOption.textContent = "1";
+                    channelSelect.appendChild(parseOption);
+                    var known = statusEntriesForDevice(device);
+                    var knownIndex;
+                    for (knownIndex = 0; knownIndex < known.length; knownIndex++) {
+                        if (String(known[knownIndex].ep) == "1") {
+                            continue;
+                        }
+                        var extraOption = document.createElement("option");
+                        extraOption.value = String(known[knownIndex].ep);
+                        extraOption.textContent = String(known[knownIndex].ep);
+                        channelSelect.appendChild(extraOption);
+                    }
+                    if (channelSelect.options.length == 1) {
+                        var fallback;
+                        for (fallback = 2; fallback <= 8; fallback++) {
+                            var fallbackOption = document.createElement("option");
+                            fallbackOption.value = String(fallback);
+                            fallbackOption.textContent = String(fallback);
+                            channelSelect.appendChild(fallbackOption);
+                        }
+                    }
+                } else {
+                    var channel;
+                    for (channel = 1; channel <= channels; channel++) {
+                        var option = document.createElement("option");
+                        option.value = String(channel);
+                        option.textContent = String(channel);
+                        channelSelect.appendChild(option);
+                    }
+                }
+                channelSelect.value = "1";
+            }
+            dialog.hidden = false;
+            appendManualAnswers(device);
+            if (input) {
+                input.focus();
+            }
+        }
+
+        function sendManualCommand() {
+            var device = findRegisteredDevice(manualCommandIeee);
+            var input = document.getElementById("manualCommandInput");
+            var answers = document.getElementById("manualCommandAnswers");
+            var channelSelect = document.getElementById("manualCommandChannel");
+            var errorLine = document.getElementById("manualCommandError");
+            if (!device || !input) {
+                return;
+            }
+            var payload = String(input.value || "").replace(/^\s+|\s+$/g, "");
+            if (!payload.length) {
+                return;
+            }
+            var body = { ieee: device.ieee, payload: payload };
+            var channels = device.channels;
+            if (channels === undefined || channels === null || channels === "") {
+                channels = 1;
+            }
+            if ((channels == 0 || channels >= 2) && channelSelect && channelSelect.value) {
+                body.channel = parseInt(channelSelect.value, 10);
+            }
+            if (answers) {
+                answers.value = answers.value ? (answers.value + "\n> " + payload) : ("> " + payload);
+                answers.scrollTop = answers.scrollHeight;
+            }
+            input.value = "";
+            if (errorLine) {
+                errorLine.hidden = true;
+            }
+            fetch("/api/devices/command", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body)
+            }).then(function (response) {
+                return response.text().then(function (text) {
+                    if (!response.ok) {
+                        throw new Error(text || ("HTTP " + response.status));
+                    }
+                });
+            }).catch(function (error) {
+                if (errorLine) {
+                    errorLine.hidden = false;
+                    errorLine.textContent = error && error.message ? error.message : "Send failed";
+                }
+            });
+        }
+
+        function onManualCommandInputKeyDown(event) {
+            if (event.key !== "Enter") {
+                return;
+            }
+            event.preventDefault();
+            sendManualCommand();
         }
 
         function renderDeviceTable(rows) {
@@ -1232,9 +1485,6 @@
                 }
                 row.onclick = function () {
                     selectRegisteredIeee(this.getAttribute("data-ieee") || "");
-                };
-                row.ondblclick = function () {
-                    selectRegisteredIeee(this.getAttribute("data-ieee") || "");
                     openEditSelectedDevice();
                 };
                 var onlineCell = document.createElement("td");
@@ -1243,12 +1493,19 @@
                 onlineDot.className = rows[index].online ? "device-online-dot is-online" : "device-online-dot";
                 onlineDot.title = rows[index].online ? "Online" : "Offline";
                 onlineCell.appendChild(onlineDot);
-                var ieeeCell = document.createElement("td");
-                ieeeCell.textContent = ieee;
                 var nameCell = document.createElement("td");
                 nameCell.textContent = rows[index].name || rows[index].friendlyName || "";
                 var typeCell = document.createElement("td");
                 typeCell.textContent = zigbeeDeviceTypeLabel(rows[index].type);
+                var statusCell = document.createElement("td");
+                statusCell.className = "device-status-cell";
+                fillDeviceStatusCell(statusCell, rows[index]);
+                var batteryCell = document.createElement("td");
+                if (rows[index].battery === undefined || rows[index].battery === null || rows[index].battery === "") {
+                    batteryCell.textContent = "N/A";
+                } else {
+                    batteryCell.textContent = String(rows[index].battery);
+                }
                 var rssiCell = document.createElement("td");
                 if (rows[index].rssi === undefined || rows[index].rssi === null || rows[index].rssi === "") {
                     rssiCell.textContent = "";
@@ -1256,9 +1513,10 @@
                     rssiCell.textContent = String(rows[index].rssi) + " dBm";
                 }
                 row.appendChild(onlineCell);
-                row.appendChild(ieeeCell);
                 row.appendChild(nameCell);
                 row.appendChild(typeCell);
+                row.appendChild(statusCell);
+                row.appendChild(batteryCell);
                 row.appendChild(rssiCell);
                 body.appendChild(row);
             }
@@ -1306,7 +1564,17 @@
                 if (saveError) {
                     saveError.hidden = true;
                 }
-                renderDeviceTable(Array.isArray(rows) ? rows : []);
+                var loadedRows = Array.isArray(rows) ? rows : [];
+                renderDeviceTable(loadedRows);
+                if (manualCommandIeee) {
+                    var pollIndex;
+                    for (pollIndex = 0; pollIndex < loadedRows.length; pollIndex++) {
+                        if ((loadedRows[pollIndex].ieee || "") == manualCommandIeee) {
+                            appendManualAnswers(loadedRows[pollIndex]);
+                            break;
+                        }
+                    }
+                }
             }).catch(function () {
                 if (saveError) {
                     saveError.hidden = false;
@@ -1772,6 +2040,10 @@
                 closeDeleteConfirmDialog();
                 return true;
             }
+            if (dialogId === "manualCommandDialog") {
+                closeManualCommandDialog();
+                return true;
+            }
             if (dialogId === "firmwareUpdateDialog") {
                 if (!firmwareUpdateCanClose) {
                     return false;
@@ -1797,6 +2069,10 @@
             setupPasswordToggle("mqttPassword", "mqttPasswordToggle");
             document.getElementById("wifiMode").onchange = updateApIpVisibility;
             document.addEventListener("keydown", onDocumentKeyDown);
+            var manualInput = document.getElementById("manualCommandInput");
+            if (manualInput) {
+                manualInput.addEventListener("keydown", onManualCommandInputKeyDown);
+            }
             document.getElementById("parameterDialog").addEventListener("click", onParameterDialogOverlayClick);
             document.getElementById("parameterUnsavedDialog").addEventListener("click", onParameterUnsavedOverlayClick);
             loadWifi();
@@ -1985,9 +2261,10 @@
                     <thead>
                         <tr>
                             <th class="device-online-cell" aria-label="Online"></th>
-                            <th>IEEE</th>
                             <th>Name</th>
                             <th>Type</th>
+                            <th>Status</th>
+                            <th>Battery</th>
                             <th>RSSI</th>
                         </tr>
                     </thead>
@@ -1999,6 +2276,7 @@
                     <button type="button" class="btn btn-primary" onclick="openSearchDialog()">Add device</button>
                     <button type="button" id="deviceEditBtn" class="btn btn-secondary" onclick="openEditSelectedDevice()" disabled>Edit</button>
                     <button type="button" id="deviceDeleteBtn" class="btn btn-secondary" onclick="openDeleteConfirmDialog()" disabled>Delete</button>
+                    <button type="button" id="deviceManualCommandBtn" class="btn btn-secondary" onclick="openManualCommandDialog()" disabled>Manual command</button>
                     <button type="button" class="btn btn-secondary" onclick="exportDevicesStore()">Export</button>
                     <button type="button" class="btn btn-secondary" onclick="openDevicesRestoreDialog()">Restore</button>
                 </div>
@@ -2125,6 +2403,25 @@
                 <div class="dialog-actions">
                     <button type="button" class="btn btn-primary" onclick="confirmDeleteSelectedDevice()">Delete</button>
                     <button type="button" class="btn btn-secondary" onclick="closeDeleteConfirmDialog()">Cancel</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="manualCommandDialog" class="dialog-overlay" hidden>
+            <div class="dialog-panel" role="dialog" aria-label="Manual command">
+                <h3 class="upload-title">Manual command</h3>
+                <p id="manualCommandError" class="save-error" hidden></p>
+                <textarea id="manualCommandAnswers" class="log-viewer" readonly></textarea>
+                <div id="manualCommandChannelField" class="field" hidden>
+                    <label for="manualCommandChannel">Channel</label>
+                    <select id="manualCommandChannel"></select>
+                </div>
+                <div class="field">
+                    <label for="manualCommandInput">Command</label>
+                    <input id="manualCommandInput" type="text" autocomplete="off">
+                </div>
+                <div class="dialog-actions">
+                    <button type="button" class="btn btn-secondary" onclick="closeManualCommandDialog()">Close</button>
                 </div>
             </div>
         </div>

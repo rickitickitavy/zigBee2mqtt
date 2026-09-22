@@ -83,6 +83,17 @@ void WebConsole::begin() {
     );
 
     server.on("/api/devices/store", HTTP_GET, [this](AsyncWebServerRequest *request) { handleDevicesStoreGet(request); });
+    server.on(
+        "/api/devices/command",
+        HTTP_POST,
+        [this](AsyncWebServerRequest *request) { handleDevicesCommandPost(request); },
+        nullptr,
+        [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+            (void)request;
+            (void)total;
+            appendRequestBody(data, len, index);
+        }
+    );
     server.on("/api/devices/found", HTTP_GET, [this](AsyncWebServerRequest *request) { handleDevicesFoundGet(request); });
     server.on(
         "/api/devices/search/stop",
@@ -418,6 +429,14 @@ void WebConsole::setGatewayStatusHandler(WebConsole::GatewayStatusFn handler) {
     gatewayStatusJson = handler;
 }
 
+void WebConsole::setDeviceTelemetryHandler(WebConsole::DeviceTelemetryFn handler) {
+    appendDeviceTelemetry = handler;
+}
+
+void WebConsole::setDeviceCommandHandler(WebConsole::DeviceCommandFn handler) {
+    applyDeviceCommand = handler;
+}
+
 void WebConsole::setDevicesFileHandler(WebConsole::DevicesFileFn handler) {
     devicesFileJson = handler;
 }
@@ -470,7 +489,7 @@ void WebConsole::setDeviceServices(
 
 void WebConsole::handleDevicesGet(AsyncWebServerRequest *request) {
     DeviceTopicMap *deviceMap = settingsManager->deviceMap();
-    String json = deviceMap->listJson(isDeviceOnline, lastDeviceRssi);
+    String json = deviceMap->listJson(isDeviceOnline, lastDeviceRssi, appendDeviceTelemetry);
     AsyncWebServerResponse *response = request->beginResponse(200, "application/json", json);
     response->addHeader("Cache-Control", "no-store");
     request->send(response);
@@ -566,6 +585,38 @@ void WebConsole::handleDevicesDelete(AsyncWebServerRequest *request) {
         return;
     }
     request->send(200, "text/plain", "Deleted");
+}
+
+void WebConsole::handleDevicesCommandPost(AsyncWebServerRequest *request) {
+    if (applyDeviceCommand == nullptr) {
+        request->send(503, "text/plain", "Command path is not ready");
+        return;
+    }
+    String ieeeText;
+    String payload;
+    if (!extractJsonString(requestBody.c_str(), "ieee", ieeeText)) {
+        request->send(400, "text/plain", "Need ieee");
+        return;
+    }
+    extractJsonString(requestBody.c_str(), "payload", payload);
+    int channel = 0;
+    if (!extractJsonInt(requestBody.c_str(), "channel", channel)) {
+        channel = 0;
+    }
+    const int status = applyDeviceCommand(ieeeText.c_str(), payload.c_str(), channel);
+    if (status == 404) {
+        request->send(404, "text/plain", "Device not found");
+        return;
+    }
+    if (status == 400) {
+        request->send(400, "text/plain", "Need payload");
+        return;
+    }
+    if (status != 200) {
+        request->send(status, "text/plain", "Command failed");
+        return;
+    }
+    request->send(200, "text/plain", "Sent");
 }
 
 void WebConsole::handleDevicesFoundGet(AsyncWebServerRequest *request) {

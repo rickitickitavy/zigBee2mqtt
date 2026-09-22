@@ -1,7 +1,9 @@
 #include "ZigbeeSpiProxy.h"
 #include "InterChipHost.h"
+#include "JsonField.h"
 #include "Logger.h"
 
+#include <stdio.h>
 #include <string.h>
 
 ZigbeeSpiProxy ZIGBEE_SPI_PROXY;
@@ -21,12 +23,56 @@ bool ZigbeeSpiProxy::commandsAllowed() const {
 }
 
 ZigbeeSpiProxy::CachedDevice *ZigbeeSpiProxy::findByIeee(const uint8_t ieee[8]) {
+    return const_cast<CachedDevice *>(static_cast<const ZigbeeSpiProxy *>(this)->findByIeee(ieee));
+}
+
+const ZigbeeSpiProxy::CachedDevice *ZigbeeSpiProxy::findByIeee(const uint8_t ieee[8]) const {
+    if (ieee == nullptr) {
+        return nullptr;
+    }
     for (int i = 0; i < kMaxDevices; i++) {
         if (devices[i].occupied && memcmp(devices[i].ieee, ieee, 8) == 0) {
             return &devices[i];
         }
     }
     return nullptr;
+}
+
+void ZigbeeSpiProxy::noteReportTelemetry(CachedDevice *slot, uint8_t endpoint, const char *message) {
+    if (slot == nullptr || message == nullptr || message[0] == '\0') {
+        return;
+    }
+    unsigned parsedPercent = 0;
+    if (sscanf(message, "BATTERY %u", &parsedPercent) == 1) {
+        slot->hasBattery = true;
+        slot->batteryPercent = parsedPercent;
+        return;
+    }
+    if (!DeviceTopicMap::isUsableEndpoint(endpoint)) {
+        return;
+    }
+    CachedDevice::EndpointStatus *statusSlot = nullptr;
+    for (int i = 0; i < DEVICE_CHANNEL_COUNT_MAX; i++) {
+        if (slot->endpointStatus[i].used && slot->endpointStatus[i].endpoint == endpoint) {
+            statusSlot = &slot->endpointStatus[i];
+            break;
+        }
+    }
+    if (statusSlot == nullptr) {
+        for (int i = 0; i < DEVICE_CHANNEL_COUNT_MAX; i++) {
+            if (!slot->endpointStatus[i].used) {
+                statusSlot = &slot->endpointStatus[i];
+                statusSlot->used = true;
+                statusSlot->endpoint = endpoint;
+                break;
+            }
+        }
+    }
+    if (statusSlot == nullptr) {
+        return;
+    }
+    strncpy(statusSlot->state, message, sizeof(statusSlot->state) - 1);
+    statusSlot->state[sizeof(statusSlot->state) - 1] = '\0';
 }
 
 ZigbeeSpiProxy::CachedDevice *ZigbeeSpiProxy::allocSlot(const uint8_t ieee[8]) {
@@ -101,6 +147,23 @@ bool ZigbeeSpiProxy::writeAttribute(
         return false;
     }
     const bool queued = INTER_CHIP_HOST.tryEnqueue(SpiCmdZclWriteAttr, payload, SPI_ZCL_WRITE_ATTR_LEN);
+    if (queued) {
+        packetsTx++;
+    }
+    return queued;
+}
+
+bool ZigbeeSpiProxy::readAttribute(
+    const uint8_t ieee[8],
+    uint8_t endpoint,
+    uint16_t clusterId,
+    uint16_t attributeId
+) {
+    uint8_t payload[SPI_ZCL_READ_ATTR_LEN];
+    if (!spiPackZclReadAttr(payload, sizeof(payload), ieee, endpoint, clusterId, attributeId)) {
+        return false;
+    }
+    const bool queued = INTER_CHIP_HOST.tryEnqueue(SpiCmdZclReadAttr, payload, SPI_ZCL_READ_ATTR_LEN);
     if (queued) {
         packetsTx++;
     }
@@ -385,6 +448,7 @@ void ZigbeeSpiProxy::onSpiEvent(const SpiFrame &frame) {
             slot->lastSeenMs = millis();
             slot->lastRssiDbm = rssiDbm;
             slot->hasRssi = true;
+            noteReportTelemetry(slot, endpoint, message);
         }
         packetsRx++;
         if (lightStateHandler != nullptr) {
@@ -446,6 +510,61 @@ bool ZigbeeSpiProxy::lastRssiDbm(const uint8_t ieee[8], int8_t *rssiDbm) const {
         return true;
     }
     return false;
+}
+
+void ZigbeeSpiProxy::appendListTelemetry(const uint8_t ieee[8], String &json) const {
+    const CachedDevice *slot = findByIeee(ieee);
+    if (slot == nullptr) {
+        return;
+    }
+    if (slot->hasBattery) {
+        json += ",\"battery\":";
+        json += String((unsigned)slot->batteryPercent);
+    }
+    bool anyStatus = false;
+    for (int i = 0; i < DEVICE_CHANNEL_COUNT_MAX; i++) {
+        if (slot->endpointStatus[i].used) {
+            anyStatus = true;
+            break;
+        }
+    }
+    if (!anyStatus) {
+        return;
+    }
+    json += ",\"status\":[";
+    bool emitted[DEVICE_CHANNEL_COUNT_MAX];
+    memset(emitted, 0, sizeof(emitted));
+    bool first = true;
+    for (int pass = 0; pass < DEVICE_CHANNEL_COUNT_MAX; pass++) {
+        int bestIndex = -1;
+        for (int i = 0; i < DEVICE_CHANNEL_COUNT_MAX; i++) {
+            if (!slot->endpointStatus[i].used || emitted[i]) {
+                continue;
+            }
+            if (bestIndex < 0
+                || slot->endpointStatus[i].endpoint < slot->endpointStatus[bestIndex].endpoint) {
+                bestIndex = i;
+            }
+        }
+        if (bestIndex < 0) {
+            break;
+        }
+        emitted[bestIndex] = true;
+        if (!first) {
+            json += ",";
+        }
+        first = false;
+        json += "{\"ep\":";
+        json += String((unsigned)slot->endpointStatus[bestIndex].endpoint);
+        json += ",\"state\":\"";
+        appendJsonEscaped(
+            json,
+            slot->endpointStatus[bestIndex].state,
+            sizeof(slot->endpointStatus[bestIndex].state)
+        );
+        json += "\"}";
+    }
+    json += "]";
 }
 
 uint32_t ZigbeeSpiProxy::packetsReceived() const {
