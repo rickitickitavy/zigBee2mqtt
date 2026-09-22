@@ -92,7 +92,7 @@ String DeviceTopicMap::statePublishTopic(const DeviceTopicEntry *entry, uint8_t 
     if (entry == nullptr || entry->stateTopic[0] == '\0') {
         return "";
     }
-    if (usesTopicSuffix(entry->channelCount) && isUsableEndpoint(endpoint) && endpoint != 1) {
+    if (usesTopicSuffix(entry->channelCount) && isUsableEndpoint(endpoint)) {
         return String(entry->stateTopic) + "/" + String(endpoint);
     }
     return String(entry->stateTopic);
@@ -256,7 +256,7 @@ DeviceTopicEntry *DeviceTopicMap::findByCommandTopic(const char *topic, uint8_t 
             continue;
         }
         const int parsed = atoi(topic + prefixLength + 1);
-        if (!isUsableEndpoint((uint8_t)parsed) || parsed == 1) {
+        if (!isUsableEndpoint((uint8_t)parsed)) {
             continue;
         }
         if (topicEndpoint != nullptr) {
@@ -645,6 +645,10 @@ String DeviceTopicMap::listJson(OnlineFn isOnline) {
 }
 
 String DeviceTopicMap::listJson(OnlineFn isOnline, LastRssiFn lastRssi) {
+    return listJson(isOnline, lastRssi, nullptr);
+}
+
+String DeviceTopicMap::listJson(OnlineFn isOnline, LastRssiFn lastRssi, ListTelemetryFn telemetry) {
     String json = "[";
     bool first = true;
     if (slots == nullptr) {
@@ -687,6 +691,9 @@ String DeviceTopicMap::listJson(OnlineFn isOnline, LastRssiFn lastRssi) {
                 json += ",\"rssi\":";
                 json += String((int)rssiDbm);
             }
+        }
+        if (telemetry != nullptr) {
+            telemetry(entry->ieee, json);
         }
         json += "}";
     }

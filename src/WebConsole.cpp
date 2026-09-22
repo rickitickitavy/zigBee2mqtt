@@ -3,6 +3,7 @@
 #include "Defines.h"
 #include "JsonField.h"
 #include "ZigbeeDeviceType.h"
+#include "FirmwareOta.h"
 
 #include <LittleFS.h>
 #include <Update.h>
@@ -82,6 +83,17 @@ void WebConsole::begin() {
     );
 
     server.on("/api/devices/store", HTTP_GET, [this](AsyncWebServerRequest *request) { handleDevicesStoreGet(request); });
+    server.on(
+        "/api/devices/command",
+        HTTP_POST,
+        [this](AsyncWebServerRequest *request) { handleDevicesCommandPost(request); },
+        nullptr,
+        [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+            (void)request;
+            (void)total;
+            appendRequestBody(data, len, index);
+        }
+    );
     server.on("/api/devices/found", HTTP_GET, [this](AsyncWebServerRequest *request) { handleDevicesFoundGet(request); });
     server.on(
         "/api/devices/search/stop",
@@ -131,6 +143,11 @@ void WebConsole::begin() {
 
     server.on("/api/log", HTTP_GET, [this](AsyncWebServerRequest *request) { handleLogGet(request); });
     server.on("/api/version", HTTP_GET, [this](AsyncWebServerRequest *request) { handleVersionGet(request); });
+    server.on(
+        "/api/update/status",
+        HTTP_GET,
+        [this](AsyncWebServerRequest *request) { handleFirmwareUpdateStatusGet(request); }
+    );
     server.on("/api/status", HTTP_GET, [this](AsyncWebServerRequest *request) { handleGatewayStatusGet(request); });
 
     server.on(
@@ -182,7 +199,9 @@ void WebConsole::rebind() {
 
 void WebConsole::handleRoot(AsyncWebServerRequest *request) {
     if (LittleFS.exists("/index.html")) {
-        request->send(LittleFS, "/index.html", "text/html");
+        AsyncWebServerResponse *response = request->beginResponse(LittleFS, "/index.html", "text/html");
+        response->addHeader("Cache-Control", "no-store");
+        request->send(response);
         return;
     }
     request->send(200, "text/html", kMissingFsPage);
@@ -410,6 +429,14 @@ void WebConsole::setGatewayStatusHandler(WebConsole::GatewayStatusFn handler) {
     gatewayStatusJson = handler;
 }
 
+void WebConsole::setDeviceTelemetryHandler(WebConsole::DeviceTelemetryFn handler) {
+    appendDeviceTelemetry = handler;
+}
+
+void WebConsole::setDeviceCommandHandler(WebConsole::DeviceCommandFn handler) {
+    applyDeviceCommand = handler;
+}
+
 void WebConsole::setDevicesFileHandler(WebConsole::DevicesFileFn handler) {
     devicesFileJson = handler;
 }
@@ -462,7 +489,7 @@ void WebConsole::setDeviceServices(
 
 void WebConsole::handleDevicesGet(AsyncWebServerRequest *request) {
     DeviceTopicMap *deviceMap = settingsManager->deviceMap();
-    String json = deviceMap->listJson(isDeviceOnline, lastDeviceRssi);
+    String json = deviceMap->listJson(isDeviceOnline, lastDeviceRssi, appendDeviceTelemetry);
     AsyncWebServerResponse *response = request->beginResponse(200, "application/json", json);
     response->addHeader("Cache-Control", "no-store");
     request->send(response);
@@ -560,6 +587,38 @@ void WebConsole::handleDevicesDelete(AsyncWebServerRequest *request) {
     request->send(200, "text/plain", "Deleted");
 }
 
+void WebConsole::handleDevicesCommandPost(AsyncWebServerRequest *request) {
+    if (applyDeviceCommand == nullptr) {
+        request->send(503, "text/plain", "Command path is not ready");
+        return;
+    }
+    String ieeeText;
+    String payload;
+    if (!extractJsonString(requestBody.c_str(), "ieee", ieeeText)) {
+        request->send(400, "text/plain", "Need ieee");
+        return;
+    }
+    extractJsonString(requestBody.c_str(), "payload", payload);
+    int channel = 0;
+    if (!extractJsonInt(requestBody.c_str(), "channel", channel)) {
+        channel = 0;
+    }
+    const int status = applyDeviceCommand(ieeeText.c_str(), payload.c_str(), channel);
+    if (status == 404) {
+        request->send(404, "text/plain", "Device not found");
+        return;
+    }
+    if (status == 400) {
+        request->send(400, "text/plain", "Need payload");
+        return;
+    }
+    if (status != 200) {
+        request->send(status, "text/plain", "Command failed");
+        return;
+    }
+    request->send(200, "text/plain", "Sent");
+}
+
 void WebConsole::handleDevicesFoundGet(AsyncWebServerRequest *request) {
     if (foundDevices == nullptr) {
         request->send(200, "application/json", "[]");
@@ -620,7 +679,15 @@ void WebConsole::handleVersionGet(AsyncWebServerRequest *request) {
     String json = "{\"version\":\"";
     json += FIRMWARE_VERSION;
     json += "\"}";
-    request->send(200, "application/json", json);
+    AsyncWebServerResponse *response = request->beginResponse(200, "application/json", json);
+    response->addHeader("Cache-Control", "no-store");
+    request->send(response);
+}
+
+void WebConsole::handleFirmwareUpdateStatusGet(AsyncWebServerRequest *request) {
+    AsyncWebServerResponse *response = request->beginResponse(200, "application/json", FIRMWARE_OTA.statusJson());
+    response->addHeader("Cache-Control", "no-store");
+    request->send(response);
 }
 
 void WebConsole::handleOtaUpload(
@@ -632,20 +699,34 @@ void WebConsole::handleOtaUpload(
     bool final,
     int command
 ) {
-    (void)request;
     (void)filename;
     if (index == 0) {
         otaStarted = true;
         otaFailed = false;
         otaCommand = command;
         LOGGER.info(command == U_FLASH ? "HTTP OTA firmware start" : "HTTP OTA filesystem start");
-        if (!Update.begin(UPDATE_SIZE_UNKNOWN, command)) {
+        if (command == U_FLASH) {
+            const size_t contentLength = request != nullptr ? request->contentLength() : 0;
+            if (!FIRMWARE_OTA.beginStaging(contentLength)) {
+                otaFailed = true;
+                return;
+            }
+        } else if (!Update.begin(UPDATE_SIZE_UNKNOWN, command)) {
             LOGGER.error("HTTP OTA begin failed");
             otaFailed = true;
             return;
         }
     }
     if (otaFailed) {
+        return;
+    }
+    if (otaCommand == U_FLASH) {
+        if (!FIRMWARE_OTA.writeStaging(data, len)) {
+            otaFailed = true;
+        }
+        if (final && !otaFailed && !FIRMWARE_OTA.finishStaging()) {
+            otaFailed = true;
+        }
         return;
     }
     if (len > 0 && Update.write(data, len) != len) {
@@ -662,6 +743,23 @@ void WebConsole::handleOtaUpload(
 }
 
 void WebConsole::handleOtaDone(AsyncWebServerRequest *request) {
+    if (otaCommand == U_FLASH) {
+        if (!otaStarted || otaFailed || FIRMWARE_OTA.phase() != FirmwareOta::Phase::Slave) {
+            String errorMessage = "Upload failed";
+            if (FIRMWARE_OTA.phase() == FirmwareOta::Phase::Failed) {
+                errorMessage = FIRMWARE_OTA.statusJson();
+            }
+            LOGGER.error("HTTP firmware staging failed");
+            FIRMWARE_OTA.abortStaging();
+            otaStarted = false;
+            otaFailed = false;
+            request->send(500, "text/plain", errorMessage);
+            return;
+        }
+        otaStarted = false;
+        request->send(200, "text/plain", "Firmware stored. Updating slave, then host.");
+        return;
+    }
     if (!otaStarted || otaFailed || Update.hasError()) {
         String errorMessage = Update.hasError() ? String(Update.errorString()) : String("Upload failed");
         LOGGER.error("HTTP OTA failed: " + errorMessage);
@@ -671,13 +769,8 @@ void WebConsole::handleOtaDone(AsyncWebServerRequest *request) {
         request->send(500, "text/plain", errorMessage);
         return;
     }
-    LOGGER.info(otaCommand == U_FLASH ? "HTTP OTA firmware finished" : "HTTP OTA filesystem finished");
+    LOGGER.info("HTTP OTA filesystem finished");
     otaStarted = false;
-    request->send(
-        200,
-        "text/plain",
-        otaCommand == U_FLASH ? "Firmware written. Device will restart."
-                              : "Filesystem written. Device will restart."
-    );
+    request->send(200, "text/plain", "Filesystem written. Device will restart.");
     settingsManager->requestRestart();
 }

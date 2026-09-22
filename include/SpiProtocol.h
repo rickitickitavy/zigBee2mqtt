@@ -26,6 +26,8 @@ enum SpiCommand : uint8_t {
     SpiCmdGetDevices = 0x0B,
     SpiCmdGetDevicesFile = 0x0C,
     SpiCmdZclWriteAttr = 0x0D,
+    SpiCmdFirmwareOta = 0x0E,
+    SpiCmdZclReadAttr = 0x0F,
     SpiCmdReadEvent = 0x10
 };
 
@@ -45,11 +47,17 @@ constexpr size_t SPI_DEVICE_MESSAGE_MAX = 64;
 constexpr size_t SPI_ATTR_REPORT_RSSI_OFFSET = 11;
 constexpr size_t SPI_ATTR_REPORT_MESSAGE_OFFSET = 12;
 constexpr size_t SPI_ZCL_WRITE_ATTR_LEN = 18;
+constexpr size_t SPI_ZCL_READ_ATTR_LEN = 13;
 constexpr uint8_t ZCL_ATTR_TYPE_U8 = 0x20;
 constexpr uint8_t ZCL_ATTR_TYPE_U16 = 0x21;
 constexpr uint8_t ZCL_ATTR_TYPE_U32 = 0x23;
 constexpr uint8_t SPI_FILE_FIRST = 0x01;
 constexpr uint8_t SPI_FILE_LAST = 0x02;
+constexpr uint8_t SPI_OTA_BEGIN = SPI_FILE_FIRST;
+constexpr uint8_t SPI_OTA_END = SPI_FILE_LAST;
+constexpr uint8_t SPI_OTA_ABORT = 0x04;
+constexpr size_t SPI_OTA_BEGIN_LEN = 5;
+constexpr size_t SPI_STATUS_VERSION_MAX = 15;
 constexpr size_t SPI_FILE_CHUNK_MAX = SPI_MAX_PAYLOAD - 1;
 constexpr size_t SPI_DEVICE_JOIN_NWK_OFFSET = 8;
 constexpr size_t SPI_DEVICE_JOIN_ENDPOINT_OFFSET = 10;
@@ -154,6 +162,45 @@ inline bool spiPackZclWriteAttr(
     return true;
 }
 
+inline bool spiPackZclReadAttr(
+    uint8_t *out,
+    size_t outMax,
+    const uint8_t ieee[8],
+    uint8_t endpoint,
+    uint16_t clusterId,
+    uint16_t attributeId
+) {
+    if (out == nullptr || ieee == nullptr || outMax < SPI_ZCL_READ_ATTR_LEN) {
+        return false;
+    }
+    memcpy(out, ieee, 8);
+    out[8] = endpoint;
+    out[9] = (uint8_t)(clusterId & 0xFF);
+    out[10] = (uint8_t)((clusterId >> 8) & 0xFF);
+    out[11] = (uint8_t)(attributeId & 0xFF);
+    out[12] = (uint8_t)((attributeId >> 8) & 0xFF);
+    return true;
+}
+
+inline bool spiUnpackZclReadAttr(
+    const uint8_t *in,
+    uint16_t length,
+    uint8_t ieee[8],
+    uint8_t *endpoint,
+    uint16_t *clusterId,
+    uint16_t *attributeId
+) {
+    if (in == nullptr || length < SPI_ZCL_READ_ATTR_LEN || ieee == nullptr || endpoint == nullptr
+        || clusterId == nullptr || attributeId == nullptr) {
+        return false;
+    }
+    memcpy(ieee, in, 8);
+    *endpoint = in[8];
+    *clusterId = (uint16_t)in[9] | ((uint16_t)in[10] << 8);
+    *attributeId = (uint16_t)in[11] | ((uint16_t)in[12] << 8);
+    return true;
+}
+
 inline bool spiUnpackZclWriteAttr(
     const uint8_t *in,
     uint16_t length,
@@ -175,6 +222,36 @@ inline bool spiUnpackZclWriteAttr(
     *dataType = in[13];
     *attributeValue = (uint32_t)in[14] | ((uint32_t)in[15] << 8) | ((uint32_t)in[16] << 16)
         | ((uint32_t)in[17] << 24);
+    return true;
+}
+
+inline uint16_t spiPackFirmwareOta(
+    uint8_t *out,
+    size_t outMax,
+    uint8_t flags,
+    const uint8_t *data,
+    uint16_t dataLength
+) {
+    const uint16_t length = (uint16_t)(1 + dataLength);
+    if (out == nullptr || length > SPI_MAX_PAYLOAD || outMax < length) {
+        return 0;
+    }
+    if (dataLength > 0 && data == nullptr) {
+        return 0;
+    }
+    out[0] = flags;
+    if (dataLength > 0) {
+        memcpy(out + 1, data, dataLength);
+    }
+    return length;
+}
+
+inline bool spiUnpackFirmwareOtaSize(const uint8_t *in, uint16_t length, uint32_t *imageSize) {
+    if (in == nullptr || imageSize == nullptr || length < SPI_OTA_BEGIN_LEN) {
+        return false;
+    }
+    *imageSize = (uint32_t)in[1] | ((uint32_t)in[2] << 8) | ((uint32_t)in[3] << 16)
+        | ((uint32_t)in[4] << 24);
     return true;
 }
 

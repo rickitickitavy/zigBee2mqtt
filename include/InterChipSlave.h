@@ -17,6 +17,12 @@ public:
         uint8_t dataType,
         uint32_t attributeValue
     );
+    using ReadAttrFn = void (*)(
+        const uint8_t ieee[8],
+        uint8_t endpoint,
+        uint16_t clusterId,
+        uint16_t attributeId
+    );
     using DeviceSyncFn = void (*)(uint8_t flags, const DeviceTopicEntry *entry);
     using DevicesFileFn = String (*)();
 
@@ -43,6 +49,7 @@ public:
     void setPermitJoinHandler(PermitJoinFn handler);
     void setOnOffHandler(OnOffFn handler);
     void setWriteAttrHandler(WriteAttrFn handler);
+    void setReadAttrHandler(ReadAttrFn handler);
     void setDeviceSyncHandler(DeviceSyncFn handler);
     void setDeviceMapSource(DeviceTopicMap *deviceMap);
     void applyHostTime(uint32_t unixSec);
@@ -55,6 +62,7 @@ public:
     void setDevicesFileSource(DevicesFileFn handler);
     void setPumpPaused(bool paused);
     void resumeAfterRadioPause();
+    bool completeCommandResult(uint8_t seq, bool ok);
 
 private:
     static constexpr int kQueue = 16;
@@ -63,7 +71,8 @@ private:
 
     enum class DeferredDeviceKind : uint8_t {
         OnOff = 0,
-        WriteAttr = 1
+        WriteAttr = 1,
+        ReadAttr = 2
     };
 
     struct DeferredDeviceCommand {
@@ -88,6 +97,7 @@ private:
     PermitJoinFn permitJoinHandler = nullptr;
     OnOffFn onOffHandler = nullptr;
     WriteAttrFn writeAttrHandler = nullptr;
+    ReadAttrFn readAttrHandler = nullptr;
     DeviceSyncFn deviceSyncHandler = nullptr;
     DeviceTopicMap *deviceMapSource = nullptr;
     DevicesFileFn devicesFileSource = nullptr;
@@ -109,6 +119,9 @@ private:
     uint8_t deferredPermitSeconds = 0;
     DeferredDeviceCommand deferredDeviceCommands[kMaxDeferredDeviceCommands]{};
     uint32_t pendingUnixSec = 0;
+    uint8_t firmwareOtaLastSeq = 0;
+    bool firmwareOtaLastOk = false;
+    bool firmwareOtaResultValid = false;
 
     bool enqueueEvent(uint8_t cmd, const uint8_t *payload, uint16_t length);
     bool enqueueReply(uint8_t cmd, uint8_t seq, const uint8_t *payload, uint16_t length);
@@ -117,6 +130,7 @@ private:
     bool dropOldestAttrReport();
     bool enqueueDeviceMap(const uint8_t *payload, uint16_t length);
     void removeOutboundAt(int index);
+    void clearOutbound();
     void updateIrq();
     void handleHostFrame(const SpiFrame &frame);
     bool takeOutbound(SpiFrame &frame);
@@ -133,6 +147,12 @@ private:
         uint16_t attributeId,
         uint8_t dataType,
         uint32_t attributeValue
+    );
+    void stashDeferredReadAttr(
+        const uint8_t ieee[8],
+        uint8_t endpoint,
+        uint16_t clusterId,
+        uint16_t attributeId
     );
 };
 

@@ -1,4 +1,6 @@
 #include "InterChipSlave.h"
+#include "FirmwareOta.h"
+#include "Defines.h"
 #include "pins.h"
 #include "Logger.h"
 #include "StatusRgb.h"
@@ -115,6 +117,10 @@ void InterChipSlave::setOnOffHandler(OnOffFn handler) {
 
 void InterChipSlave::setWriteAttrHandler(WriteAttrFn handler) {
     writeAttrHandler = handler;
+}
+
+void InterChipSlave::setReadAttrHandler(ReadAttrFn handler) {
+    readAttrHandler = handler;
 }
 
 void InterChipSlave::setDeviceSyncHandler(DeviceSyncFn handler) {
@@ -258,6 +264,14 @@ void InterChipSlave::removeOutboundAt(int index) {
     updateIrq();
 }
 
+void InterChipSlave::clearOutbound() {
+    outboundCount = 0;
+    deviceDumpPending = false;
+    fileDumpPending = false;
+    fileDumpText = "";
+    updateIrq();
+}
+
 bool InterChipSlave::tryEnqueue(uint8_t cmd, uint8_t seq, const uint8_t *payload, uint16_t length) {
     if (length > SPI_MAX_PAYLOAD || outboundCount >= kQueue) {
         return false;
@@ -312,6 +326,14 @@ bool InterChipSlave::enqueueDeviceMap(const uint8_t *payload, uint16_t length) {
         }
     }
     return false;
+}
+
+bool InterChipSlave::completeCommandResult(uint8_t seq, bool ok) {
+    uint8_t value = ok ? 1 : 0;
+    firmwareOtaLastSeq = seq;
+    firmwareOtaLastOk = ok;
+    firmwareOtaResultValid = true;
+    return enqueueReply(SpiEvtCmdResult, seq, &value, 1);
 }
 
 bool InterChipSlave::enqueueReply(uint8_t cmd, uint8_t seq, const uint8_t *payload, uint16_t length) {
@@ -478,15 +500,50 @@ void InterChipSlave::stashDeferredWriteAttr(
     slot->attributeValue = attributeValue;
 }
 
+void InterChipSlave::stashDeferredReadAttr(
+    const uint8_t ieee[8],
+    uint8_t endpoint,
+    uint16_t clusterId,
+    uint16_t attributeId
+) {
+    DeferredDeviceCommand *slot = allocDeferredDeviceCommand(ieee, endpoint);
+    slot->kind = DeferredDeviceKind::ReadAttr;
+    slot->clusterId = clusterId;
+    slot->attributeId = attributeId;
+    slot->dataType = 0;
+    slot->attributeValue = 0;
+}
+
 void InterChipSlave::handleHostFrame(const SpiFrame &frame) {
+    if (frame.cmd == SpiCmdFirmwareOta) {
+        if (firmwareOtaResultValid && frame.seq == firmwareOtaLastSeq && firmwareOtaLastOk) {
+            completeCommandResult(frame.seq, true);
+            return;
+        }
+        if (frame.length >= 1 && (frame.payload[0] & SPI_OTA_BEGIN) != 0) {
+            clearOutbound();
+            firmwareOtaResultValid = false;
+            if (!FIRMWARE_OTA.queueSlaveBegin(frame)) {
+                completeCommandResult(frame.seq, false);
+            }
+            return;
+        }
+        const bool ok = FIRMWARE_OTA.handleSlaveFrame(frame);
+        completeCommandResult(frame.seq, ok);
+        return;
+    }
     if (frame.cmd == SpiCmdPing) {
         enqueueReply(SpiEvtPong, frame.seq, nullptr, 0);
         return;
     }
     if (frame.cmd == SpiCmdReadEvent || frame.cmd == SpiCmdGetStatus) {
         if (frame.cmd == SpiCmdGetStatus) {
-            uint8_t status = readySent ? 1 : 0;
-            enqueueReply(SpiEvtStatus, frame.seq, &status, 1);
+            uint8_t statusPayload[1 + SPI_STATUS_VERSION_MAX + 1];
+            memset(statusPayload, 0, sizeof(statusPayload));
+            statusPayload[0] = readySent ? 1 : 0;
+            strncpy((char *)statusPayload + 1, FIRMWARE_VERSION, SPI_STATUS_VERSION_MAX);
+            const uint16_t versionLength = (uint16_t)strlen((char *)statusPayload + 1);
+            enqueueReply(SpiEvtStatus, frame.seq, statusPayload, (uint16_t)(1 + versionLength));
         }
         return;
     }
@@ -546,6 +603,19 @@ void InterChipSlave::handleHostFrame(const SpiFrame &frame) {
         enqueueEvent(SpiEvtCmdResult, &ok, 1);
         return;
     }
+    if (frame.cmd == SpiCmdZclReadAttr) {
+        uint8_t ieee[8];
+        uint8_t endpoint = 255;
+        uint16_t clusterId = 0;
+        uint16_t attributeId = 0;
+        if (!spiUnpackZclReadAttr(frame.payload, frame.length, ieee, &endpoint, &clusterId, &attributeId)) {
+            return;
+        }
+        stashDeferredReadAttr(ieee, endpoint, clusterId, attributeId);
+        uint8_t ok = 1;
+        enqueueEvent(SpiEvtCmdResult, &ok, 1);
+        return;
+    }
     if (frame.cmd == SpiCmdSetDevice && frame.length >= 1 && deviceSyncHandler != nullptr) {
         uint8_t flags = 0;
         DeviceTopicEntry entry;
@@ -566,7 +636,8 @@ void InterChipSlave::handleHostFrame(const SpiFrame &frame) {
 }
 
 void InterChipSlave::fillHardwareQueue() {
-    while (hardwareQueued < kHwSlots) {
+    const int slotLimit = FIRMWARE_OTA.isApplyingImage() ? 1 : kHwSlots;
+    while (hardwareQueued < slotLimit) {
         const int slot = fillSlot;
         memset(dmaTx[slot], 0, SPI_MAX_FRAME);
         memset(dmaRx[slot], 0, SPI_MAX_FRAME);
@@ -641,6 +712,8 @@ void InterChipSlave::applyDeferredRadioCommands() {
                 slot->dataType,
                 slot->attributeValue
             );
+        } else if (slot->kind == DeferredDeviceKind::ReadAttr && readAttrHandler != nullptr) {
+            readAttrHandler(slot->ieee, slot->endpoint, slot->clusterId, slot->attributeId);
         }
         slot->occupied = false;
     }

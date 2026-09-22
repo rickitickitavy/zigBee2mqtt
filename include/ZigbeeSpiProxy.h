@@ -22,6 +22,12 @@ public:
         uint8_t dataType,
         uint32_t attributeValue
     );
+    bool readAttribute(
+        const uint8_t ieee[8],
+        uint8_t endpoint,
+        uint16_t clusterId,
+        uint16_t attributeId
+    );
     void requestRegistryPull(DeviceTopicMap *topicMap);
     void requestDevicesFile();
     String devicesFileJson() const;
@@ -31,6 +37,7 @@ public:
     bool registryHydrated() const;
     bool isOnline(const uint8_t ieee[8]) const;
     bool lastRssiDbm(const uint8_t ieee[8], int8_t *rssiDbm) const;
+    void appendListTelemetry(const uint8_t ieee[8], String &json) const;
     void noteSeen(const uint8_t ieee[8]);
     uint32_t packetsReceived() const;
     uint32_t packetsSent() const;
@@ -56,6 +63,14 @@ private:
         unsigned long lastSeenMs;
         int8_t lastRssiDbm;
         bool hasRssi;
+        bool hasBattery;
+        unsigned batteryPercent;
+        struct EndpointStatus {
+            bool used;
+            uint8_t endpoint;
+            char state[SPI_DEVICE_MESSAGE_MAX];
+        };
+        EndpointStatus endpointStatus[DEVICE_CHANNEL_COUNT_MAX];
     };
 
     struct PendingDeviceChange {
@@ -88,7 +103,9 @@ private:
     bool pairingOpen = false;
 
     CachedDevice *findByIeee(const uint8_t ieee[8]);
+    const CachedDevice *findByIeee(const uint8_t ieee[8]) const;
     CachedDevice *allocSlot(const uint8_t ieee[8]);
+    void noteReportTelemetry(CachedDevice *slot, uint8_t endpoint, const char *message);
     bool enqueueRegistryFrame(uint8_t flags, const DeviceTopicEntry *entry);
     bool queueDeviceChange(uint8_t flags, const DeviceTopicEntry *entry);
     void applyPendingChangeToMap(const PendingDeviceChange *change);

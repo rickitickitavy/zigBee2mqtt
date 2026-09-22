@@ -15,6 +15,8 @@ public:
     using DeviceRssiFn = bool (*)(const uint8_t ieee[8], int8_t *rssiDbm);
     using DevicesFileFn = String (*)();
     using GatewayStatusFn = String (*)();
+    using DeviceTelemetryFn = void (*)(const uint8_t ieee[8], String &json);
+    using DeviceCommandFn = int (*)(const char *ieeeText, const char *payload, int channel);
 
     explicit WebConsole(SettingsManager *settingsManager);
 
@@ -32,6 +34,8 @@ public:
     void setDeviceRssiHandler(DeviceRssiFn handler);
     void setDevicesFileHandler(DevicesFileFn handler);
     void setGatewayStatusHandler(GatewayStatusFn handler);
+    void setDeviceTelemetryHandler(DeviceTelemetryFn handler);
+    void setDeviceCommandHandler(DeviceCommandFn handler);
 
 private:
     SettingsManager *settingsManager;
@@ -45,6 +49,8 @@ private:
     DeviceRssiFn lastDeviceRssi = nullptr;
     DevicesFileFn devicesFileJson = nullptr;
     GatewayStatusFn gatewayStatusJson = nullptr;
+    DeviceTelemetryFn appendDeviceTelemetry = nullptr;
+    DeviceCommandFn applyDeviceCommand = nullptr;
     AsyncWebServer server;
     String requestBody;
     bool otaStarted = false;
@@ -67,10 +73,12 @@ private:
     void handleDevicesSearchPost(AsyncWebServerRequest *request);
     void handleDevicesSearchStopPost(AsyncWebServerRequest *request);
     void handleDevicesStoreGet(AsyncWebServerRequest *request);
+    void handleDevicesCommandPost(AsyncWebServerRequest *request);
     void handleGatewayStatusGet(AsyncWebServerRequest *request);
     void appendRequestBody(uint8_t *data, size_t len, size_t index);
     void handleLogGet(AsyncWebServerRequest *request);
     void handleVersionGet(AsyncWebServerRequest *request);
+    void handleFirmwareUpdateStatusGet(AsyncWebServerRequest *request);
     void handleOtaUpload(
         AsyncWebServerRequest *request,
         const String &filename,
