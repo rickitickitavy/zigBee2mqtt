@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -184,6 +184,60 @@
                 return;
             }
             statusPollTimer = window.setInterval(refreshGatewayStatus, 2000);
+        }
+
+        function normalizeThemeId(themeId) {
+            return themeId === "dark" ? "dark" : "light";
+        }
+
+        function applyThemeToDocument(themeId) {
+            document.documentElement.setAttribute("data-theme", normalizeThemeId(themeId));
+        }
+
+        function loadTheme() {
+            var picker = document.getElementById("uiTheme");
+            fetch("/api/theme", { cache: "no-store" }).then(function (response) {
+                return response.json();
+            }).then(function (body) {
+                var themeId = normalizeThemeId(body && body.theme);
+                applyThemeToDocument(themeId);
+                if (picker) {
+                    picker.value = themeId;
+                }
+            }).catch(function () {
+                applyThemeToDocument("light");
+                if (picker) {
+                    picker.value = "light";
+                }
+            });
+        }
+
+        function onThemePickerChange() {
+            var picker = document.getElementById("uiTheme");
+            applyThemeToDocument(picker ? picker.value : "light");
+        }
+
+        function saveTheme() {
+            var picker = document.getElementById("uiTheme");
+            var restoreError = document.getElementById("settingsRestoreError");
+            var themeId = normalizeThemeId(picker ? picker.value : "light");
+            applyThemeToDocument(themeId);
+            fetch("/api/theme", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ theme: themeId })
+            }).then(function (response) {
+                return response.text().then(function (text) {
+                    if (!response.ok) {
+                        throw new Error(text || ("HTTP " + response.status));
+                    }
+                });
+            }).catch(function (error) {
+                if (restoreError) {
+                    restoreError.hidden = false;
+                    restoreError.textContent = error && error.message ? error.message : "Theme save failed";
+                }
+            });
         }
 
         function loadHardware() {
@@ -531,6 +585,7 @@
                     loadMqtt();
                     loadZigbee();
                     loadHardware();
+                    loadTheme();
                     loadDevices();
                 });
             }).catch(function (error) {
@@ -1323,6 +1378,7 @@
 
         var manualCommandIeee = "";
         var lastManualStatusKey = "";
+        var deviceActionsMenuIeee = "";
 
         function statusEntriesForDevice(device) {
             var entries = [];
@@ -1356,6 +1412,9 @@
         function coveringPositionText(state) {
             var text = String(state || "");
             if (!text) {
+                return "";
+            }
+            if (text.indexOf("cl=0x") >= 0 && text.indexOf("attr=") >= 0) {
                 return "";
             }
             if (!/^\d+$/.test(text)) {
@@ -1596,12 +1655,246 @@
             sendManualCommand();
         }
 
+        function deviceTypeActionPayloads(typeId) {
+            if (typeId == "onOff") {
+                return ["ON", "OFF", "TOGGLE"];
+            }
+            if (typeId == "windowCovering") {
+                return ["OPEN", "CLOSE", "STOP"];
+            }
+            return [];
+        }
+
+        function deviceActionChannels(device) {
+            var channels = device.channels;
+            if (channels === undefined || channels === null || channels === "") {
+                channels = 1;
+            }
+            if (channels >= 2) {
+                var numbered = [];
+                var channel;
+                for (channel = 1; channel <= channels; channel++) {
+                    numbered.push(channel);
+                }
+                return numbered;
+            }
+            if (channels == 0) {
+                var entries = statusEntriesForDevice(device);
+                var reported = [];
+                var entryIndex;
+                for (entryIndex = 0; entryIndex < entries.length; entryIndex++) {
+                    if (entries[entryIndex].ep) {
+                        reported.push(entries[entryIndex].ep);
+                    }
+                }
+                return reported.length ? reported : [1];
+            }
+            return [1];
+        }
+
+        function closeDeviceActionsMenu() {
+            deviceActionsMenuIeee = "";
+            var devicesSection = document.getElementById("section-devices");
+            if (devicesSection) {
+                devicesSection.classList.remove("device-actions-open");
+            }
+            var openMenus = document.querySelectorAll(".device-row-menu");
+            var menuIndex;
+            for (menuIndex = 0; menuIndex < openMenus.length; menuIndex++) {
+                openMenus[menuIndex].remove();
+            }
+            var openRows = document.querySelectorAll("tr.actions-open");
+            var rowIndex;
+            for (rowIndex = 0; rowIndex < openRows.length; rowIndex++) {
+                openRows[rowIndex].classList.remove("actions-open");
+            }
+        }
+
+        function sendDeviceRowAction(ieee, payload, channel) {
+            closeDeviceActionsMenu();
+            fetch("/api/devices/command", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ ieee: ieee, payload: payload, channel: channel })
+            }).catch(function () {});
+        }
+
+        function placeDeviceActionsMenu(menu, buttonRect) {
+            if (!buttonRect.width && !buttonRect.height) {
+                return;
+            }
+            var width = menu.offsetWidth;
+            menu.style.width = String(width) + "px";
+            var gap = 4;
+            var pad = 8;
+            var left = buttonRect.right - width;
+            var top = buttonRect.bottom + gap;
+            var overflowRight = left + width - (window.innerWidth - pad);
+            if (overflowRight > 0) {
+                left -= overflowRight;
+            }
+            var overflowBottom = top + menu.offsetHeight - (window.innerHeight - pad);
+            if (overflowBottom > 0) {
+                top -= overflowBottom;
+            }
+            menu.style.left = String(Math.round(left)) + "px";
+            menu.style.top = String(Math.round(top)) + "px";
+        }
+
+        function placeDeviceChannelSubmenu(submenu, item) {
+            submenu.style.left = "auto";
+            submenu.style.right = "100%";
+            var itemRect = item.getBoundingClientRect();
+            var pad = 8;
+            var height = submenu.offsetHeight;
+            var top = 0;
+            if (itemRect.top + height > window.innerHeight - pad) {
+                top -= (itemRect.top + height) - (window.innerHeight - pad);
+            }
+            if (itemRect.top + top < pad) {
+                top = pad - itemRect.top;
+            }
+            submenu.style.top = String(Math.round(top)) + "px";
+        }
+
+        function openDeviceRowSubmenu(menu, item) {
+            var openItems = menu.querySelectorAll(".has-submenu.is-open");
+            var openIndex;
+            for (openIndex = 0; openIndex < openItems.length; openIndex++) {
+                openItems[openIndex].classList.remove("is-open");
+            }
+            item.classList.add("is-open");
+            var submenu = item.querySelector(".device-row-submenu");
+            if (submenu) {
+                placeDeviceChannelSubmenu(submenu, item);
+            }
+        }
+
+        function openDeviceActionsMenu(event, device) {
+            event.stopPropagation();
+            event.preventDefault();
+            var alreadyOpen = deviceActionsMenuIeee == (device.ieee || "");
+            closeDeviceActionsMenu();
+            if (alreadyOpen) {
+                return;
+            }
+            var payloads = deviceTypeActionPayloads(device.type);
+            if (!payloads.length) {
+                return;
+            }
+            var host = event.currentTarget.parentNode;
+            var menu = document.createElement("ul");
+            menu.className = "device-row-menu";
+            menu.setAttribute("role", "menu");
+            menu.onmousedown = function (mouseEvent) {
+                mouseEvent.stopPropagation();
+            };
+            menu.onclick = function (clickEvent) {
+                clickEvent.stopPropagation();
+            };
+            var channelList = deviceActionChannels(device);
+            var showChannelSubmenu = channelList.length > 1;
+            var payloadIndex;
+            for (payloadIndex = 0; payloadIndex < payloads.length; payloadIndex++) {
+                var item = document.createElement("li");
+                var actionButton = document.createElement("button");
+                actionButton.type = "button";
+                actionButton.textContent = payloads[payloadIndex];
+                if (!showChannelSubmenu) {
+                    actionButton.onclick = (function (ieeeText, body, channelValue) {
+                        return function (clickEvent) {
+                            clickEvent.stopPropagation();
+                            sendDeviceRowAction(ieeeText, body, channelValue);
+                        };
+                    })(device.ieee, payloads[payloadIndex], channelList[0]);
+                    item.appendChild(actionButton);
+                    menu.appendChild(item);
+                    continue;
+                }
+                item.className = "device-row-menu-item has-submenu";
+                actionButton.setAttribute("aria-haspopup", "true");
+                actionButton.onclick = function (clickEvent) {
+                    clickEvent.stopPropagation();
+                    var parentItem = this.parentNode;
+                    if (parentItem.classList.contains("is-open")) {
+                        return;
+                    }
+                    openDeviceRowSubmenu(menu, parentItem);
+                };
+                actionButton.onmouseenter = function () {
+                    openDeviceRowSubmenu(menu, this.parentNode);
+                };
+                var submenu = document.createElement("ul");
+                submenu.className = "device-row-submenu";
+                var channelIndex;
+                for (channelIndex = 0; channelIndex < channelList.length; channelIndex++) {
+                    var channelItem = document.createElement("li");
+                    var channelButton = document.createElement("button");
+                    channelButton.type = "button";
+                    channelButton.textContent = String(channelList[channelIndex]);
+                    channelButton.onclick = (function (ieeeText, body, channelValue) {
+                        return function (clickEvent) {
+                            clickEvent.stopPropagation();
+                            sendDeviceRowAction(ieeeText, body, channelValue);
+                        };
+                    })(device.ieee, payloads[payloadIndex], channelList[channelIndex]);
+                    channelItem.appendChild(channelButton);
+                    submenu.appendChild(channelItem);
+                }
+                item.appendChild(actionButton);
+                item.appendChild(submenu);
+                menu.appendChild(item);
+            }
+            menu.style.visibility = "hidden";
+            document.body.appendChild(menu);
+            placeDeviceActionsMenu(menu, event.currentTarget.getBoundingClientRect());
+            menu.style.visibility = "visible";
+            var row = host.parentNode;
+            if (row) {
+                row.classList.add("actions-open");
+            }
+            var devicesSection = document.getElementById("section-devices");
+            if (devicesSection) {
+                devicesSection.classList.add("device-actions-open");
+            }
+            deviceActionsMenuIeee = device.ieee || "";
+        }
+
+        function attachDeviceRowActions(row, device, reopenIeee) {
+            var payloads = deviceTypeActionPayloads(device.type);
+            if (!payloads.length) {
+                return;
+            }
+            var holder = document.createElement("div");
+            holder.className = "device-row-actions";
+            var ellipsis = document.createElement("button");
+            ellipsis.type = "button";
+            ellipsis.className = "device-row-actions-btn";
+            ellipsis.setAttribute("aria-label", "Device actions");
+            ellipsis.textContent = "…";
+            ellipsis.onclick = function (clickEvent) {
+                openDeviceActionsMenu(clickEvent, device);
+            };
+            holder.appendChild(ellipsis);
+            row.appendChild(holder);
+            if (reopenIeee && reopenIeee == (device.ieee || "")) {
+                row.classList.add("actions-open");
+                deviceActionsMenuIeee = reopenIeee;
+                var devicesSection = document.getElementById("section-devices");
+                if (devicesSection) {
+                    devicesSection.classList.add("device-actions-open");
+                }
+            }
+        }
+
         function renderDeviceTable(rows) {
             var body = document.getElementById("deviceTableBody");
             if (!body) {
                 return;
             }
             registeredDeviceRows = rows;
+            var reopenActionsIeee = deviceActionsMenuIeee;
+            deviceActionsMenuIeee = "";
             body.innerHTML = "";
             var stillSelected = false;
             var index;
@@ -1613,7 +1906,16 @@
                     row.className = "selected";
                     stillSelected = true;
                 }
-                row.onclick = function () {
+                row.onclick = function (clickEvent) {
+                    if (clickEvent.target && clickEvent.target.closest
+                        && (clickEvent.target.closest(".device-row-actions")
+                            || clickEvent.target.closest(".device-row-menu"))) {
+                        return;
+                    }
+                    if (deviceActionsMenuIeee) {
+                        closeDeviceActionsMenu();
+                        return;
+                    }
                     selectRegisteredIeee(this.getAttribute("data-ieee") || "");
                     openEditSelectedDevice();
                 };
@@ -1646,6 +1948,7 @@
                 row.appendChild(statusCell);
                 row.appendChild(batteryCell);
                 row.appendChild(rssiCell);
+                attachDeviceRowActions(row, rows[index], reopenActionsIeee);
                 body.appendChild(row);
             }
             if (!stillSelected) {
@@ -2232,6 +2535,11 @@
             if (key !== "Escape" && key !== "Esc") {
                 return;
             }
+            if (deviceActionsMenuIeee) {
+                closeDeviceActionsMenu();
+                event.preventDefault();
+                return;
+            }
             if (dismissFrontOverlayDialog()) {
                 event.preventDefault();
             }
@@ -2242,6 +2550,15 @@
             setupPasswordToggle("mqttPassword", "mqttPasswordToggle");
             document.getElementById("wifiMode").onchange = updateApIpVisibility;
             document.addEventListener("keydown", onDocumentKeyDown);
+            document.addEventListener("click", function (clickEvent) {
+                if (clickEvent.target && clickEvent.target.closest
+                    && (clickEvent.target.closest(".device-row-menu")
+                        || clickEvent.target.closest(".device-row-actions"))) {
+                    return;
+                }
+                closeDeviceActionsMenu();
+            });
+            loadTheme();
             var manualInput = document.getElementById("manualCommandInput");
             if (manualInput) {
                 manualInput.addEventListener("keydown", onManualCommandInputKeyDown);
@@ -2718,6 +3035,20 @@
                     </div>
                 </div>
                 <div id="system-tab-maintenance" class="system-tab-panel tab-panel" role="tabpanel">
+                    <div class="upload-card">
+                        <h3 class="upload-title">Appearance</h3>
+                        <p id="themeSaveError" class="save-error" hidden></p>
+                        <div class="theme-row">
+                            <div class="field">
+                                <label for="uiTheme">Theme</label>
+                                <select id="uiTheme" onchange="onThemePickerChange()">
+                                    <option value="light">Light</option>
+                                    <option value="dark">Dark</option>
+                                </select>
+                            </div>
+                            <button type="button" class="btn btn-secondary btn-icon" aria-label="Save theme" title="Save theme" onclick="saveTheme()">💾</button>
+                        </div>
+                    </div>
                     <div class="upload-card">
                         <h3 class="upload-title">Settings</h3>
                         <p class="field-hint">Export MQTT, Zigbee, hardware, and devices. Restore replaces those groups. Wi-Fi is never included.</p>

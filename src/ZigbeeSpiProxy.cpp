@@ -48,6 +48,9 @@ void ZigbeeSpiProxy::noteReportTelemetry(CachedDevice *slot, uint8_t endpoint, c
         slot->batteryPercent = parsedPercent;
         return;
     }
+    if (strstr(message, "cl=0x") != nullptr && strstr(message, "attr=") != nullptr) {
+        return;
+    }
     if (!DeviceTopicMap::isUsableEndpoint(endpoint)) {
         return;
     }

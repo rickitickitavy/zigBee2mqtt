@@ -985,7 +985,7 @@ static void setupHost() {
         DeviceTopicMap::ZclWriteFields clOnlyWrite;
         DeviceTopicMap::parseFullControlBody("cl=0x0102,cmd=0x02", 1, &clOnlyWrite);
         if (!parsedOpen || !openFields.parsed || openFields.clusterId != 0x0102
-            || openFields.commandId != 0x00 || parsedOn && onFields.parsed || clOnlyWrite.hasWrite) {
+            || openFields.commandId != 0x01 || parsedOn && onFields.parsed || clOnlyWrite.hasWrite) {
             LOGGER.error("ZCL command parse fixture failed");
         } else {
             LOGGER.info("ZCL command parse fixture ok");

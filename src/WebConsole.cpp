@@ -98,6 +98,18 @@ void WebConsole::begin() {
             appendRequestBody(data, len, index);
         }
     );
+    server.on("/api/theme", HTTP_GET, [this](AsyncWebServerRequest *request) { handleThemeGet(request); });
+    server.on(
+        "/api/theme",
+        HTTP_POST,
+        [this](AsyncWebServerRequest *request) { handleThemePost(request); },
+        nullptr,
+        [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+            (void)request;
+            (void)total;
+            appendRequestBody(data, len, index);
+        }
+    );
 
     server.on("/api/devices/store", HTTP_GET, [this](AsyncWebServerRequest *request) { handleDevicesStoreGet(request); });
     server.on(
@@ -637,7 +649,9 @@ void WebConsole::handleSettingsExportGet(AsyncWebServerRequest *request) {
     json += String(settings->zigbee.permitJoinOnBootSec);
     json += "},\"hardware\":{\"spiSpeedHz\":";
     json += String((unsigned long)settingsManager->spiSpeedHz());
-    json += "},\"devices\":";
+    json += "},\"ui\":{\"theme\":\"";
+    json += SettingsManager::uiThemeJsonId(settingsManager->uiTheme());
+    json += "\"},\"devices\":";
     json += settingsManager->deviceMap()->listStoreJson();
     json += "}";
     AsyncWebServerResponse *response = request->beginResponse(200, "application/json", json);
@@ -651,10 +665,12 @@ void WebConsole::handleSettingsRestorePost(AsyncWebServerRequest *request) {
     String zigbeeJson;
     String hardwareJson;
     String devicesJson;
+    String uiJson;
     const bool haveMqtt = extractJsonKeyedSlice(requestBody.c_str(), "mqtt", '{', mqttJson);
     const bool haveZigbee = extractJsonKeyedSlice(requestBody.c_str(), "zigbee", '{', zigbeeJson);
     const bool haveHardware = extractJsonKeyedSlice(requestBody.c_str(), "hardware", '{', hardwareJson);
     const bool haveDevices = extractJsonKeyedSlice(requestBody.c_str(), "devices", '[', devicesJson);
+    const bool haveUi = extractJsonKeyedSlice(requestBody.c_str(), "ui", '{', uiJson);
     if (haveMqtt && !applyMqttJson(mqttJson.c_str(), &errorText)) {
         request->send(400, "text/plain", errorText);
         return;
@@ -664,6 +680,10 @@ void WebConsole::handleSettingsRestorePost(AsyncWebServerRequest *request) {
         return;
     }
     if (haveHardware && !applyHardwareJson(hardwareJson.c_str(), &errorText)) {
+        request->send(400, "text/plain", errorText);
+        return;
+    }
+    if (haveUi && !applyThemeJson(uiJson.c_str(), &errorText)) {
         request->send(400, "text/plain", errorText);
         return;
     }
@@ -701,10 +721,48 @@ void WebConsole::handleSettingsRestorePost(AsyncWebServerRequest *request) {
         request->send(200, "text/plain", "Restored. Device will restart to apply settings.");
         return;
     }
-    if (haveHardware) {
+    if (haveHardware || haveUi) {
         settingsManager->saveMain(false);
     }
     request->send(200, "text/plain", "Restored");
+}
+
+bool WebConsole::applyThemeJson(const char *json, String *errorText) {
+    String themeText;
+    if (!extractJsonString(json, "theme", themeText)) {
+        if (errorText != nullptr) {
+            *errorText = "Need ui theme";
+        }
+        return false;
+    }
+    themeText.toLowerCase();
+    if (themeText != "light" && themeText != "dark") {
+        if (errorText != nullptr) {
+            *errorText = "theme must be light or dark";
+        }
+        return false;
+    }
+    settingsManager->setUiTheme(SettingsManager::uiThemeFromJsonId(themeText.c_str()));
+    return true;
+}
+
+void WebConsole::handleThemeGet(AsyncWebServerRequest *request) {
+    String json = "{\"theme\":\"";
+    json += SettingsManager::uiThemeJsonId(settingsManager->uiTheme());
+    json += "\"}";
+    AsyncWebServerResponse *response = request->beginResponse(200, "application/json", json);
+    response->addHeader("Cache-Control", "no-store");
+    request->send(response);
+}
+
+void WebConsole::handleThemePost(AsyncWebServerRequest *request) {
+    String errorText;
+    if (!applyThemeJson(requestBody.c_str(), &errorText)) {
+        request->send(400, "text/plain", errorText);
+        return;
+    }
+    settingsManager->saveMain(false);
+    request->send(200, "text/plain", "Saved");
 }
 
 void WebConsole::setDeviceServices(

@@ -71,6 +71,9 @@ private:
     void handleHardwarePost(AsyncWebServerRequest *request);
     void handleSettingsExportGet(AsyncWebServerRequest *request);
     void handleSettingsRestorePost(AsyncWebServerRequest *request);
+    void handleThemeGet(AsyncWebServerRequest *request);
+    void handleThemePost(AsyncWebServerRequest *request);
+    bool applyThemeJson(const char *json, String *errorText);
     bool applyMqttJson(const char *json, String *errorText);
     bool applyZigbeeJson(const char *json, String *errorText);
     bool applyHardwareJson(const char *json, String *errorText);

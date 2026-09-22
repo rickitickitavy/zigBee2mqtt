@@ -81,11 +81,11 @@ When FULL CONTROL is off or unset, the host SHALL keep existing command behavior
 - **THEN** the host sends the on/off toggle command as today
 
 ### Requirement: Command topic sends ZCL cluster commands
-After channels mapping, a body on a registered device’s MQTT command (`set`) topic SHALL be applied in this order: FULL CONTROL write-attribute when that parse succeeds; else a ZCL cluster command when the body is a covering shortcut or contains `cl` and `cmd`; else today’s on/off/toggle text. Shortcuts SHALL be case-insensitive: `OPEN` and `UP` send cluster `0x0102` command `0x00`; `CLOSE` and `DOWN` send `0x0102` command `0x01`; `STOP` sends `0x0102` command `0x02`. Generic bodies SHALL accept `cl` (cluster id) and `cmd` (ZCL command id) as decimal or `0x` hex, optional `payload` bytes, and SHALL work for every registered device type. Suffix and parse channel mapping SHALL stay as they are, including suffix on the first channel when channels is `2`–`16`. Gateway topics SHALL NOT accept this path.
+After channels mapping, a body on a registered device’s MQTT command (`set`) topic SHALL be applied in this order: FULL CONTROL write-attribute when that parse succeeds; else a ZCL cluster command when the body is a covering shortcut or contains `cl` and `cmd`; else today’s on/off/toggle text. Shortcuts SHALL be case-insensitive: `OPEN` and `UP` send cluster `0x0102` command `0x01`; `CLOSE` and `DOWN` send `0x0102` command `0x00`; `STOP` sends `0x0102` command `0x02`. Generic bodies SHALL accept `cl` (cluster id) and `cmd` (ZCL command id) as decimal or `0x` hex, optional `payload` bytes, and SHALL work for every registered device type. Suffix and parse channel mapping SHALL stay as they are, including suffix on the first channel when channels is `2`–`16`. Gateway topics SHALL NOT accept this path.
 
 #### Scenario: Covering open
 - **WHEN** MQTT receives `OPEN` on a `windowCovering` device’s command topic with channels `1`
-- **THEN** the host sends a ZCL cluster command for cluster `0x0102` command `0x00` to the mapped endpoint
+- **THEN** the host sends a ZCL cluster command for cluster `0x0102` command `0x01` to the mapped endpoint
 
 #### Scenario: Generic command any type
 - **WHEN** MQTT receives `cl=0x0102,cmd=0x02` on an `onOff` device’s command topic
