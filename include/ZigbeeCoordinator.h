@@ -24,6 +24,15 @@ struct BoundZigbeeDevice {
     bool hasPowerConfig;
     uint8_t knownEndpointCount;
     uint8_t knownEndpoints[DEVICE_CHANNEL_COUNT_MAX];
+    struct CoveringStatus {
+        bool used;
+        uint8_t endpoint;
+        bool hasPosition;
+        bool hasMove;
+        uint8_t positionPercent;
+        uint8_t moveStatus;
+    };
+    CoveringStatus coveringStatus[DEVICE_CHANNEL_COUNT_MAX];
 };
 
 class ZigbeeCoordinator {
@@ -203,7 +212,6 @@ private:
     bool fillIeeeFromUniqueUnresolved(uint8_t ieee[8]);
     void adoptReportIdentity(const uint8_t ieee[8], uint16_t shortAddr, uint8_t endpoint);
     void offerPairingIfNeeded(const uint8_t ieee[8]);
-    bool migrateRegisteredIeee(const uint8_t previousIeee[8], const uint8_t nextIeee[8]);
     void pulseInboundDevice(const uint8_t ieee[8]);
     int8_t rssiForShortAddr(uint16_t shortAddr) const;
     DestCommandSlot *destSlotFor(const uint8_t ieee[8], uint8_t endpoint, bool allocate);
@@ -241,6 +249,13 @@ private:
     void maybeStartStatusRefresh();
     void enqueueRegisteredStatusReads();
     void enqueueTypeStatusRead(const DeviceTopicEntry *entry, uint8_t endpoint);
+    BoundZigbeeDevice::CoveringStatus *coveringStatusFor(BoundZigbeeDevice *slot, uint8_t endpoint);
+    void emitWindowCoveringStatus(
+        BoundZigbeeDevice *slot,
+        uint8_t endpoint,
+        const uint8_t ieee[8],
+        uint16_t shortAddr
+    );
     void sendNextIfReady(DestCommandSlot *slot);
     void serviceCommandFlights();
     void markInFlight(DestCommandSlot *slot, uint16_t clusterId);

@@ -92,7 +92,7 @@ String DeviceTopicMap::statePublishTopic(const DeviceTopicEntry *entry, uint8_t 
     if (entry == nullptr || entry->stateTopic[0] == '\0') {
         return "";
     }
-    if (usesTopicSuffix(entry->channelCount) && isUsableEndpoint(endpoint) && endpoint != 1) {
+    if (usesTopicSuffix(entry->channelCount) && isUsableEndpoint(endpoint)) {
         return String(entry->stateTopic) + "/" + String(endpoint);
     }
     return String(entry->stateTopic);
@@ -256,7 +256,7 @@ DeviceTopicEntry *DeviceTopicMap::findByCommandTopic(const char *topic, uint8_t 
             continue;
         }
         const int parsed = atoi(topic + prefixLength + 1);
-        if (!isUsableEndpoint((uint8_t)parsed) || parsed == 1) {
+        if (!isUsableEndpoint((uint8_t)parsed)) {
             continue;
         }
         if (topicEndpoint != nullptr) {

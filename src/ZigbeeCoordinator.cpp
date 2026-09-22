@@ -785,46 +785,6 @@ void ZigbeeCoordinator::resolveIeeeFromSource(esp_zb_zcl_addr_t source, uint8_t 
     }
 }
 
-bool ZigbeeCoordinator::migrateRegisteredIeee(const uint8_t previousIeee[8], const uint8_t nextIeee[8]) {
-    if (registeredMap == nullptr || previousIeee == nullptr || nextIeee == nullptr) {
-        return false;
-    }
-    if (isZeroIeee(previousIeee) || isZeroIeee(nextIeee) || memcmp(previousIeee, nextIeee, 8) == 0) {
-        return false;
-    }
-    DeviceTopicEntry *previous = registeredMap->findByIeee(previousIeee);
-    if (previous == nullptr || registeredMap->findByIeee(nextIeee) != nullptr) {
-        return false;
-    }
-    const uint8_t preservedZigbeeType = previous->zigbeeType;
-    const uint8_t preservedFullControl = previous->fullControl;
-    if (registeredMap->upsert(
-            nextIeee,
-            previous->friendlyName,
-            previous->stateTopic,
-            previous->commandTopic,
-            previous->availabilityTopic,
-            previous->channelCount
-        )
-        == nullptr) {
-        return false;
-    }
-    DeviceTopicEntry *moved = registeredMap->findByIeee(nextIeee);
-    if (moved != nullptr) {
-        moved->fullControl = preservedFullControl;
-        moved->zigbeeType = preservedZigbeeType;
-    }
-    registeredMap->removeByIeee(previousIeee);
-    LOGGER.info(
-        "Moved registered device " + String(registeredName(nextIeee) != nullptr ? registeredName(nextIeee) : "")
-        + " ieee=" + formatIeeeText(previousIeee) + " -> ieee=" + formatIeeeText(nextIeee)
-    );
-    if (registryChangedHandler != nullptr) {
-        registryChangedHandler();
-    }
-    return true;
-}
-
 void ZigbeeCoordinator::offerPairingIfNeeded(const uint8_t ieee[8]) {
     BoundZigbeeDevice *slot = findByIeee(ieee);
     if (slot == nullptr) {
@@ -848,29 +808,6 @@ void ZigbeeCoordinator::adoptReportIdentity(const uint8_t ieee[8], uint16_t shor
     rememberShortIeee(shortAddr, ieee, endpoint);
     BoundZigbeeDevice *reportSlot = findByIeee(ieee);
     addKnownEndpoint(reportSlot, endpoint);
-    if (!isRegistered(ieee)) {
-        DeviceTopicEntry *orphan = nullptr;
-        int orphanCount = 0;
-        if (registeredMap != nullptr) {
-            int slotIndex = registeredMap->nextUsedIndex(0);
-            while (slotIndex >= 0) {
-                DeviceTopicEntry *entry = registeredMap->slotAt(slotIndex);
-                if (entry != nullptr && entry->used) {
-                    const uint16_t mappedShort = esp_zb_address_short_by_ieee(entry->ieee);
-                    if (mappedShort == 0 || mappedShort == 0xFFFF) {
-                        orphan = entry;
-                        orphanCount++;
-                    }
-                }
-                slotIndex = registeredMap->nextUsedIndex(slotIndex + 1);
-            }
-        }
-        if (orphanCount == 1 && orphan != nullptr) {
-            uint8_t previousIeee[8];
-            memcpy(previousIeee, orphan->ieee, 8);
-            migrateRegisteredIeee(previousIeee, ieee);
-        }
-    }
     offerPairingIfNeeded(ieee);
 }
 
@@ -1068,6 +1005,37 @@ void ZigbeeCoordinator::handleAttributeReport(
     if (clusterId == kZigbeeClusterIasZone && attribute->id == kZigbeeAttrIasZoneStatus) {
         const bool alarm = (value & ESP_ZB_ZCL_IAS_ZONE_ZONE_STATUS_ALARM1) != 0;
         lightStateHandler(alarm ? "LEAK" : "DRY", ieee, srcEndpoint, shortAddr, rssiForShortAddr(shortAddr));
+        return;
+    }
+    if (clusterId == kZigbeeClusterWindowCovering
+        && (attribute->id == kZigbeeAttrCurrentPositionLiftPercentage
+            || attribute->id == kZigbeeAttrWindowCoveringMoveStatus)) {
+        BoundZigbeeDevice *coveringSlot = findByIeee(ieee);
+        BoundZigbeeDevice::CoveringStatus *coveringStatus = coveringStatusFor(coveringSlot, srcEndpoint);
+        if (coveringStatus != nullptr) {
+            if (attribute->id == kZigbeeAttrCurrentPositionLiftPercentage) {
+                coveringStatus->hasPosition = true;
+                coveringStatus->positionPercent = (uint8_t)zigbeeWindowCoveringPositionPercent(value);
+            } else {
+                coveringStatus->hasMove = true;
+                coveringStatus->moveStatus = (uint8_t)value;
+            }
+            emitWindowCoveringStatus(coveringSlot, srcEndpoint, ieee, shortAddr);
+            return;
+        }
+        char coveringMessage[SPI_DEVICE_MESSAGE_MAX];
+        const bool isPosition = attribute->id == kZigbeeAttrCurrentPositionLiftPercentage;
+        zigbeeWindowCoveringFormatStatus(
+            coveringMessage,
+            sizeof(coveringMessage),
+            !isPosition,
+            value,
+            isPosition,
+            zigbeeWindowCoveringPositionPercent(value)
+        );
+        if (coveringMessage[0] != '\0') {
+            lightStateHandler(coveringMessage, ieee, srcEndpoint, shortAddr, rssiForShortAddr(shortAddr));
+        }
         return;
     }
     lightStateHandler(eventName, ieee, srcEndpoint, shortAddr, rssiForShortAddr(shortAddr));
@@ -1296,7 +1264,70 @@ void ZigbeeCoordinator::enqueueTypeStatusRead(const DeviceTopicEntry *entry, uin
             kZigbeeClusterWindowCovering,
             kZigbeeAttrCurrentPositionLiftPercentage
         );
+        readAttribute(
+            entry->ieee,
+            endpoint,
+            kZigbeeClusterWindowCovering,
+            kZigbeeAttrWindowCoveringMoveStatus
+        );
     }
+}
+
+BoundZigbeeDevice::CoveringStatus *ZigbeeCoordinator::coveringStatusFor(
+    BoundZigbeeDevice *slot,
+    uint8_t endpoint
+) {
+    if (slot == nullptr || !DeviceTopicMap::isUsableEndpoint(endpoint)) {
+        return nullptr;
+    }
+    for (int i = 0; i < DEVICE_CHANNEL_COUNT_MAX; i++) {
+        if (slot->coveringStatus[i].used && slot->coveringStatus[i].endpoint == endpoint) {
+            return &slot->coveringStatus[i];
+        }
+    }
+    for (int i = 0; i < DEVICE_CHANNEL_COUNT_MAX; i++) {
+        if (!slot->coveringStatus[i].used) {
+            slot->coveringStatus[i].used = true;
+            slot->coveringStatus[i].endpoint = endpoint;
+            return &slot->coveringStatus[i];
+        }
+    }
+    return nullptr;
+}
+
+void ZigbeeCoordinator::emitWindowCoveringStatus(
+    BoundZigbeeDevice *slot,
+    uint8_t endpoint,
+    const uint8_t ieee[8],
+    uint16_t shortAddr
+) {
+    if (lightStateHandler == nullptr) {
+        return;
+    }
+    bool hasMove = false;
+    bool hasPosition = false;
+    uint32_t moveRaw = 0;
+    unsigned positionPercent = 0;
+    BoundZigbeeDevice::CoveringStatus *coveringStatus = coveringStatusFor(slot, endpoint);
+    if (coveringStatus != nullptr) {
+        hasMove = coveringStatus->hasMove;
+        hasPosition = coveringStatus->hasPosition;
+        moveRaw = coveringStatus->moveStatus;
+        positionPercent = coveringStatus->positionPercent;
+    }
+    char statusMessage[SPI_DEVICE_MESSAGE_MAX];
+    zigbeeWindowCoveringFormatStatus(
+        statusMessage,
+        sizeof(statusMessage),
+        hasMove,
+        moveRaw,
+        hasPosition,
+        positionPercent
+    );
+    if (statusMessage[0] == '\0') {
+        return;
+    }
+    lightStateHandler(statusMessage, ieee, endpoint, shortAddr, rssiForShortAddr(shortAddr));
 }
 
 void ZigbeeCoordinator::enqueueRegisteredStatusReads() {

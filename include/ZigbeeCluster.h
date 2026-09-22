@@ -1,5 +1,7 @@
 #pragma once
 
+#include <stddef.h>
+#include <stdio.h>
 #include <stdint.h>
 
 constexpr uint16_t kZigbeeClusterBasic = 0x0000;
@@ -30,6 +32,11 @@ constexpr uint16_t kZigbeeClusterElectricalMeasurement = 0x0B04;
 constexpr uint16_t kZigbeeAttrBatteryPercentageRemaining = 0x0021;
 constexpr uint16_t kZigbeeAttrIasZoneStatus = 0x0002;
 constexpr uint16_t kZigbeeAttrCurrentPositionLiftPercentage = 0x0008;
+constexpr uint16_t kZigbeeAttrWindowCoveringMoveStatus = 0xF000;
+constexpr uint8_t kZigbeeWindowCoveringPositionMax = 0x64;
+constexpr uint8_t kZigbeeWindowCoveringMoveDown = 0x00;
+constexpr uint8_t kZigbeeWindowCoveringMoveStopped = 0x01;
+constexpr uint8_t kZigbeeWindowCoveringMoveUp = 0x02;
 constexpr uint8_t kZigbeeBatteryPercentageRemainingMax = 200;
 
 inline const char *zigbeeClusterName(uint16_t clusterId) {
@@ -127,4 +134,59 @@ inline bool zigbeeBatteryPercentageRemainingValid(uint32_t rawValue) {
 
 inline unsigned zigbeeBatteryPercentageFromRemaining(uint32_t rawValue) {
     return (unsigned)(rawValue / 2u);
+}
+
+inline unsigned zigbeeWindowCoveringPositionPercent(uint32_t rawValue) {
+    if (rawValue > kZigbeeWindowCoveringPositionMax) {
+        return kZigbeeWindowCoveringPositionMax;
+    }
+    return (unsigned)rawValue;
+}
+
+inline const char *zigbeeWindowCoveringMoveName(uint32_t rawValue) {
+    switch (rawValue) {
+        case kZigbeeWindowCoveringMoveDown:
+            return "DOWN";
+        case kZigbeeWindowCoveringMoveUp:
+            return "UP";
+        default:
+            return nullptr;
+    }
+}
+
+inline void zigbeeWindowCoveringFormatStatus(
+    char *out,
+    size_t outSize,
+    bool hasMove,
+    uint32_t moveRaw,
+    bool hasPosition,
+    unsigned positionPercent
+) {
+    if (out == nullptr || outSize == 0) {
+        return;
+    }
+    out[0] = '\0';
+    if (hasMove && moveRaw == kZigbeeWindowCoveringMoveStopped) {
+        hasMove = false;
+    }
+    const char *moveName = hasMove ? zigbeeWindowCoveringMoveName(moveRaw) : nullptr;
+    if (hasMove && hasPosition && moveName != nullptr) {
+        snprintf(out, outSize, "%s %u%%", moveName, positionPercent);
+        return;
+    }
+    if (hasMove && hasPosition) {
+        snprintf(out, outSize, "%u %u%%", (unsigned)moveRaw, positionPercent);
+        return;
+    }
+    if (hasMove && moveName != nullptr) {
+        snprintf(out, outSize, "%s", moveName);
+        return;
+    }
+    if (hasMove) {
+        snprintf(out, outSize, "%u", (unsigned)moveRaw);
+        return;
+    }
+    if (hasPosition) {
+        snprintf(out, outSize, "%u%%", positionPercent);
+    }
 }

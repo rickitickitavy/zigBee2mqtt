@@ -341,6 +341,8 @@ static String hostGatewayStatusJson() {
     json += INTER_CHIP_HOST.slaveFirmwareVersion();
     json += "\",\"pairingActive\":";
     json += ZIGBEE_SPI_PROXY.pairingActive() ? "true" : "false";
+    json += ",\"onlineSec\":";
+    json += String((unsigned long)(millis() / 1000UL));
     json += "}";
     return json;
 }
@@ -411,6 +413,34 @@ static void runDeviceRegistryFixtures() {
         || strcmp(zigbeeClusterName(kZigbeeClusterPowerConfig), "Power configuration") != 0
         || strcmp(zigbeeClusterName(kZigbeeClusterIasZone), "IAS Zone") != 0
         || zigbeeBatteryPercentageFromRemaining(0x86) != 67
+        || zigbeeWindowCoveringPositionPercent(0x64) != 100
+        || zigbeeWindowCoveringPositionPercent(0x80) != 100
+        || strcmp(zigbeeWindowCoveringMoveName(kZigbeeWindowCoveringMoveDown), "DOWN") != 0
+        || zigbeeWindowCoveringMoveName(kZigbeeWindowCoveringMoveStopped) != nullptr
+        || strcmp(zigbeeWindowCoveringMoveName(kZigbeeWindowCoveringMoveUp), "UP") != 0
+        || ![&]() {
+            char coveringStatus[32];
+            zigbeeWindowCoveringFormatStatus(
+                coveringStatus,
+                sizeof(coveringStatus),
+                true,
+                kZigbeeWindowCoveringMoveDown,
+                true,
+                42
+            );
+            if (strcmp(coveringStatus, "DOWN 42%") != 0) {
+                return false;
+            }
+            zigbeeWindowCoveringFormatStatus(
+                coveringStatus,
+                sizeof(coveringStatus),
+                true,
+                kZigbeeWindowCoveringMoveStopped,
+                true,
+                42
+            );
+            return strcmp(coveringStatus, "42%") == 0;
+        }()
         || !zigbeeJoinShouldEmit(kZigbeeDeviceTypeNeverEmitted, ZigbeeDeviceTypeUnknown)
         || !zigbeeJoinShouldEmit(ZigbeeDeviceTypeUnknown, ZigbeeDeviceTypeOnOff)
         || zigbeeJoinShouldEmit(ZigbeeDeviceTypeOnOff, ZigbeeDeviceTypeOnOff)) {
@@ -823,6 +853,15 @@ static void setupHost() {
             LOGGER.error("Full-control parse fixture failed");
         } else {
             LOGGER.info("Full-control parse fixture ok");
+        }
+        DeviceTopicEntry suffixEntry;
+        memset(&suffixEntry, 0, sizeof(suffixEntry));
+        strncpy(suffixEntry.stateTopic, "z2m/switch/state", sizeof(suffixEntry.stateTopic) - 1);
+        suffixEntry.channelCount = 2;
+        if (DeviceTopicMap::statePublishTopic(&suffixEntry, 1) != "z2m/switch/state/1") {
+            LOGGER.error("Topic suffix fixture failed");
+        } else {
+            LOGGER.info("Topic suffix fixture ok");
         }
         uint8_t packedWrite[SPI_ZCL_WRITE_ATTR_LEN];
         const uint8_t fixtureIeee[8] = {1, 2, 3, 4, 5, 6, 7, 8};
