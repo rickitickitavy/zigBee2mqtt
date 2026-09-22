@@ -148,18 +148,32 @@ static void applyRegisteredDeviceCommand(
     }
     LOGGER.info(String("MQTT recv data=") + (payload != nullptr ? payload : ""));
     if (entry->fullControl) {
-        DeviceTopicMap::ZclWriteFields fields;
-        if (DeviceTopicMap::parseFullControlBody(action.c_str(), commandEndpoint, &fields) && fields.parsedAny) {
+        DeviceTopicMap::ZclWriteFields writeFields;
+        if (DeviceTopicMap::parseFullControlBody(action.c_str(), commandEndpoint, &writeFields)
+            && writeFields.hasWrite) {
             ZIGBEE_SPI_PROXY.writeAttribute(
                 entry->ieee,
-                fields.endpoint,
-                fields.clusterId,
-                fields.attributeId,
-                fields.dataType,
-                fields.attributeValue
+                writeFields.endpoint,
+                writeFields.clusterId,
+                writeFields.attributeId,
+                writeFields.dataType,
+                writeFields.attributeValue
             );
             return;
         }
+    }
+    DeviceTopicMap::ZclCommandFields commandFields;
+    if (DeviceTopicMap::parseZclCommandBody(action.c_str(), commandEndpoint, &commandFields)
+        && commandFields.parsed) {
+        ZIGBEE_SPI_PROXY.sendClusterCommand(
+            entry->ieee,
+            commandFields.endpoint,
+            commandFields.clusterId,
+            commandFields.commandId,
+            commandFields.payload,
+            commandFields.payloadLength
+        );
+        return;
     }
     ZIGBEE_SPI_PROXY.controlOnOff(entry->ieee, action.c_str(), commandEndpoint);
 }
@@ -361,6 +375,15 @@ static bool onDeviceRemoved(const uint8_t ieee[8]) {
     }
     persistHostDeviceList();
     return ZIGBEE_SPI_PROXY.enqueueDeviceDelete(ieee);
+}
+
+static bool onDevicesRestored(const uint8_t (*removedIeees)[8], int removedCount) {
+    if (mqttClient != nullptr) {
+        mqttClient->subscribeDeviceCommands();
+    }
+    persistHostDeviceList();
+    ZIGBEE_SPI_PROXY.queueDeletedIeeesAndPushAll(removedIeees, removedCount);
+    return true;
 }
 
 static void runDeviceRegistryFixtures() {
@@ -824,6 +847,20 @@ static void onSlaveReadAttr(
     zigbeeCoordinator->readAttribute(ieee, endpoint, clusterId, attributeId);
 }
 
+static void onSlaveZclCommand(
+    const uint8_t ieee[8],
+    uint8_t endpoint,
+    uint16_t clusterId,
+    uint8_t commandId,
+    const uint8_t *payload,
+    uint8_t payloadLength
+) {
+    if (zigbeeCoordinator == nullptr) {
+        return;
+    }
+    zigbeeCoordinator->sendClusterCommand(ieee, endpoint, clusterId, commandId, payload, payloadLength);
+}
+
 static void setupHost() {
     INTER_CHIP_HOST.resetSlaveSynchronous();
     STATUS_RGB.setBootHeld(true);
@@ -899,6 +936,60 @@ static void setupHost() {
         } else {
             LOGGER.info("Read-attr pack fixture ok");
         }
+        uint8_t packedCommand[SPI_ZCL_COMMAND_HEADER_LEN];
+        uint8_t unpackedCommandIeee[8];
+        uint8_t unpackedCommandEndpoint = 0;
+        uint16_t unpackedCommandCluster = 0;
+        uint8_t unpackedCommandId = 0;
+        uint8_t unpackedCommandPayload[1];
+        uint8_t unpackedCommandLength = 0xFF;
+        if (!spiPackZclCommand(
+                packedCommand,
+                sizeof(packedCommand),
+                fixtureIeee,
+                1,
+                0x0102,
+                0x02,
+                nullptr,
+                0
+            )
+            || packedCommand[8] != 1
+            || packedCommand[9] != 0x02
+            || packedCommand[10] != 0x01
+            || packedCommand[11] != 0x02
+            || packedCommand[12] != 0
+            || !spiUnpackZclCommand(
+                packedCommand,
+                SPI_ZCL_COMMAND_HEADER_LEN,
+                unpackedCommandIeee,
+                &unpackedCommandEndpoint,
+                &unpackedCommandCluster,
+                &unpackedCommandId,
+                unpackedCommandPayload,
+                sizeof(unpackedCommandPayload),
+                &unpackedCommandLength
+            )
+            || unpackedCommandEndpoint != 1
+            || unpackedCommandCluster != 0x0102
+            || unpackedCommandId != 0x02
+            || unpackedCommandLength != 0
+            || memcmp(unpackedCommandIeee, fixtureIeee, 8) != 0) {
+            LOGGER.error("ZCL command pack fixture failed");
+        } else {
+            LOGGER.info("ZCL command pack fixture ok");
+        }
+        DeviceTopicMap::ZclCommandFields openFields;
+        DeviceTopicMap::ZclCommandFields onFields;
+        const bool parsedOpen = DeviceTopicMap::parseZclCommandBody("OPEN", 1, &openFields);
+        const bool parsedOn = DeviceTopicMap::parseZclCommandBody("ON", 1, &onFields);
+        DeviceTopicMap::ZclWriteFields clOnlyWrite;
+        DeviceTopicMap::parseFullControlBody("cl=0x0102,cmd=0x02", 1, &clOnlyWrite);
+        if (!parsedOpen || !openFields.parsed || openFields.clusterId != 0x0102
+            || openFields.commandId != 0x00 || parsedOn && onFields.parsed || clOnlyWrite.hasWrite) {
+            LOGGER.error("ZCL command parse fixture failed");
+        } else {
+            LOGGER.info("ZCL command parse fixture ok");
+        }
         uint8_t otaPacked[SPI_MAX_PAYLOAD];
         uint8_t otaSize[4] = {0x00, 0x10, 0x00, 0x00};
         const uint16_t otaBeginLen = spiPackFirmwareOta(
@@ -971,6 +1062,7 @@ static void setupHost() {
         ZIGBEE_SPI_PROXY.appendListTelemetry(ieee, json);
     });
     webConsole->setDeviceCommandHandler(applyManualDeviceCommand);
+    webConsole->setDevicesRestoredHandler(onDevicesRestored);
     webConsole->setGatewayStatusHandler(hostGatewayStatusJson);
     webConsole->setDevicesFileHandler([]() {
         ZIGBEE_SPI_PROXY.requestDevicesFile();
@@ -1014,6 +1106,7 @@ static void setupSlave() {
     INTER_CHIP_SLAVE.setOnOffHandler(onSlaveOnOff);
     INTER_CHIP_SLAVE.setWriteAttrHandler(onSlaveWriteAttr);
     INTER_CHIP_SLAVE.setReadAttrHandler(onSlaveReadAttr);
+    INTER_CHIP_SLAVE.setZclCommandHandler(onSlaveZclCommand);
     INTER_CHIP_SLAVE.setDeviceSyncHandler(onSlaveDeviceSync);
     deviceStore = new DeviceStore();
     deviceStore->begin();

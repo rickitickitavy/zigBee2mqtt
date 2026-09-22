@@ -17,6 +17,7 @@ public:
     using GatewayStatusFn = String (*)();
     using DeviceTelemetryFn = void (*)(const uint8_t ieee[8], String &json);
     using DeviceCommandFn = int (*)(const char *ieeeText, const char *payload, int channel);
+    using DevicesRestoredFn = bool (*)(const uint8_t (*removedIeees)[8], int removedCount);
 
     explicit WebConsole(SettingsManager *settingsManager);
 
@@ -36,6 +37,7 @@ public:
     void setGatewayStatusHandler(GatewayStatusFn handler);
     void setDeviceTelemetryHandler(DeviceTelemetryFn handler);
     void setDeviceCommandHandler(DeviceCommandFn handler);
+    void setDevicesRestoredHandler(DevicesRestoredFn handler);
 
 private:
     SettingsManager *settingsManager;
@@ -51,6 +53,7 @@ private:
     GatewayStatusFn gatewayStatusJson = nullptr;
     DeviceTelemetryFn appendDeviceTelemetry = nullptr;
     DeviceCommandFn applyDeviceCommand = nullptr;
+    DevicesRestoredFn applyDevicesRestored = nullptr;
     AsyncWebServer server;
     String requestBody;
     bool otaStarted = false;
@@ -66,6 +69,11 @@ private:
     void handleZigbeePost(AsyncWebServerRequest *request);
     void handleHardwareGet(AsyncWebServerRequest *request);
     void handleHardwarePost(AsyncWebServerRequest *request);
+    void handleSettingsExportGet(AsyncWebServerRequest *request);
+    void handleSettingsRestorePost(AsyncWebServerRequest *request);
+    bool applyMqttJson(const char *json, String *errorText);
+    bool applyZigbeeJson(const char *json, String *errorText);
+    bool applyHardwareJson(const char *json, String *errorText);
     void handleDevicesGet(AsyncWebServerRequest *request);
     void handleDevicesPost(AsyncWebServerRequest *request);
     void handleDevicesDelete(AsyncWebServerRequest *request);

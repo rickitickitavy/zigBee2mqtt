@@ -123,6 +123,10 @@ void InterChipSlave::setReadAttrHandler(ReadAttrFn handler) {
     readAttrHandler = handler;
 }
 
+void InterChipSlave::setZclCommandHandler(ZclCommandFn handler) {
+    zclCommandHandler = handler;
+}
+
 void InterChipSlave::setDeviceSyncHandler(DeviceSyncFn handler) {
     deviceSyncHandler = handler;
 }
@@ -514,6 +518,28 @@ void InterChipSlave::stashDeferredReadAttr(
     slot->attributeValue = 0;
 }
 
+void InterChipSlave::stashDeferredZclCommand(
+    const uint8_t ieee[8],
+    uint8_t endpoint,
+    uint16_t clusterId,
+    uint8_t commandId,
+    const uint8_t *payload,
+    uint8_t payloadLength
+) {
+    DeferredDeviceCommand *slot = allocDeferredDeviceCommand(ieee, endpoint);
+    slot->kind = DeferredDeviceKind::ClusterCmd;
+    slot->clusterId = clusterId;
+    slot->dataType = commandId;
+    memset(slot->onOffCommand, 0, sizeof(slot->onOffCommand));
+    const uint8_t bounded =
+        payloadLength >= sizeof(slot->onOffCommand) ? (uint8_t)(sizeof(slot->onOffCommand) - 1)
+                                                     : payloadLength;
+    slot->attributeValue = bounded;
+    if (payload != nullptr && bounded > 0) {
+        memcpy(slot->onOffCommand, payload, bounded);
+    }
+}
+
 void InterChipSlave::handleHostFrame(const SpiFrame &frame) {
     if (frame.cmd == SpiCmdFirmwareOta) {
         if (firmwareOtaResultValid && frame.seq == firmwareOtaLastSeq && firmwareOtaLastOk) {
@@ -616,6 +642,31 @@ void InterChipSlave::handleHostFrame(const SpiFrame &frame) {
         enqueueEvent(SpiEvtCmdResult, &ok, 1);
         return;
     }
+    if (frame.cmd == SpiCmdZclCommand) {
+        uint8_t ieee[8];
+        uint8_t endpoint = 255;
+        uint16_t clusterId = 0;
+        uint8_t commandId = 0;
+        uint8_t commandPayload[SPI_MAX_PAYLOAD];
+        uint8_t payloadLength = 0;
+        if (!spiUnpackZclCommand(
+                frame.payload,
+                frame.length,
+                ieee,
+                &endpoint,
+                &clusterId,
+                &commandId,
+                commandPayload,
+                sizeof(commandPayload),
+                &payloadLength
+            )) {
+            return;
+        }
+        stashDeferredZclCommand(ieee, endpoint, clusterId, commandId, commandPayload, payloadLength);
+        uint8_t ok = 1;
+        enqueueEvent(SpiEvtCmdResult, &ok, 1);
+        return;
+    }
     if (frame.cmd == SpiCmdSetDevice && frame.length >= 1 && deviceSyncHandler != nullptr) {
         uint8_t flags = 0;
         DeviceTopicEntry entry;
@@ -714,6 +765,15 @@ void InterChipSlave::applyDeferredRadioCommands() {
             );
         } else if (slot->kind == DeferredDeviceKind::ReadAttr && readAttrHandler != nullptr) {
             readAttrHandler(slot->ieee, slot->endpoint, slot->clusterId, slot->attributeId);
+        } else if (slot->kind == DeferredDeviceKind::ClusterCmd && zclCommandHandler != nullptr) {
+            zclCommandHandler(
+                slot->ieee,
+                slot->endpoint,
+                slot->clusterId,
+                slot->dataType,
+                (const uint8_t *)slot->onOffCommand,
+                (uint8_t)slot->attributeValue
+            );
         }
         slot->occupied = false;
     }

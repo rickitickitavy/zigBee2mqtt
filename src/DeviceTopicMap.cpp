@@ -2,6 +2,7 @@
 #include "JsonField.h"
 #include "SpiProtocol.h"
 #include "Defines.h"
+#include "ZigbeeCluster.h"
 #include "ZigbeeDeviceType.h"
 
 #include <LittleFS.h>
@@ -165,6 +166,7 @@ bool DeviceTopicMap::parseFullControlBody(const char *body, uint8_t mappedEndpoi
     fields->endpoint = mappedEndpoint;
     fields->dataType = ZCL_ATTR_TYPE_U8;
     fields->parsedAny = false;
+    fields->hasWrite = false;
     if (body == nullptr) {
         return true;
     }
@@ -199,12 +201,14 @@ bool DeviceTopicMap::parseFullControlBody(const char *body, uint8_t mappedEndpoi
             }
             fields->attributeId = (uint16_t)parsedNumber;
             fields->parsedAny = true;
+            fields->hasWrite = true;
         } else if (key == "val") {
             if (!parseNumericField(fieldValue, &parsedNumber)) {
                 continue;
             }
             fields->attributeValue = parsedNumber;
             fields->parsedAny = true;
+            fields->hasWrite = true;
         } else if (key == "ep") {
             if (!parseNumericField(fieldValue, &parsedNumber)) {
                 continue;
@@ -226,6 +230,128 @@ bool DeviceTopicMap::parseFullControlBody(const char *body, uint8_t mappedEndpoi
     if (!sawType) {
         fields->dataType = dataTypeFromValue(fields->attributeValue);
     }
+    return true;
+}
+
+static bool parseHexPayload(const String &text, uint8_t *out, uint8_t *outLength, size_t outMax) {
+    if (out == nullptr || outLength == nullptr) {
+        return false;
+    }
+    int highNibble = -1;
+    uint8_t filled = 0;
+    for (unsigned index = 0; index < text.length(); index++) {
+        const char character = text.charAt(index);
+        if (character == ' ' || character == ':' || character == '-') {
+            continue;
+        }
+        int nibble = -1;
+        if (character >= '0' && character <= '9') {
+            nibble = character - '0';
+        } else if (character >= 'a' && character <= 'f') {
+            nibble = 10 + (character - 'a');
+        } else if (character >= 'A' && character <= 'F') {
+            nibble = 10 + (character - 'A');
+        } else {
+            return false;
+        }
+        if (highNibble < 0) {
+            highNibble = nibble;
+            continue;
+        }
+        if (filled >= outMax) {
+            return false;
+        }
+        out[filled++] = (uint8_t)((highNibble << 4) | nibble);
+        highNibble = -1;
+    }
+    if (highNibble >= 0) {
+        return false;
+    }
+    *outLength = filled;
+    return true;
+}
+
+bool DeviceTopicMap::parseZclCommandBody(const char *body, uint8_t mappedEndpoint, ZclCommandFields *fields) {
+    if (fields == nullptr) {
+        return false;
+    }
+    memset(fields, 0, sizeof(*fields));
+    fields->clusterId = kZigbeeClusterWindowCovering;
+    fields->endpoint = mappedEndpoint;
+    if (body == nullptr) {
+        return true;
+    }
+
+    String trimmed = String(body);
+    trimmed.trim();
+    String shortcut = trimmed;
+    shortcut.toLowerCase();
+    if (shortcut == "open" || shortcut == "up") {
+        fields->commandId = kZigbeeWindowCoveringCmdOpen;
+        fields->parsed = true;
+        return true;
+    }
+    if (shortcut == "close" || shortcut == "down") {
+        fields->commandId = kZigbeeWindowCoveringCmdClose;
+        fields->parsed = true;
+        return true;
+    }
+    if (shortcut == "stop") {
+        fields->commandId = kZigbeeWindowCoveringCmdStop;
+        fields->parsed = true;
+        return true;
+    }
+
+    String remaining = trimmed;
+    bool sawCluster = false;
+    bool sawCommand = false;
+    while (remaining.length() > 0) {
+        const int commaIndex = remaining.indexOf(',');
+        String token = commaIndex >= 0 ? remaining.substring(0, commaIndex) : remaining;
+        remaining = commaIndex >= 0 ? remaining.substring(commaIndex + 1) : "";
+        token.trim();
+        const int equalsIndex = token.indexOf('=');
+        if (equalsIndex <= 0) {
+            continue;
+        }
+        String key = token.substring(0, equalsIndex);
+        String fieldValue = token.substring(equalsIndex + 1);
+        key.trim();
+        key.toLowerCase();
+        fieldValue.trim();
+        uint32_t parsedNumber = 0;
+        if (key == "cl") {
+            if (!parseNumericField(fieldValue, &parsedNumber)) {
+                continue;
+            }
+            fields->clusterId = (uint16_t)parsedNumber;
+            sawCluster = true;
+        } else if (key == "cmd") {
+            if (!parseNumericField(fieldValue, &parsedNumber)) {
+                continue;
+            }
+            fields->commandId = (uint8_t)parsedNumber;
+            sawCommand = true;
+        } else if (key == "ep") {
+            if (!parseNumericField(fieldValue, &parsedNumber)) {
+                continue;
+            }
+            const uint8_t parsedEndpoint = (uint8_t)parsedNumber;
+            if (isUsableEndpoint(parsedEndpoint)) {
+                fields->endpoint = parsedEndpoint;
+            }
+        } else if (key == "pl" || key == "payload") {
+            if (!parseHexPayload(
+                    fieldValue,
+                    fields->payload,
+                    &fields->payloadLength,
+                    sizeof(fields->payload)
+                )) {
+                continue;
+            }
+        }
+    }
+    fields->parsed = sawCluster && sawCommand;
     return true;
 }
 

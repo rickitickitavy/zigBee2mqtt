@@ -95,3 +95,61 @@ inline bool extractJsonInt(const char *json, const char *key, int &out) {
     out = atoi(colon);
     return true;
 }
+
+inline bool extractJsonKeyedSlice(const char *json, const char *key, char openBrace, String &out) {
+    if (json == nullptr || key == nullptr) {
+        return false;
+    }
+    String pattern = String("\"") + key + "\"";
+    const char *found = strstr(json, pattern.c_str());
+    if (found == nullptr) {
+        return false;
+    }
+    const char *colon = strchr(found + pattern.length(), ':');
+    if (colon == nullptr) {
+        return false;
+    }
+    colon++;
+    while (*colon == ' ' || *colon == '\t' || *colon == '\n' || *colon == '\r') {
+        colon++;
+    }
+    if (*colon != openBrace) {
+        return false;
+    }
+    int depth = 0;
+    bool inString = false;
+    bool escape = false;
+    for (const char *cursor = colon; *cursor != '\0'; cursor++) {
+        const char character = *cursor;
+        if (inString) {
+            if (escape) {
+                escape = false;
+                continue;
+            }
+            if (character == '\\') {
+                escape = true;
+                continue;
+            }
+            if (character == '"') {
+                inString = false;
+            }
+            continue;
+        }
+        if (character == '"') {
+            inString = true;
+            continue;
+        }
+        if (character == '{' || character == '[') {
+            depth++;
+            continue;
+        }
+        if (character == '}' || character == ']') {
+            depth--;
+            if (depth == 0) {
+                out = String(colon).substring(0, (unsigned int)(cursor - colon + 1));
+                return true;
+            }
+        }
+    }
+    return false;
+}

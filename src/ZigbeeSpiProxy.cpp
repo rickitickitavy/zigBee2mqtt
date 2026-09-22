@@ -170,6 +170,52 @@ bool ZigbeeSpiProxy::readAttribute(
     return queued;
 }
 
+bool ZigbeeSpiProxy::sendClusterCommand(
+    const uint8_t ieee[8],
+    uint8_t endpoint,
+    uint16_t clusterId,
+    uint8_t commandId,
+    const uint8_t *payload,
+    uint8_t payloadLength
+) {
+    uint8_t frame[SPI_MAX_PAYLOAD];
+    if (!spiPackZclCommand(
+            frame,
+            sizeof(frame),
+            ieee,
+            endpoint,
+            clusterId,
+            commandId,
+            payload,
+            payloadLength
+        )) {
+        return false;
+    }
+    const bool queued = INTER_CHIP_HOST.tryEnqueue(
+        SpiCmdZclCommand,
+        frame,
+        spiZclCommandFrameLength(payloadLength)
+    );
+    if (queued) {
+        packetsTx++;
+    }
+    return queued;
+}
+
+void ZigbeeSpiProxy::queueDeletedIeeesAndPushAll(const uint8_t (*deletedIeees)[8], int deletedCount) {
+    pendingDeleteCount = 0;
+    pendingDeleteIndex = 0;
+    pendingUpsertWalk = 0;
+    if (deletedIeees != nullptr) {
+        const int bounded = deletedCount > DEVICE_MAP_SLOTS ? DEVICE_MAP_SLOTS : deletedCount;
+        for (int i = 0; i < bounded; i++) {
+            memcpy(pendingDeleteIeees[i], deletedIeees[i], 8);
+        }
+        pendingDeleteCount = bounded;
+    }
+    fullPushActive = true;
+}
+
 void ZigbeeSpiProxy::setRegistryPullDoneHandler(void (*handler)()) {
     registryPullDone = handler;
 }
@@ -294,6 +340,31 @@ void ZigbeeSpiProxy::pumpPendingChanges() {
             pendingChanges[i].used = false;
         }
         return;
+    }
+    if (!fullPushActive || registryMap == nullptr) {
+        return;
+    }
+    if (pendingDeleteIndex < pendingDeleteCount) {
+        DeviceTopicEntry deletedEntry;
+        memset(&deletedEntry, 0, sizeof(deletedEntry));
+        memcpy(deletedEntry.ieee, pendingDeleteIeees[pendingDeleteIndex], 8);
+        deletedEntry.used = 1;
+        if (enqueueRegistryFrame(SPI_DEVICE_SYNC_DELETE, &deletedEntry)) {
+            pendingDeleteIndex++;
+        }
+        return;
+    }
+    const int nextIndex = registryMap->nextUsedIndex(pendingUpsertWalk);
+    if (nextIndex < 0) {
+        fullPushActive = false;
+        pendingDeleteCount = 0;
+        pendingDeleteIndex = 0;
+        pendingUpsertWalk = 0;
+        return;
+    }
+    DeviceTopicEntry *entry = registryMap->slotAt(nextIndex);
+    if (entry != nullptr && enqueueRegistryFrame(SPI_DEVICE_SYNC_ENTRY, entry)) {
+        pendingUpsertWalk = nextIndex + 1;
     }
 }
 
