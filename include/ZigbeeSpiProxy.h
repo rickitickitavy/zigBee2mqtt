@@ -28,6 +28,15 @@ public:
         uint16_t clusterId,
         uint16_t attributeId
     );
+    bool sendClusterCommand(
+        const uint8_t ieee[8],
+        uint8_t endpoint,
+        uint16_t clusterId,
+        uint8_t commandId,
+        const uint8_t *payload,
+        uint8_t payloadLength
+    );
+    void queueDeletedIeeesAndPushAll(const uint8_t (*deletedIeees)[8], int deletedCount);
     void requestRegistryPull(DeviceTopicMap *topicMap);
     void requestDevicesFile();
     String devicesFileJson() const;
@@ -101,6 +110,11 @@ private:
     uint32_t packetsRx = 0;
     uint32_t packetsTx = 0;
     bool pairingOpen = false;
+    uint8_t pendingDeleteIeees[DEVICE_MAP_SLOTS][8]{};
+    int pendingDeleteCount = 0;
+    int pendingDeleteIndex = 0;
+    int pendingUpsertWalk = 0;
+    bool fullPushActive = false;
 
     CachedDevice *findByIeee(const uint8_t ieee[8]);
     const CachedDevice *findByIeee(const uint8_t ieee[8]) const;

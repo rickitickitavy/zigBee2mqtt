@@ -1,6 +1,7 @@
 #pragma once
 
 #include "GlobalSettings.h"
+#include "SpiProtocol.h"
 #include <Arduino.h>
 #include <stddef.h>
 
@@ -36,8 +37,18 @@ public:
         uint8_t endpoint;
         uint8_t dataType;
         bool parsedAny;
+        bool hasWrite;
+    };
+    struct ZclCommandFields {
+        uint16_t clusterId;
+        uint8_t commandId;
+        uint8_t endpoint;
+        uint8_t payload[SPI_DEVICE_MESSAGE_MAX];
+        uint8_t payloadLength;
+        bool parsed;
     };
     static bool parseFullControlBody(const char *body, uint8_t mappedEndpoint, ZclWriteFields *fields);
+    static bool parseZclCommandBody(const char *body, uint8_t mappedEndpoint, ZclCommandFields *fields);
     bool removeByIeee(const uint8_t ieee[8]);
     void clearAll();
     void replaceFrom(const DeviceTopicMap *source);

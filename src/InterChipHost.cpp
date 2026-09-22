@@ -38,7 +38,7 @@ static bool commandExpectsReply(uint8_t cmd) {
 }
 
 static bool isDeviceControlCommand(uint8_t cmd) {
-    return cmd == SpiCmdZclOnOff || cmd == SpiCmdZclWriteAttr;
+    return cmd == SpiCmdZclOnOff || cmd == SpiCmdZclWriteAttr || cmd == SpiCmdZclCommand;
 }
 
 static bool sameDeviceControlDest(const SpiFrame &frame, const uint8_t *payload, uint16_t length) {

@@ -73,6 +73,14 @@ public:
         uint16_t clusterId,
         uint16_t attributeId
     );
+    bool sendClusterCommand(
+        const uint8_t ieee[8],
+        uint8_t endpoint,
+        uint16_t clusterId,
+        uint8_t commandId,
+        const uint8_t *payload,
+        uint8_t payloadLength
+    );
     BoundZigbeeDevice *findByIeee(const uint8_t ieee[8]);
     BoundZigbeeDevice *findByShortAddr(uint16_t shortAddr);
     void setLightStateHandler(LightStateFn handler);
@@ -144,7 +152,8 @@ private:
         None = 0,
         OnOff = 1,
         WriteAttr = 2,
-        ReadAttr = 3
+        ReadAttr = 3,
+        ClusterCmd = 4
     };
 
     struct DestCommandSlot {
@@ -245,6 +254,20 @@ private:
     );
     void stashNextReadAttr(DestCommandSlot *slot, uint16_t clusterId, uint16_t attributeId);
     bool transmitReadAttr(DestCommandSlot *slot, uint16_t clusterId, uint16_t attributeId);
+    void stashNextClusterCmd(
+        DestCommandSlot *slot,
+        uint16_t clusterId,
+        uint8_t commandId,
+        const uint8_t *payload,
+        uint8_t payloadLength
+    );
+    bool transmitClusterCmd(
+        DestCommandSlot *slot,
+        uint16_t clusterId,
+        uint8_t commandId,
+        const uint8_t *payload,
+        uint8_t payloadLength
+    );
     void addKnownEndpoint(BoundZigbeeDevice *slot, uint8_t endpoint);
     void maybeStartStatusRefresh();
     void enqueueRegisteredStatusReads();

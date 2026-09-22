@@ -8,6 +8,7 @@
 #include <LittleFS.h>
 #include <Update.h>
 #include <IPAddress.h>
+#include <string.h>
 
 static const char kMissingFsPage[] PROGMEM =
     "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>z2m-gateway</title></head>"
@@ -80,6 +81,22 @@ void WebConsole::begin() {
         "/api/hw",
         HTTP_GET,
         [this](AsyncWebServerRequest *request) { handleHardwareGet(request); }
+    );
+    server.on(
+        "/api/settings/export",
+        HTTP_GET,
+        [this](AsyncWebServerRequest *request) { handleSettingsExportGet(request); }
+    );
+    server.on(
+        "/api/settings/restore",
+        HTTP_POST,
+        [this](AsyncWebServerRequest *request) { handleSettingsRestorePost(request); },
+        nullptr,
+        [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+            (void)request;
+            (void)total;
+            appendRequestBody(data, len, index);
+        }
     );
 
     server.on("/api/devices/store", HTTP_GET, [this](AsyncWebServerRequest *request) { handleDevicesStoreGet(request); });
@@ -437,6 +454,10 @@ void WebConsole::setDeviceCommandHandler(WebConsole::DeviceCommandFn handler) {
     applyDeviceCommand = handler;
 }
 
+void WebConsole::setDevicesRestoredHandler(WebConsole::DevicesRestoredFn handler) {
+    applyDevicesRestored = handler;
+}
+
 void WebConsole::setDevicesFileHandler(WebConsole::DevicesFileFn handler) {
     devicesFileJson = handler;
 }
@@ -471,6 +492,219 @@ void WebConsole::handleHardwarePost(AsyncWebServerRequest *request) {
         applyHardware(clamped);
     }
     request->send(200, "text/plain", "Saved. SPI speed is active now.");
+}
+
+bool WebConsole::applyMqttJson(const char *json, String *errorText) {
+    String server;
+    String username;
+    String password;
+    String clientId;
+    String baseTopic;
+    int port = DEFAULT_MQTT_PORT;
+    int reconnectIntervalMs = DEFAULT_MQTT_RECONNECT_MS;
+    int clientTimeoutMs = DEFAULT_MQTT_CLIENT_TIMEOUT_MS;
+    bool enabled = true;
+    const bool haveServer = extractJsonString(json, "server", server);
+    const bool haveClientId = extractJsonString(json, "clientId", clientId);
+    const bool haveBaseTopic = extractJsonString(json, "baseTopic", baseTopic);
+    extractJsonString(json, "username", username);
+    extractJsonString(json, "password", password);
+    extractJsonBool(json, "enabled", enabled);
+    extractJsonInt(json, "port", port);
+    extractJsonInt(json, "reconnectIntervalMs", reconnectIntervalMs);
+    extractJsonInt(json, "clientTimeoutMs", clientTimeoutMs);
+    if (!haveServer || !haveClientId || !haveBaseTopic) {
+        if (errorText != nullptr) {
+            *errorText = "Need mqtt server, clientId, baseTopic";
+        }
+        return false;
+    }
+    if (server.length() == 0) {
+        server = DEFAULT_MQTT_SERVER;
+    }
+    if (clientId.length() == 0) {
+        clientId = DEFAULT_MQTT_CLIENT_ID;
+    }
+    if (baseTopic.length() == 0) {
+        baseTopic = DEFAULT_MQTT_BASE_TOPIC;
+    }
+    if (port < 1 || port > 65535) {
+        if (errorText != nullptr) {
+            *errorText = "port must be 1-65535";
+        }
+        return false;
+    }
+    if (reconnectIntervalMs < 500) {
+        reconnectIntervalMs = DEFAULT_MQTT_RECONNECT_MS;
+    }
+    SettingsManager::clampMqttClientTimeout(clientTimeoutMs);
+    GlobalSettings *settings = settingsManager->getSettings();
+    strncpy(settings->mqtt.server, server.c_str(), sizeof(settings->mqtt.server) - 1);
+    settings->mqtt.server[sizeof(settings->mqtt.server) - 1] = '\0';
+    settings->mqtt.port = port;
+    settings->mqtt.reconnectIntervalMs = reconnectIntervalMs;
+    settings->mqtt.clientTimeoutMs = clientTimeoutMs;
+    settings->mqtt.enabled = enabled;
+    strncpy(settings->mqtt.username, username.c_str(), sizeof(settings->mqtt.username) - 1);
+    settings->mqtt.username[sizeof(settings->mqtt.username) - 1] = '\0';
+    strncpy(settings->mqtt.password, password.c_str(), sizeof(settings->mqtt.password) - 1);
+    settings->mqtt.password[sizeof(settings->mqtt.password) - 1] = '\0';
+    strncpy(settings->mqtt.clientId, clientId.c_str(), sizeof(settings->mqtt.clientId) - 1);
+    settings->mqtt.clientId[sizeof(settings->mqtt.clientId) - 1] = '\0';
+    strncpy(settings->mqtt.baseTopic, baseTopic.c_str(), sizeof(settings->mqtt.baseTopic) - 1);
+    settings->mqtt.baseTopic[sizeof(settings->mqtt.baseTopic) - 1] = '\0';
+    return true;
+}
+
+bool WebConsole::applyZigbeeJson(const char *json, String *errorText) {
+    int channel = DEFAULT_ZIGBEE_CHANNEL;
+    int permitJoinOnBootSec = DEFAULT_PERMIT_JOIN_SEC;
+    if (!extractJsonInt(json, "channel", channel)
+        || !extractJsonInt(json, "permitJoinOnBootSec", permitJoinOnBootSec)) {
+        if (errorText != nullptr) {
+            *errorText = "Need zigbee channel, permitJoinOnBootSec";
+        }
+        return false;
+    }
+    if (channel < 11 || channel > 26) {
+        if (errorText != nullptr) {
+            *errorText = "channel must be 11-26";
+        }
+        return false;
+    }
+    if (permitJoinOnBootSec < 0 || permitJoinOnBootSec > 254) {
+        if (errorText != nullptr) {
+            *errorText = "permitJoinOnBootSec must be 0-254";
+        }
+        return false;
+    }
+    GlobalSettings *settings = settingsManager->getSettings();
+    settings->zigbee.channel = (uint8_t)channel;
+    settings->zigbee.permitJoinOnBootSec = (uint8_t)permitJoinOnBootSec;
+    return true;
+}
+
+bool WebConsole::applyHardwareJson(const char *json, String *errorText) {
+    int spiSpeedHz = DEFAULT_SPI_SPEED_HZ;
+    if (!extractJsonInt(json, "spiSpeedHz", spiSpeedHz)) {
+        if (errorText != nullptr) {
+            *errorText = "Need hardware spiSpeedHz";
+        }
+        return false;
+    }
+    const uint32_t clamped = SettingsManager::clampSpiSpeedHz((uint32_t)spiSpeedHz);
+    if (clamped != (uint32_t)spiSpeedHz) {
+        if (errorText != nullptr) {
+            *errorText = "spiSpeedHz must be 100000-40000000";
+        }
+        return false;
+    }
+    settingsManager->setSpiSpeedHz(clamped);
+    if (applyHardware != nullptr) {
+        applyHardware(clamped);
+    }
+    return true;
+}
+
+void WebConsole::handleSettingsExportGet(AsyncWebServerRequest *request) {
+    GlobalSettings *settings = settingsManager->getSettings();
+    String json = "{";
+    json += "\"version\":\"";
+    json += FIRMWARE_VERSION;
+    json += "\",\"mqtt\":{";
+    json += "\"enabled\":";
+    json += settings->mqtt.enabled ? "true" : "false";
+    json += ",\"server\":\"";
+    appendJsonEscaped(json, settings->mqtt.server, sizeof(settings->mqtt.server));
+    json += "\",\"port\":";
+    json += String(settings->mqtt.port);
+    json += ",\"username\":\"";
+    appendJsonEscaped(json, settings->mqtt.username, sizeof(settings->mqtt.username));
+    json += "\",\"password\":\"";
+    appendJsonEscaped(json, settings->mqtt.password, sizeof(settings->mqtt.password));
+    json += "\",\"clientId\":\"";
+    appendJsonEscaped(json, settings->mqtt.clientId, sizeof(settings->mqtt.clientId));
+    json += "\",\"baseTopic\":\"";
+    appendJsonEscaped(json, settings->mqtt.baseTopic, sizeof(settings->mqtt.baseTopic));
+    json += "\",\"reconnectIntervalMs\":";
+    json += String((long)settings->mqtt.reconnectIntervalMs);
+    json += ",\"clientTimeoutMs\":";
+    json += String(settings->mqtt.clientTimeoutMs);
+    json += "},\"zigbee\":{";
+    json += "\"channel\":";
+    json += String(settings->zigbee.channel);
+    json += ",\"permitJoinOnBootSec\":";
+    json += String(settings->zigbee.permitJoinOnBootSec);
+    json += "},\"hardware\":{\"spiSpeedHz\":";
+    json += String((unsigned long)settingsManager->spiSpeedHz());
+    json += "},\"devices\":";
+    json += settingsManager->deviceMap()->listStoreJson();
+    json += "}";
+    AsyncWebServerResponse *response = request->beginResponse(200, "application/json", json);
+    response->addHeader("Cache-Control", "no-store");
+    request->send(response);
+}
+
+void WebConsole::handleSettingsRestorePost(AsyncWebServerRequest *request) {
+    String errorText;
+    String mqttJson;
+    String zigbeeJson;
+    String hardwareJson;
+    String devicesJson;
+    const bool haveMqtt = extractJsonKeyedSlice(requestBody.c_str(), "mqtt", '{', mqttJson);
+    const bool haveZigbee = extractJsonKeyedSlice(requestBody.c_str(), "zigbee", '{', zigbeeJson);
+    const bool haveHardware = extractJsonKeyedSlice(requestBody.c_str(), "hardware", '{', hardwareJson);
+    const bool haveDevices = extractJsonKeyedSlice(requestBody.c_str(), "devices", '[', devicesJson);
+    if (haveMqtt && !applyMqttJson(mqttJson.c_str(), &errorText)) {
+        request->send(400, "text/plain", errorText);
+        return;
+    }
+    if (haveZigbee && !applyZigbeeJson(zigbeeJson.c_str(), &errorText)) {
+        request->send(400, "text/plain", errorText);
+        return;
+    }
+    if (haveHardware && !applyHardwareJson(hardwareJson.c_str(), &errorText)) {
+        request->send(400, "text/plain", errorText);
+        return;
+    }
+    if (haveDevices) {
+        DeviceTopicMap *deviceMap = settingsManager->deviceMap();
+        static uint8_t previousIeees[DEVICE_MAP_SLOTS][8];
+        static uint8_t removedIeees[DEVICE_MAP_SLOTS][8];
+        int previousCount = 0;
+        for (int i = 0; i < DEVICE_MAP_SLOTS; i++) {
+            DeviceTopicEntry *entry = deviceMap->slotAt(i);
+            if (entry == nullptr || !entry->used) {
+                continue;
+            }
+            memcpy(previousIeees[previousCount], entry->ieee, 8);
+            previousCount++;
+        }
+        deviceMap->replaceFromJson(devicesJson);
+        int removedCount = 0;
+        for (int i = 0; i < previousCount; i++) {
+            if (deviceMap->findByIeee(previousIeees[i]) == nullptr) {
+                memcpy(removedIeees[removedCount], previousIeees[i], 8);
+                removedCount++;
+            }
+        }
+        if (applyDevicesRestored != nullptr && !applyDevicesRestored(removedIeees, removedCount)) {
+            request->send(503, "text/plain", "Slave is not ready to store the device list");
+            return;
+        }
+        if (applyDevicesRestored == nullptr) {
+            settingsManager->saveDevicesJson();
+        }
+    }
+    if (haveMqtt || haveZigbee) {
+        settingsManager->saveMain(true);
+        request->send(200, "text/plain", "Restored. Device will restart to apply settings.");
+        return;
+    }
+    if (haveHardware) {
+        settingsManager->saveMain(false);
+    }
+    request->send(200, "text/plain", "Restored");
 }
 
 void WebConsole::setDeviceServices(

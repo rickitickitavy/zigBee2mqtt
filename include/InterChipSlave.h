@@ -23,6 +23,14 @@ public:
         uint16_t clusterId,
         uint16_t attributeId
     );
+    using ZclCommandFn = void (*)(
+        const uint8_t ieee[8],
+        uint8_t endpoint,
+        uint16_t clusterId,
+        uint8_t commandId,
+        const uint8_t *payload,
+        uint8_t payloadLength
+    );
     using DeviceSyncFn = void (*)(uint8_t flags, const DeviceTopicEntry *entry);
     using DevicesFileFn = String (*)();
 
@@ -50,6 +58,7 @@ public:
     void setOnOffHandler(OnOffFn handler);
     void setWriteAttrHandler(WriteAttrFn handler);
     void setReadAttrHandler(ReadAttrFn handler);
+    void setZclCommandHandler(ZclCommandFn handler);
     void setDeviceSyncHandler(DeviceSyncFn handler);
     void setDeviceMapSource(DeviceTopicMap *deviceMap);
     void applyHostTime(uint32_t unixSec);
@@ -72,7 +81,8 @@ private:
     enum class DeferredDeviceKind : uint8_t {
         OnOff = 0,
         WriteAttr = 1,
-        ReadAttr = 2
+        ReadAttr = 2,
+        ClusterCmd = 3
     };
 
     struct DeferredDeviceCommand {
@@ -98,6 +108,7 @@ private:
     OnOffFn onOffHandler = nullptr;
     WriteAttrFn writeAttrHandler = nullptr;
     ReadAttrFn readAttrHandler = nullptr;
+    ZclCommandFn zclCommandHandler = nullptr;
     DeviceSyncFn deviceSyncHandler = nullptr;
     DeviceTopicMap *deviceMapSource = nullptr;
     DevicesFileFn devicesFileSource = nullptr;
@@ -153,6 +164,14 @@ private:
         uint8_t endpoint,
         uint16_t clusterId,
         uint16_t attributeId
+    );
+    void stashDeferredZclCommand(
+        const uint8_t ieee[8],
+        uint8_t endpoint,
+        uint16_t clusterId,
+        uint8_t commandId,
+        const uint8_t *payload,
+        uint8_t payloadLength
     );
 };
 

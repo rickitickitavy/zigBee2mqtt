@@ -1221,6 +1221,49 @@ bool ZigbeeCoordinator::readAttribute(
     return transmitReadAttr(slot, clusterId, attributeId);
 }
 
+bool ZigbeeCoordinator::sendClusterCommand(
+    const uint8_t ieee[8],
+    uint8_t endpoint,
+    uint16_t clusterId,
+    uint8_t commandId,
+    const uint8_t *payload,
+    uint8_t payloadLength
+) {
+    if (!started) {
+        LOGGER.warning("Zigbee is not started");
+        return false;
+    }
+    BoundZigbeeDevice *device = findByIeee(ieee);
+    if (device == nullptr) {
+        LOGGER.warning("No bound Zigbee device for command");
+        return true;
+    }
+    if (registryReady && !isRegistered(ieee)) {
+        LOGGER.warning("Command ignored; device is not registered");
+        return true;
+    }
+
+    uint8_t targetEndpoint = endpoint;
+    if (!DeviceTopicMap::isUsableEndpoint(targetEndpoint)) {
+        targetEndpoint = device->endpoint;
+    }
+    if (!DeviceTopicMap::isUsableEndpoint(targetEndpoint)) {
+        LOGGER.warning("No usable Zigbee endpoint for command");
+        return true;
+    }
+
+    DestCommandSlot *slot = destSlotFor(device->ieee, targetEndpoint, true);
+    if (slot == nullptr) {
+        LOGGER.warning("No dest slot for command");
+        return true;
+    }
+    if (slot->inFlight) {
+        stashNextClusterCmd(slot, clusterId, commandId, payload, payloadLength);
+        return true;
+    }
+    return transmitClusterCmd(slot, clusterId, commandId, payload, payloadLength);
+}
+
 void ZigbeeCoordinator::addKnownEndpoint(BoundZigbeeDevice *slot, uint8_t endpoint) {
     if (slot == nullptr || !DeviceTopicMap::isUsableEndpoint(endpoint)) {
         return;
@@ -1457,6 +1500,58 @@ void ZigbeeCoordinator::stashNextReadAttr(
     slot->nextAttribute = attributeId;
     slot->nextType = 0;
     slot->nextValue = 0;
+}
+
+void ZigbeeCoordinator::stashNextClusterCmd(
+    DestCommandSlot *slot,
+    uint16_t clusterId,
+    uint8_t commandId,
+    const uint8_t *payload,
+    uint8_t payloadLength
+) {
+    slot->hasNext = true;
+    slot->nextKind = RadioCommandKind::ClusterCmd;
+    slot->nextCluster = clusterId;
+    slot->nextType = commandId;
+    slot->nextValue = payloadLength;
+    memset(slot->nextOnOff, 0, sizeof(slot->nextOnOff));
+    const uint8_t bounded =
+        payloadLength >= sizeof(slot->nextOnOff) ? (uint8_t)(sizeof(slot->nextOnOff) - 1) : payloadLength;
+    if (payload != nullptr && bounded > 0) {
+        memcpy(slot->nextOnOff, payload, bounded);
+        slot->nextValue = bounded;
+    }
+}
+
+bool ZigbeeCoordinator::transmitClusterCmd(
+    DestCommandSlot *slot,
+    uint16_t clusterId,
+    uint8_t commandId,
+    const uint8_t *payload,
+    uint8_t payloadLength
+) {
+    BoundZigbeeDevice *device = findByIeee(slot->ieee);
+    if (device == nullptr) {
+        slot->occupied = false;
+        slot->inFlight = false;
+        slot->hasNext = false;
+        return true;
+    }
+    char commandLabel[80];
+    snprintf(commandLabel, sizeof(commandLabel), "zcl cl=0x%04x cmd=0x%02x", clusterId, commandId);
+    logDeviceEvent(
+        commandLabel,
+        device->ieee,
+        device->shortAddr,
+        slot->endpoint,
+        registeredName(device->ieee)
+    );
+    if (!sendZclToDevice(device, slot->endpoint, clusterId, true, commandId, payload, payloadLength)) {
+        return false;
+    }
+    STATUS_RGB.pulsePacketToDevice();
+    markInFlight(slot, clusterId);
+    return true;
 }
 
 bool ZigbeeCoordinator::transmitReadAttr(
@@ -1741,6 +1836,16 @@ void ZigbeeCoordinator::sendNextIfReady(DestCommandSlot *slot) {
     }
     if (kind == RadioCommandKind::ReadAttr) {
         transmitReadAttr(slot, clusterId, attributeId);
+        return;
+    }
+    if (kind == RadioCommandKind::ClusterCmd) {
+        transmitClusterCmd(
+            slot,
+            clusterId,
+            dataType,
+            (const uint8_t *)onOffCopy,
+            (uint8_t)attributeValue
+        );
     }
 }
 

@@ -28,7 +28,8 @@ enum SpiCommand : uint8_t {
     SpiCmdZclWriteAttr = 0x0D,
     SpiCmdFirmwareOta = 0x0E,
     SpiCmdZclReadAttr = 0x0F,
-    SpiCmdReadEvent = 0x10
+    SpiCmdReadEvent = 0x10,
+    SpiCmdZclCommand = 0x11
 };
 
 constexpr uint8_t SPI_DEVICE_SYNC_RESET = 0x01;
@@ -48,6 +49,7 @@ constexpr size_t SPI_ATTR_REPORT_RSSI_OFFSET = 11;
 constexpr size_t SPI_ATTR_REPORT_MESSAGE_OFFSET = 12;
 constexpr size_t SPI_ZCL_WRITE_ATTR_LEN = 18;
 constexpr size_t SPI_ZCL_READ_ATTR_LEN = 13;
+constexpr size_t SPI_ZCL_COMMAND_HEADER_LEN = 13;
 constexpr uint8_t ZCL_ATTR_TYPE_U8 = 0x20;
 constexpr uint8_t ZCL_ATTR_TYPE_U16 = 0x21;
 constexpr uint8_t ZCL_ATTR_TYPE_U32 = 0x23;
@@ -198,6 +200,72 @@ inline bool spiUnpackZclReadAttr(
     *endpoint = in[8];
     *clusterId = (uint16_t)in[9] | ((uint16_t)in[10] << 8);
     *attributeId = (uint16_t)in[11] | ((uint16_t)in[12] << 8);
+    return true;
+}
+
+inline uint16_t spiZclCommandFrameLength(uint8_t payloadLength) {
+    return (uint16_t)(SPI_ZCL_COMMAND_HEADER_LEN + payloadLength);
+}
+
+inline bool spiPackZclCommand(
+    uint8_t *out,
+    size_t outMax,
+    const uint8_t ieee[8],
+    uint8_t endpoint,
+    uint16_t clusterId,
+    uint8_t commandId,
+    const uint8_t *payload,
+    uint8_t payloadLength
+) {
+    const uint16_t frameLength = spiZclCommandFrameLength(payloadLength);
+    if (out == nullptr || ieee == nullptr || frameLength > SPI_MAX_PAYLOAD || outMax < frameLength) {
+        return false;
+    }
+    if (payloadLength > 0 && payload == nullptr) {
+        return false;
+    }
+    memcpy(out, ieee, 8);
+    out[8] = endpoint;
+    out[9] = (uint8_t)(clusterId & 0xFF);
+    out[10] = (uint8_t)((clusterId >> 8) & 0xFF);
+    out[11] = commandId;
+    out[12] = payloadLength;
+    if (payloadLength > 0) {
+        memcpy(out + SPI_ZCL_COMMAND_HEADER_LEN, payload, payloadLength);
+    }
+    return true;
+}
+
+inline bool spiUnpackZclCommand(
+    const uint8_t *in,
+    uint16_t length,
+    uint8_t ieee[8],
+    uint8_t *endpoint,
+    uint16_t *clusterId,
+    uint8_t *commandId,
+    uint8_t *payload,
+    size_t payloadMax,
+    uint8_t *payloadLength
+) {
+    if (in == nullptr || length < SPI_ZCL_COMMAND_HEADER_LEN || ieee == nullptr || endpoint == nullptr
+        || clusterId == nullptr || commandId == nullptr || payloadLength == nullptr) {
+        return false;
+    }
+    const uint8_t declaredLength = in[12];
+    if (length < spiZclCommandFrameLength(declaredLength)) {
+        return false;
+    }
+    if (declaredLength > 0 && (payload == nullptr || payloadMax < declaredLength)) {
+        return false;
+    }
+    memcpy(ieee, in, 8);
+    *endpoint = in[8];
+    *clusterId = (uint16_t)in[9] | ((uint16_t)in[10] << 8);
+    *commandId = in[11];
+    *payloadLength = declaredLength;
+    if (declaredLength > 0) {
+        memcpy(payload, in + SPI_ZCL_COMMAND_HEADER_LEN, declaredLength);
+    }
     return true;
 }
 

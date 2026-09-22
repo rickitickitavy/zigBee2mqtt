@@ -433,6 +433,114 @@
             });
         }
 
+        var pendingSettingsRestoreText = "";
+
+        function exportSettingsFile() {
+            var restoreError = document.getElementById("settingsRestoreError");
+            if (restoreError) {
+                restoreError.hidden = true;
+            }
+            fetch("/api/settings/export", { cache: "no-store" }).then(function (response) {
+                return response.text().then(function (text) {
+                    if (!response.ok) {
+                        throw new Error(text || ("HTTP " + response.status));
+                    }
+                    var blob = new Blob([text || ""], { type: "application/json;charset=utf-8" });
+                    var objectUrl = URL.createObjectURL(blob);
+                    var link = document.createElement("a");
+                    link.href = objectUrl;
+                    link.download = "settings.json";
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+                    URL.revokeObjectURL(objectUrl);
+                });
+            }).catch(function (error) {
+                if (restoreError) {
+                    restoreError.hidden = false;
+                    restoreError.textContent = error && error.message ? error.message : "Export failed";
+                }
+            });
+        }
+
+        function chooseSettingsRestoreFile() {
+            var restoreError = document.getElementById("settingsRestoreError");
+            if (restoreError) {
+                restoreError.hidden = true;
+            }
+            var fileInput = document.getElementById("settingsRestoreFile");
+            if (!fileInput) {
+                return;
+            }
+            fileInput.value = "";
+            fileInput.click();
+        }
+
+        function closeSettingsRestoreConfirmDialog() {
+            pendingSettingsRestoreText = "";
+            document.getElementById("settingsRestoreConfirmDialog").hidden = true;
+        }
+
+        function onSettingsRestoreFileSelected(event) {
+            var fileInput = event && event.target ? event.target : null;
+            var file = fileInput && fileInput.files && fileInput.files[0] ? fileInput.files[0] : null;
+            var restoreError = document.getElementById("settingsRestoreError");
+            if (!file) {
+                return;
+            }
+            var reader = new FileReader();
+            reader.onerror = function () {
+                if (restoreError) {
+                    restoreError.hidden = false;
+                    restoreError.textContent = "Failed to read the selected file";
+                }
+            };
+            reader.onload = function () {
+                var text = reader.result ? String(reader.result) : "";
+                try {
+                    JSON.parse(text);
+                } catch (parseError) {
+                    if (restoreError) {
+                        restoreError.hidden = false;
+                        restoreError.textContent = "Selected file is not valid JSON";
+                    }
+                    return;
+                }
+                pendingSettingsRestoreText = text;
+                document.getElementById("settingsRestoreConfirmDialog").hidden = false;
+            };
+            reader.readAsText(file);
+        }
+
+        function confirmSettingsRestore() {
+            var restoreError = document.getElementById("settingsRestoreError");
+            var body = pendingSettingsRestoreText;
+            closeSettingsRestoreConfirmDialog();
+            if (!body) {
+                return;
+            }
+            fetch("/api/settings/restore", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: body
+            }).then(function (response) {
+                return response.text().then(function (text) {
+                    if (!response.ok) {
+                        throw new Error(text || ("HTTP " + response.status));
+                    }
+                    loadMqtt();
+                    loadZigbee();
+                    loadHardware();
+                    loadDevices();
+                });
+            }).catch(function (error) {
+                if (restoreError) {
+                    restoreError.hidden = false;
+                    restoreError.textContent = error && error.message ? error.message : "Restore failed";
+                }
+            });
+        }
+
         function onDevicesRestoreFileSelected(event) {
             var fileInput = event && event.target ? event.target : null;
             var file = fileInput && fileInput.files && fileInput.files[0] ? fileInput.files[0] : null;
@@ -2105,6 +2213,10 @@
                 closeDeleteConfirmDialog();
                 return true;
             }
+            if (dialogId === "settingsRestoreConfirmDialog") {
+                closeSettingsRestoreConfirmDialog();
+                return true;
+            }
             if (dialogId === "firmwareUpdateDialog") {
                 if (!firmwareUpdateCanClose) {
                     return false;
@@ -2492,6 +2604,17 @@
             </div>
         </div>
 
+        <div id="settingsRestoreConfirmDialog" class="dialog-overlay dialog-overlay-front" hidden>
+            <div class="dialog-panel" role="dialog" aria-label="Confirm restore settings">
+                <h3 class="upload-title">Restore settings</h3>
+                <p class="field-hint">MQTT, Zigbee, hardware, and the device list will match this file. Devices not in the file will be deleted. Wi-Fi is not changed. Continue?</p>
+                <div class="dialog-actions">
+                    <button type="button" class="btn btn-primary" onclick="confirmSettingsRestore()">Restore</button>
+                    <button type="button" class="btn btn-secondary" onclick="closeSettingsRestoreConfirmDialog()">Cancel</button>
+                </div>
+            </div>
+        </div>
+
         <div id="firmwareUpdateDialog" class="dialog-overlay dialog-overlay-front" hidden>
             <div class="dialog-panel" role="dialog" aria-label="Firmware update">
                 <h3 class="upload-title">Firmware update</h3>
@@ -2596,7 +2719,14 @@
                 </div>
                 <div id="system-tab-maintenance" class="system-tab-panel tab-panel" role="tabpanel">
                     <div class="upload-card">
-                        <h3 class="upload-title">Maintenance</h3>
+                        <h3 class="upload-title">Settings</h3>
+                        <p class="field-hint">Export MQTT, Zigbee, hardware, and devices. Restore replaces those groups. Wi-Fi is never included.</p>
+                        <p id="settingsRestoreError" class="save-error" hidden></p>
+                        <input id="settingsRestoreFile" type="file" accept="application/json,.json" hidden onchange="onSettingsRestoreFileSelected(event)">
+                        <div class="dialog-actions">
+                            <button type="button" class="btn btn-secondary btn-inline" onclick="exportSettingsFile()">Export settings</button>
+                            <button type="button" class="btn btn-primary btn-inline" onclick="chooseSettingsRestoreFile()">Restore settings</button>
+                        </div>
                     </div>
                 </div>
 
