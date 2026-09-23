@@ -478,10 +478,20 @@ void WebConsole::handleUsersPost(AsyncWebServerRequest *request) {
     if (!requireEditUsers(request, &actor)) {
         return;
     }
+    if (request->url().indexOf("update") >= 0) {
+        handleUsersUpdatePost(request);
+        return;
+    }
     UserRecord source;
     fillUserFromJson(requestBody.c_str(), &source);
     String password;
     extractJsonString(requestBody.c_str(), "password", password);
+    bool isEdit = false;
+    const bool hasIsEdit = extractJsonBool(requestBody.c_str(), "isEdit", isEdit);
+    if (isEdit || (!hasIsEdit && userStore->findByName(source.userName) != nullptr)) {
+        sendUserWriteResult(request, userStore->updateUser(actor, source.userName, &source, password.c_str()));
+        return;
+    }
     sendUserWriteResult(request, userStore->createUser(actor, &source, password.c_str()));
 }
 

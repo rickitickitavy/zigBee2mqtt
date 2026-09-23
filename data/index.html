@@ -457,6 +457,7 @@
 
         function openUserDialog(user) {
             var isEdit = !!(user && user.userName);
+            userDialogIsEdit = isEdit;
             var targetIsAdmin = !!(user && user.isAdmin);
             var locked = isEdit && targetIsAdmin && !isAdminUser();
             document.getElementById("userDialogTitle").textContent = isEdit ? "Edit user" : "Add user";
@@ -482,10 +483,12 @@
 
         function closeUserDialog() {
             userDialogBaseline = null;
+            userDialogIsEdit = false;
             document.getElementById("userDialog").hidden = true;
         }
 
         var userDialogBaseline = null;
+        var userDialogIsEdit = false;
 
         function userDialogHasUnsavedChanges() {
             if (userDialogBaseline == null) {
@@ -519,8 +522,9 @@
         function saveUserDialog() {
             var errorLine = document.getElementById("userDialogError");
             errorLine.hidden = true;
-            var isEdit = document.getElementById("userName").readOnly;
+            var isEdit = userDialogIsEdit;
             var body = readUserDialogBody();
+            body.isEdit = isEdit;
             if (!body.userName) {
                 errorLine.hidden = false;
                 errorLine.textContent = "User name is required";
