@@ -21,6 +21,7 @@
 #include "StatusRgb.h"
 #include "ZigbeeSpiProxy.h"
 #include "FoundDeviceList.h"
+#include "UserStore.h"
 #include "DeviceStore.h"
 #include "ZigbeeDeviceType.h"
 #include "ZigbeeCluster.h"
@@ -46,6 +47,7 @@ static MqttClient *mqttClient = nullptr;
 static ZigbeeCoordinator *zigbeeCoordinator = nullptr;
 static SerialCli *serialCli = nullptr;
 static WebConsole *webConsole = nullptr;
+static UserStore *userStore = nullptr;
 static FoundDeviceList *foundDevices = nullptr;
 static DeviceStore *deviceStore = nullptr;
 static bool ntpStarted = false;
@@ -1040,12 +1042,14 @@ static void setupHost() {
 
     settingsManager = new SettingsManager();
     settingsManager->loadDeviceFile();
+    userStore = new UserStore();
+    userStore->loadOrSeed();
     topicMap = settingsManager->deviceMap();
     foundDevices = new FoundDeviceList();
     wifiController = new WiFiController(settingsManager, forceAp);
     mqttClient = new MqttClient(settingsManager, topicMap);
     serialCli = new SerialCli(settingsManager);
-    webConsole = new WebConsole(settingsManager);
+    webConsole = new WebConsole(settingsManager, userStore);
     webConsole->setDeviceServices(
         foundDevices,
         startDeviceSearch,

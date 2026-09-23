@@ -3,6 +3,7 @@
 #include <ESPAsyncWebServer.h>
 #include "SettingsManager.h"
 #include "FoundDeviceList.h"
+#include "UserStore.h"
 
 class WebConsole {
 public:
@@ -19,7 +20,7 @@ public:
     using DeviceCommandFn = int (*)(const char *ieeeText, const char *payload, int channel);
     using DevicesRestoredFn = bool (*)(const uint8_t (*removedIeees)[8], int removedCount);
 
-    explicit WebConsole(SettingsManager *settingsManager);
+    explicit WebConsole(SettingsManager *settingsManager, UserStore *userStore);
 
     void begin();
     void rebind();
@@ -41,6 +42,7 @@ public:
 
 private:
     SettingsManager *settingsManager;
+    UserStore *userStore;
     FoundDeviceList *foundDevices = nullptr;
     SearchStartFn startSearch = nullptr;
     SearchStopFn stopSearch = nullptr;
@@ -73,7 +75,24 @@ private:
     void handleSettingsRestorePost(AsyncWebServerRequest *request);
     void handleThemeGet(AsyncWebServerRequest *request);
     void handleThemePost(AsyncWebServerRequest *request);
-    bool applyThemeJson(const char *json, String *errorText);
+    bool applyThemeJson(const char *json, UserRecord *user, String *errorText);
+    const UserRecord *authenticatedUser(AsyncWebServerRequest *request);
+    bool requireUser(AsyncWebServerRequest *request, const UserRecord **userOut);
+    bool requireAdmin(AsyncWebServerRequest *request, const UserRecord **userOut);
+    bool requireEditUsers(AsyncWebServerRequest *request, const UserRecord **userOut);
+    bool userCanAddDevices(const UserRecord *user) const;
+    bool userCanEditDevices(const UserRecord *user) const;
+    bool userCanRemoveDevices(const UserRecord *user) const;
+    void sendAuthCookie(AsyncWebServerResponse *response, const char *tokenHex, uint32_t maxAgeSec);
+    void handleAuthLoginPost(AsyncWebServerRequest *request);
+    void handleAuthLogoutPost(AsyncWebServerRequest *request);
+    void handleAuthMeGet(AsyncWebServerRequest *request);
+    void handleUsersGet(AsyncWebServerRequest *request);
+    void handleUsersPost(AsyncWebServerRequest *request);
+    void handleUsersUpdatePost(AsyncWebServerRequest *request);
+    void handleUsersDelete(AsyncWebServerRequest *request);
+    void fillUserFromJson(const char *json, UserRecord *user);
+    void sendUserWriteResult(AsyncWebServerRequest *request, UserWriteResult result);
     bool applyMqttJson(const char *json, String *errorText);
     bool applyZigbeeJson(const char *json, String *errorText);
     bool applyHardwareJson(const char *json, String *errorText);

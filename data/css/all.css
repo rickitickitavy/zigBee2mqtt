@@ -63,6 +63,40 @@ html, body {
     -webkit-text-size-adjust: 100%;
 }
 
+.login-overlay {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 1rem;
+    background: var(--bg);
+    z-index: 40;
+}
+
+.login-overlay[hidden] {
+    display: none !important;
+}
+
+.login-panel {
+    width: min(22rem, 100%);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: var(--gap);
+}
+
+.sidebar-signout {
+    margin-top: auto;
+}
+
+.app-shell[hidden] {
+    display: none !important;
+}
+
 .app-shell {
     display: flex;
     width: 100%;

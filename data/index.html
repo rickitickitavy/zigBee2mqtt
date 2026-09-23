@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="light">
+<html lang="en" data-theme="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -84,6 +84,9 @@
             }
             if (name == "update") {
                 loadVersion();
+            }
+            if (name == "security") {
+                loadUsers();
             }
         }
 
@@ -194,6 +197,334 @@
             document.documentElement.setAttribute("data-theme", normalizeThemeId(themeId));
         }
 
+        var signedInUser = null;
+
+        function isAdminUser() {
+            return !!(signedInUser && signedInUser.isAdmin);
+        }
+
+        function hasRole(roleName) {
+            return isAdminUser() || !!(signedInUser && signedInUser[roleName]);
+        }
+
+        function setHidden(element, hidden) {
+            if (element) {
+                element.hidden = !!hidden;
+            }
+        }
+
+        function applyChromeForRoles() {
+            var admin = isAdminUser();
+            var canEditUsers = admin || hasRole("editUsers");
+            var canAdd = admin || hasRole("addDevices");
+            setHidden(document.querySelector('.sidebar-btn[data-section="wifi"]'), !admin);
+            setHidden(document.querySelector('.sidebar-btn[data-section="mqtt"]'), !admin);
+            setHidden(document.querySelector('.sidebar-btn[data-section="zigbee"]'), !admin);
+            setHidden(document.querySelector('.system-tab-btn[data-tab="update"]'), !admin);
+            setHidden(document.querySelector('.system-tab-btn[data-tab="hardware"]'), !admin);
+            setHidden(document.querySelector('.system-tab-btn[data-tab="security"]'), !canEditUsers);
+            setHidden(document.getElementById("maintenanceSettingsCard"), !admin);
+            setHidden(document.getElementById("addDeviceBtn"), !canAdd);
+            setHidden(document.getElementById("exportDevicesBtn"), !admin);
+            setHidden(document.getElementById("restoreDevicesBtn"), !admin);
+        }
+
+        function showLoginForm() {
+            signedInUser = null;
+            applyThemeToDocument("dark");
+            setHidden(document.getElementById("appShell"), true);
+            setHidden(document.getElementById("loginOverlay"), false);
+            stopStatusPolling();
+            stopLogPolling();
+            stopDevicesPolling();
+        }
+
+        function enterSignedInConsole(user) {
+            signedInUser = user;
+            setHidden(document.getElementById("loginOverlay"), true);
+            setHidden(document.getElementById("appShell"), false);
+            applyChromeForRoles();
+            applyThemeToDocument(user && user.theme);
+            var picker = document.getElementById("uiTheme");
+            if (picker) {
+                picker.value = normalizeThemeId(user && user.theme);
+            }
+            showMainSection("status");
+        }
+
+        function checkSession() {
+            fetch("/api/auth/me", { cache: "no-store" }).then(function (response) {
+                if (response.status === 401) {
+                    showLoginForm();
+                    return null;
+                }
+                if (!response.ok) {
+                    throw new Error("HTTP " + response.status);
+                }
+                return response.json();
+            }).then(function (user) {
+                if (user) {
+                    enterSignedInConsole(user);
+                }
+            }).catch(function () {
+                showLoginForm();
+            });
+        }
+
+        function submitLogin() {
+            var errorLine = document.getElementById("loginError");
+            if (errorLine) {
+                errorLine.hidden = true;
+            }
+            var userNameInput = document.getElementById("loginUserName");
+            var passwordInput = document.getElementById("loginPassword");
+            var rememberInput = document.getElementById("loginRememberMe");
+            fetch("/api/auth/login", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    userName: userNameInput ? userNameInput.value : "",
+                    password: passwordInput ? passwordInput.value : "",
+                    rememberMe: !!(rememberInput && rememberInput.checked)
+                })
+            }).then(function (response) {
+                return response.text().then(function (text) {
+                    if (!response.ok) {
+                        throw new Error(text || ("HTTP " + response.status));
+                    }
+                });
+            }).then(function () {
+                if (passwordInput) {
+                    passwordInput.value = "";
+                }
+                checkSession();
+            }).catch(function (error) {
+                if (errorLine) {
+                    errorLine.hidden = false;
+                    errorLine.textContent = error && error.message ? error.message : "Sign in failed";
+                }
+            });
+        }
+
+        function signOut() {
+            fetch("/api/auth/logout", { method: "POST" }).finally(function () {
+                showLoginForm();
+            });
+        }
+
+        function formatAddedAt(addedAt) {
+            var seconds = Number(addedAt);
+            if (!(seconds > 0)) {
+                return "—";
+            }
+            return new Date(seconds * 1000).toISOString().slice(0, 19).replace("T", " ");
+        }
+
+        function formatUserRoles(user) {
+            if (user && user.isAdmin) {
+                return "admin";
+            }
+            var roles = [];
+            if (user && user.editDevices) {
+                roles.push("edit devices");
+            }
+            if (user && user.addDevices) {
+                roles.push("add devices");
+            }
+            if (user && user.removeDevices) {
+                roles.push("delete devices");
+            }
+            if (user && user.editUsers) {
+                roles.push("edit users");
+            }
+            return roles.length ? roles.join(", ") : "simple";
+        }
+
+        function loadUsers() {
+            var errorLine = document.getElementById("usersSaveError");
+            if (errorLine) {
+                errorLine.hidden = true;
+            }
+            fetch("/api/users", { cache: "no-store" }).then(function (response) {
+                return response.text().then(function (text) {
+                    if (!response.ok) {
+                        throw new Error(text || ("HTTP " + response.status));
+                    }
+                    return JSON.parse(text || "[]");
+                });
+            }).then(function (rows) {
+                renderUserTable(rows || []);
+            }).catch(function (error) {
+                if (errorLine) {
+                    errorLine.hidden = false;
+                    errorLine.textContent = error && error.message ? error.message : "Users load failed";
+                }
+            });
+        }
+
+        function renderUserTable(rows) {
+            var body = document.getElementById("userTableBody");
+            if (!body) {
+                return;
+            }
+            body.innerHTML = "";
+            var index;
+            for (index = 0; index < rows.length; index++) {
+                var user = rows[index];
+                var row = document.createElement("tr");
+                row.onclick = (function (stored) {
+                    return function () {
+                        openUserDialog(stored);
+                    };
+                })(user);
+                var nameCell = document.createElement("td");
+                nameCell.textContent = user.userName || "";
+                var addedCell = document.createElement("td");
+                addedCell.textContent = formatAddedAt(user.addedAt);
+                var rolesCell = document.createElement("td");
+                rolesCell.textContent = formatUserRoles(user);
+                var blockedCell = document.createElement("td");
+                blockedCell.textContent = user.isBlocked ? "yes" : "no";
+                var themeCell = document.createElement("td");
+                themeCell.textContent = user.theme === "dark" ? "Dark" : "Light";
+                row.appendChild(nameCell);
+                row.appendChild(addedCell);
+                row.appendChild(rolesCell);
+                row.appendChild(blockedCell);
+                row.appendChild(themeCell);
+                body.appendChild(row);
+            }
+        }
+
+        function setUserDialogAdminLocked(locked) {
+            var adminCheck = document.getElementById("userIsAdmin");
+            var saveButton = document.getElementById("userSaveBtn");
+            var deleteButton = document.getElementById("userDeleteBtn");
+            if (adminCheck) {
+                adminCheck.disabled = locked || !isAdminUser();
+            }
+            if (saveButton) {
+                saveButton.disabled = locked;
+            }
+            if (deleteButton) {
+                deleteButton.disabled = locked;
+            }
+        }
+
+        function openUserDialog(user) {
+            var isEdit = !!(user && user.userName);
+            var targetIsAdmin = !!(user && user.isAdmin);
+            var locked = isEdit && targetIsAdmin && !isAdminUser();
+            document.getElementById("userDialogTitle").textContent = isEdit ? "Edit user" : "Add user";
+            document.getElementById("userDialogError").hidden = true;
+            document.getElementById("userName").value = isEdit ? user.userName : "";
+            document.getElementById("userName").readOnly = isEdit;
+            document.getElementById("userPassword").value = "";
+            document.getElementById("userIsAdmin").checked = targetIsAdmin;
+            document.getElementById("userEditDevices").checked = !!(user && user.editDevices);
+            document.getElementById("userAddDevices").checked = !!(user && user.addDevices);
+            document.getElementById("userRemoveDevices").checked = !!(user && user.removeDevices);
+            document.getElementById("userEditUsers").checked = !!(user && user.editUsers);
+            document.getElementById("userIsBlocked").checked = !!(user && user.isBlocked);
+            document.getElementById("userTheme").value = user && user.theme === "light" ? "light" : "dark";
+            document.getElementById("userDeleteBtn").hidden = !isEdit;
+            setUserDialogAdminLocked(locked);
+            if (!isAdminUser()) {
+                document.getElementById("userIsAdmin").checked = false;
+            }
+            document.getElementById("userDialog").hidden = false;
+        }
+
+        function closeUserDialog() {
+            document.getElementById("userDialog").hidden = true;
+        }
+
+        function readUserDialogBody() {
+            return {
+                userName: document.getElementById("userName").value,
+                password: document.getElementById("userPassword").value,
+                isAdmin: isAdminUser() && document.getElementById("userIsAdmin").checked,
+                editDevices: document.getElementById("userEditDevices").checked,
+                addDevices: document.getElementById("userAddDevices").checked,
+                removeDevices: document.getElementById("userRemoveDevices").checked,
+                editUsers: document.getElementById("userEditUsers").checked,
+                isBlocked: document.getElementById("userIsBlocked").checked,
+                theme: document.getElementById("userTheme").value
+            };
+        }
+
+        function saveUserDialog() {
+            var errorLine = document.getElementById("userDialogError");
+            errorLine.hidden = true;
+            var isEdit = document.getElementById("userName").readOnly;
+            var body = readUserDialogBody();
+            if (!body.userName) {
+                errorLine.hidden = false;
+                errorLine.textContent = "User name is required";
+                return;
+            }
+            if (!isEdit && !body.password) {
+                errorLine.hidden = false;
+                errorLine.textContent = "Password is required";
+                return;
+            }
+            fetch(isEdit ? "/api/users/update" : "/api/users", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body)
+            }).then(function (response) {
+                return response.text().then(function (text) {
+                    if (!response.ok) {
+                        throw new Error(text || ("HTTP " + response.status));
+                    }
+                });
+            }).then(function () {
+                closeUserDialog();
+                loadUsers();
+            }).catch(function (error) {
+                errorLine.hidden = false;
+                errorLine.textContent = error && error.message ? error.message : "Save failed";
+            });
+        }
+
+        function openUserDeleteConfirm() {
+            var name = document.getElementById("userName").value;
+            var detail = document.getElementById("userDeleteConfirmDetail");
+            if (detail) {
+                detail.textContent = "Delete user \"" + name + "\"?";
+            }
+            document.getElementById("userDeleteConfirmDialog").hidden = false;
+        }
+
+        function closeUserDeleteConfirm() {
+            document.getElementById("userDeleteConfirmDialog").hidden = true;
+        }
+
+        function confirmDeleteUser() {
+            var errorLine = document.getElementById("userDialogError");
+            var name = document.getElementById("userName").value;
+            closeUserDeleteConfirm();
+            fetch("/api/users", {
+                method: "DELETE",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ userName: name })
+            }).then(function (response) {
+                return response.text().then(function (text) {
+                    if (!response.ok) {
+                        throw new Error(text || ("HTTP " + response.status));
+                    }
+                });
+            }).then(function () {
+                closeUserDialog();
+                loadUsers();
+            }).catch(function (error) {
+                if (errorLine) {
+                    errorLine.hidden = false;
+                    errorLine.textContent = error && error.message ? error.message : "Delete failed";
+                }
+            });
+        }
+
         function loadTheme() {
             var picker = document.getElementById("uiTheme");
             fetch("/api/theme", { cache: "no-store" }).then(function (response) {
@@ -205,10 +536,6 @@
                     picker.value = themeId;
                 }
             }).catch(function () {
-                applyThemeToDocument("light");
-                if (picker) {
-                    picker.value = "light";
-                }
             });
         }
 
@@ -1917,7 +2244,9 @@
                         return;
                     }
                     selectRegisteredIeee(this.getAttribute("data-ieee") || "");
-                    openEditSelectedDevice();
+                    if (isAdminUser() || hasRole("editDevices")) {
+                        openEditSelectedDevice();
+                    }
                 };
                 var onlineCell = document.createElement("td");
                 onlineCell.className = "device-online-cell";
@@ -2273,7 +2602,7 @@
             var deleteButton = document.getElementById("parameterDeleteBtn");
             var commandTabButton = document.getElementById("parameterCommandTabBtn");
             if (deleteButton) {
-                deleteButton.hidden = !parameterDialogIsEdit;
+                deleteButton.hidden = !parameterDialogIsEdit || !(isAdminUser() || hasRole("removeDevices"));
             }
             if (commandTabButton) {
                 if (parameterDialogIsEdit) {
@@ -2358,6 +2687,9 @@
         }
 
         function openEditSelectedDevice() {
+            if (!isAdminUser() && !hasRole("editDevices")) {
+                return;
+            }
             var device = findRegisteredDevice(selectedRegisteredIeee);
             if (!device || !device.ieee) {
                 return;
@@ -2508,6 +2840,14 @@
                 closeParameterDialog();
                 return true;
             }
+            if (dialogId === "userDeleteConfirmDialog") {
+                closeUserDeleteConfirm();
+                return true;
+            }
+            if (dialogId === "userDialog") {
+                closeUserDialog();
+                return true;
+            }
             if (dialogId === "restoreSkippedDialog") {
                 closeRestoreSkippedDialog();
                 return true;
@@ -2558,24 +2898,45 @@
                 }
                 closeDeviceActionsMenu();
             });
-            loadTheme();
             var manualInput = document.getElementById("manualCommandInput");
             if (manualInput) {
                 manualInput.addEventListener("keydown", onManualCommandInputKeyDown);
             }
             document.getElementById("parameterDialog").addEventListener("click", onParameterDialogOverlayClick);
             document.getElementById("parameterUnsavedDialog").addEventListener("click", onParameterUnsavedOverlayClick);
-            loadWifi();
-            loadMqtt();
-            loadZigbee();
-            loadVersion();
-            refreshMqttBaseTopic();
-            startStatusPolling();
+            var loginForm = document.getElementById("loginForm");
+            if (loginForm) {
+                loginForm.addEventListener("submit", function (event) {
+                    event.preventDefault();
+                    submitLogin();
+                });
+            }
+            applyThemeToDocument("dark");
+            checkSession();
         };
     </script>
 </head>
 <body>
-<div class="app-shell">
+<div id="loginOverlay" class="login-overlay">
+    <form id="loginForm" class="login-panel" autocomplete="on">
+        <h1 class="section-title">Sign in</h1>
+        <p id="loginError" class="save-error" hidden></p>
+        <div class="field">
+            <label for="loginUserName">User name</label>
+            <input id="loginUserName" type="text" autocomplete="username">
+        </div>
+        <div class="field">
+            <label for="loginPassword">Password</label>
+            <input id="loginPassword" type="password" autocomplete="current-password">
+        </div>
+        <label class="field-check">
+            <input id="loginRememberMe" type="checkbox">
+            Remember me
+        </label>
+        <button type="submit" class="btn btn-primary">Sign in</button>
+    </form>
+</div>
+<div id="appShell" class="app-shell" hidden>
     <nav class="sidebar-nav" role="navigation" aria-label="Main sections">
         <h1 class="sidebar-title">Gateway</h1>
         <button type="button" class="sidebar-btn active" data-section="status" onclick="showMainSection('status')">Status</button>
@@ -2584,6 +2945,7 @@
         <button type="button" class="sidebar-btn" data-section="zigbee" onclick="showMainSection('zigbee')">ZigBee</button>
         <button type="button" class="sidebar-btn" data-section="devices" onclick="showMainSection('devices')">Devices</button>
         <button type="button" class="sidebar-btn" data-section="system" onclick="showMainSection('system')">System</button>
+        <button type="button" class="sidebar-btn sidebar-signout" onclick="signOut()">Sign out</button>
     </nav>
     <div class="main-panel">
         <section id="section-status" class="section-panel active" aria-label="Status">
@@ -2769,9 +3131,9 @@
             </div>
             <div class="page-footer">
                 <div class="page-footer-inner">
-                    <button type="button" class="btn btn-primary" onclick="openSearchDialog()">Add device</button>
-                    <button type="button" class="btn btn-secondary" onclick="exportDevicesStore()">Export</button>
-                    <button type="button" class="btn btn-secondary" onclick="openDevicesRestoreDialog()">Restore</button>
+                    <button type="button" id="addDeviceBtn" class="btn btn-primary" onclick="openSearchDialog()">Add device</button>
+                    <button type="button" id="exportDevicesBtn" class="btn btn-secondary" onclick="exportDevicesStore()">Export</button>
+                    <button type="button" id="restoreDevicesBtn" class="btn btn-secondary" onclick="openDevicesRestoreDialog()">Restore</button>
                 </div>
             </div>
         </section>
@@ -2978,6 +3340,7 @@
                 <button type="button" class="system-tab-btn tab-btn" data-tab="update" role="tab" onclick="showSystemTab('update')">Update</button>
                 <button type="button" class="system-tab-btn tab-btn" data-tab="hardware" role="tab" onclick="showSystemTab('hardware')">Hardware</button>
                 <button type="button" class="system-tab-btn tab-btn" data-tab="maintenance" role="tab" onclick="showSystemTab('maintenance')">Maintenance</button>
+                <button type="button" class="system-tab-btn tab-btn" data-tab="security" role="tab" onclick="showSystemTab('security')">Security</button>
             </nav>
             <div class="tab-content">
                 <div id="system-tab-log" class="system-tab-panel tab-panel active" role="tabpanel">
@@ -3049,7 +3412,7 @@
                             <button type="button" class="btn btn-secondary btn-icon" aria-label="Save theme" title="Save theme" onclick="saveTheme()">💾</button>
                         </div>
                     </div>
-                    <div class="upload-card">
+                    <div id="maintenanceSettingsCard" class="upload-card">
                         <h3 class="upload-title">Settings</h3>
                         <p class="field-hint">Export MQTT, Zigbee, hardware, and devices. Restore replaces those groups. Wi-Fi is never included.</p>
                         <p id="settingsRestoreError" class="save-error" hidden></p>
@@ -3060,9 +3423,90 @@
                         </div>
                     </div>
                 </div>
+                <div id="system-tab-security" class="system-tab-panel tab-panel" role="tabpanel">
+                    <p id="usersSaveError" class="save-error" hidden></p>
+                    <div class="settings-scroll">
+                        <table class="data-table selectable">
+                            <thead>
+                                <tr>
+                                    <th>User name</th>
+                                    <th>Added</th>
+                                    <th>Roles</th>
+                                    <th>Blocked</th>
+                                    <th>Theme</th>
+                                </tr>
+                            </thead>
+                            <tbody id="userTableBody"></tbody>
+                        </table>
+                    </div>
+                    <div class="dialog-actions">
+                        <button type="button" class="btn btn-primary" onclick="openUserDialog(null)">Add user</button>
+                    </div>
+                </div>
 
             </div>
         </section>
+    </div>
+</div>
+<div id="userDialog" class="dialog-overlay" hidden>
+    <div class="dialog-panel" role="dialog" aria-label="User">
+        <h3 id="userDialogTitle" class="upload-title">Add user</h3>
+        <p id="userDialogError" class="save-error" hidden></p>
+        <div class="field">
+            <label for="userName">User name</label>
+            <input id="userName" type="text" autocomplete="off">
+        </div>
+        <div class="field">
+            <label for="userPassword">Password</label>
+            <input id="userPassword" type="password" autocomplete="new-password">
+            <p class="field-hint">Leave empty when editing to keep the current password. The stored hash is never shown.</p>
+        </div>
+        <label class="field-check">
+            <input id="userIsAdmin" type="checkbox">
+            Admin
+        </label>
+        <label class="field-check">
+            <input id="userEditDevices" type="checkbox">
+            Edit devices
+        </label>
+        <label class="field-check">
+            <input id="userAddDevices" type="checkbox">
+            Add devices
+        </label>
+        <label class="field-check">
+            <input id="userRemoveDevices" type="checkbox">
+            Delete devices
+        </label>
+        <label class="field-check">
+            <input id="userEditUsers" type="checkbox">
+            Edit users
+        </label>
+        <label class="field-check">
+            <input id="userIsBlocked" type="checkbox">
+            Blocked
+        </label>
+        <div class="field">
+            <label for="userTheme">Theme</label>
+            <select id="userTheme">
+                <option value="dark">Dark</option>
+                <option value="light">Light</option>
+            </select>
+        </div>
+        <div class="dialog-actions">
+            <button type="button" id="userSaveBtn" class="btn btn-primary" onclick="saveUserDialog()">Save</button>
+            <button type="button" id="userDeleteBtn" class="btn btn-secondary" hidden onclick="openUserDeleteConfirm()">Delete</button>
+            <button type="button" class="btn btn-secondary" onclick="closeUserDialog()">Cancel</button>
+        </div>
+    </div>
+</div>
+<div id="userDeleteConfirmDialog" class="dialog-overlay dialog-overlay-front" hidden>
+    <div class="dialog-panel" role="dialog" aria-label="Delete user">
+        <h3 class="upload-title">Delete user</h3>
+        <p id="userDeleteConfirmDetail" class="field-hint"></p>
+        <div class="dialog-actions">
+            <button type="button" class="btn btn-primary" onclick="confirmDeleteUser()">Delete</button>
+            <button type="button" class="btn btn-secondary" onclick="closeUserDeleteConfirm()">Cancel</button>
+        </div>
     </div>
 </div>
 </body>

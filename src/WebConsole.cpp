@@ -4,6 +4,7 @@
 #include "JsonField.h"
 #include "ZigbeeDeviceType.h"
 #include "FirmwareOta.h"
+#include "UserStore.h"
 
 #include <LittleFS.h>
 #include <Update.h>
@@ -14,13 +15,65 @@ static const char kMissingFsPage[] PROGMEM =
     "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>z2m-gateway</title></head>"
     "<body><p>LittleFS web files are missing. Flash the filesystem: <code>pio run -t uploadfs</code></p></body></html>";
 
-WebConsole::WebConsole(SettingsManager *settingsManager)
-    : settingsManager(settingsManager), server(80) {}
+WebConsole::WebConsole(SettingsManager *settingsManager, UserStore *userStore)
+    : settingsManager(settingsManager), userStore(userStore), server(80) {}
 
 void WebConsole::begin() {
     server.on("/", HTTP_GET, [this](AsyncWebServerRequest *request) { handleRoot(request); });
     server.on("/index.html", HTTP_GET, [this](AsyncWebServerRequest *request) { handleRoot(request); });
     server.serveStatic("/css", LittleFS, "/css");
+
+    server.on(
+        "/api/auth/login",
+        HTTP_POST,
+        [this](AsyncWebServerRequest *request) { handleAuthLoginPost(request); },
+        nullptr,
+        [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+            (void)request;
+            (void)total;
+            appendRequestBody(data, len, index);
+        }
+    );
+    server.on(
+        "/api/auth/logout",
+        HTTP_POST,
+        [this](AsyncWebServerRequest *request) { handleAuthLogoutPost(request); }
+    );
+    server.on("/api/auth/me", HTTP_GET, [this](AsyncWebServerRequest *request) { handleAuthMeGet(request); });
+    server.on("/api/users", HTTP_GET, [this](AsyncWebServerRequest *request) { handleUsersGet(request); });
+    server.on(
+        "/api/users",
+        HTTP_POST,
+        [this](AsyncWebServerRequest *request) { handleUsersPost(request); },
+        nullptr,
+        [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+            (void)request;
+            (void)total;
+            appendRequestBody(data, len, index);
+        }
+    );
+    server.on(
+        "/api/users/update",
+        HTTP_POST,
+        [this](AsyncWebServerRequest *request) { handleUsersUpdatePost(request); },
+        nullptr,
+        [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+            (void)request;
+            (void)total;
+            appendRequestBody(data, len, index);
+        }
+    );
+    server.on(
+        "/api/users",
+        HTTP_DELETE,
+        [this](AsyncWebServerRequest *request) { handleUsersDelete(request); },
+        nullptr,
+        [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+            (void)request;
+            (void)total;
+            appendRequestBody(data, len, index);
+        }
+    );
 
     server.on("/api/wifi", HTTP_GET, [this](AsyncWebServerRequest *request) { handleWifiGet(request); });
     server.on(
@@ -236,7 +289,233 @@ void WebConsole::handleRoot(AsyncWebServerRequest *request) {
     request->send(200, "text/html", kMissingFsPage);
 }
 
+const UserRecord *WebConsole::authenticatedUser(AsyncWebServerRequest *request) {
+    if (userStore == nullptr || request == nullptr || !request->hasHeader("Cookie")) {
+        return nullptr;
+    }
+    return userStore->sessionUser(request->header("Cookie").c_str(), millis(), nullptr, 0);
+}
+
+bool WebConsole::requireUser(AsyncWebServerRequest *request, const UserRecord **userOut) {
+    const UserRecord *user = authenticatedUser(request);
+    if (user == nullptr) {
+        request->send(401, "text/plain", "Unauthorized");
+        return false;
+    }
+    if (userOut != nullptr) {
+        *userOut = user;
+    }
+    return true;
+}
+
+bool WebConsole::requireAdmin(AsyncWebServerRequest *request, const UserRecord **userOut) {
+    const UserRecord *user = nullptr;
+    if (!requireUser(request, &user)) {
+        return false;
+    }
+    if (!user->isAdmin) {
+        request->send(403, "text/plain", "Forbidden");
+        return false;
+    }
+    if (userOut != nullptr) {
+        *userOut = user;
+    }
+    return true;
+}
+
+bool WebConsole::requireEditUsers(AsyncWebServerRequest *request, const UserRecord **userOut) {
+    const UserRecord *user = nullptr;
+    if (!requireUser(request, &user)) {
+        return false;
+    }
+    if (!user->isAdmin && !user->editUsers) {
+        request->send(403, "text/plain", "Forbidden");
+        return false;
+    }
+    if (userOut != nullptr) {
+        *userOut = user;
+    }
+    return true;
+}
+
+bool WebConsole::userCanAddDevices(const UserRecord *user) const {
+    return user != nullptr && (user->isAdmin || user->addDevices);
+}
+
+bool WebConsole::userCanEditDevices(const UserRecord *user) const {
+    return user != nullptr && (user->isAdmin || user->editDevices);
+}
+
+bool WebConsole::userCanRemoveDevices(const UserRecord *user) const {
+    return user != nullptr && (user->isAdmin || user->removeDevices);
+}
+
+void WebConsole::sendAuthCookie(AsyncWebServerResponse *response, const char *tokenHex, uint32_t maxAgeSec) {
+    String cookie = String(AUTH_COOKIE_NAME) + "=" + tokenHex + "; Path=/; HttpOnly; SameSite=Lax";
+    if (maxAgeSec > 0) {
+        cookie += "; Max-Age=";
+        cookie += String((unsigned long)maxAgeSec);
+    }
+    response->addHeader("Set-Cookie", cookie);
+}
+
+void WebConsole::fillUserFromJson(const char *json, UserRecord *user) {
+    memset(user, 0, sizeof(*user));
+    String userName;
+    String themeText;
+    extractJsonString(json, "userName", userName);
+    strncpy(user->userName, userName.c_str(), sizeof(user->userName) - 1);
+    extractJsonBool(json, "isAdmin", user->isAdmin);
+    extractJsonBool(json, "editDevices", user->editDevices);
+    extractJsonBool(json, "addDevices", user->addDevices);
+    extractJsonBool(json, "removeDevices", user->removeDevices);
+    extractJsonBool(json, "editUsers", user->editUsers);
+    extractJsonBool(json, "isBlocked", user->isBlocked);
+    extractJsonString(json, "theme", themeText);
+    user->theme = UserStore::themeFromJsonId(themeText.c_str());
+}
+
+void WebConsole::sendUserWriteResult(AsyncWebServerRequest *request, UserWriteResult result) {
+    if (result == UserWriteOk) {
+        request->send(200, "text/plain", "Saved");
+        return;
+    }
+    if (result == UserWriteForbidden) {
+        request->send(403, "text/plain", "Forbidden");
+        return;
+    }
+    if (result == UserWriteNotFound) {
+        request->send(404, "text/plain", "User not found");
+        return;
+    }
+    if (result == UserWriteDuplicate) {
+        request->send(400, "text/plain", "User already exists");
+        return;
+    }
+    if (result == UserWriteFull) {
+        request->send(400, "text/plain", "User table full");
+        return;
+    }
+    if (result == UserWriteNeedPassword) {
+        request->send(400, "text/plain", "Need password");
+        return;
+    }
+    request->send(400, "text/plain", "Bad user name");
+}
+
+void WebConsole::handleAuthLoginPost(AsyncWebServerRequest *request) {
+    if (userStore == nullptr) {
+        request->send(500, "text/plain", "Users unavailable");
+        return;
+    }
+    String userName;
+    String password;
+    bool rememberMe = false;
+    extractJsonString(requestBody.c_str(), "userName", userName);
+    extractJsonString(requestBody.c_str(), "password", password);
+    extractJsonBool(requestBody.c_str(), "rememberMe", rememberMe);
+    const UserRecord *user = userStore->findByName(userName.c_str());
+    if (user == nullptr || user->isBlocked || !userStore->passwordMatches(user, password.c_str())) {
+        request->send(401, "text/plain", "Invalid user name or password");
+        return;
+    }
+    char tokenHex[AUTH_SESSION_TOKEN_LEN * 2 + 1];
+    uint32_t maxAgeSec = 0;
+    if (!userStore->startSession(user, rememberMe, millis(), tokenHex, sizeof(tokenHex), &maxAgeSec)) {
+        request->send(401, "text/plain", "Invalid user name or password");
+        return;
+    }
+    String body = "{\"ok\":true}";
+    AsyncWebServerResponse *response = request->beginResponse(200, "application/json", body);
+    sendAuthCookie(response, tokenHex, maxAgeSec);
+    request->send(response);
+}
+
+void WebConsole::handleAuthLogoutPost(AsyncWebServerRequest *request) {
+    if (userStore != nullptr && request->hasHeader("Cookie")) {
+        const char *cookie = request->header("Cookie").c_str();
+        const char *found = strstr(cookie, AUTH_COOKIE_NAME "=");
+        if (found != nullptr) {
+            found += strlen(AUTH_COOKIE_NAME "=");
+            char tokenHex[AUTH_SESSION_TOKEN_LEN * 2 + 1];
+            size_t hexIndex = 0;
+            while (hexIndex < AUTH_SESSION_TOKEN_LEN * 2 && found[hexIndex] != '\0' && found[hexIndex] != ';') {
+                tokenHex[hexIndex] = found[hexIndex];
+                hexIndex++;
+            }
+            tokenHex[hexIndex] = '\0';
+            userStore->endSession(tokenHex);
+        }
+    }
+    AsyncWebServerResponse *response = request->beginResponse(200, "text/plain", "Signed out");
+    response->addHeader("Set-Cookie", String(AUTH_COOKIE_NAME) + "=; Path=/; HttpOnly; Max-Age=0");
+    request->send(response);
+}
+
+void WebConsole::handleAuthMeGet(AsyncWebServerRequest *request) {
+    const UserRecord *user = nullptr;
+    if (!requireUser(request, &user)) {
+        return;
+    }
+    String json;
+    userStore->appendUserPublicJson(json, user);
+    AsyncWebServerResponse *response = request->beginResponse(200, "application/json", json);
+    response->addHeader("Cache-Control", "no-store");
+    request->send(response);
+}
+
+void WebConsole::handleUsersGet(AsyncWebServerRequest *request) {
+    if (!requireEditUsers(request, nullptr)) {
+        return;
+    }
+    AsyncWebServerResponse *response = request->beginResponse(200, "application/json", userStore->listPublicJson());
+    response->addHeader("Cache-Control", "no-store");
+    request->send(response);
+}
+
+void WebConsole::handleUsersPost(AsyncWebServerRequest *request) {
+    const UserRecord *actor = nullptr;
+    if (!requireEditUsers(request, &actor)) {
+        return;
+    }
+    UserRecord source;
+    fillUserFromJson(requestBody.c_str(), &source);
+    String password;
+    extractJsonString(requestBody.c_str(), "password", password);
+    sendUserWriteResult(request, userStore->createUser(actor, &source, password.c_str()));
+}
+
+void WebConsole::handleUsersUpdatePost(AsyncWebServerRequest *request) {
+    const UserRecord *actor = nullptr;
+    if (!requireEditUsers(request, &actor)) {
+        return;
+    }
+    UserRecord source;
+    fillUserFromJson(requestBody.c_str(), &source);
+    String password;
+    extractJsonString(requestBody.c_str(), "password", password);
+    sendUserWriteResult(request, userStore->updateUser(actor, source.userName, &source, password.c_str()));
+}
+
+void WebConsole::handleUsersDelete(AsyncWebServerRequest *request) {
+    const UserRecord *actor = nullptr;
+    if (!requireEditUsers(request, &actor)) {
+        return;
+    }
+    String userName;
+    extractJsonString(requestBody.c_str(), "userName", userName);
+    const UserWriteResult result = userStore->deleteUser(actor, userName.c_str());
+    if (result == UserWriteOk) {
+        request->send(200, "text/plain", "Deleted");
+        return;
+    }
+    sendUserWriteResult(request, result);
+}
+
 void WebConsole::handleWifiGet(AsyncWebServerRequest *request) {
+    if (!requireAdmin(request, nullptr)) {
+        return;
+    }
     GlobalSettings *settings = settingsManager->getSettings();
     String json = "{";
     json += "\"bssid\":\"";
@@ -258,6 +537,9 @@ void WebConsole::handleWifiGet(AsyncWebServerRequest *request) {
 }
 
 void WebConsole::handleWifiPost(AsyncWebServerRequest *request) {
+    if (!requireAdmin(request, nullptr)) {
+        return;
+    }
     String bssid;
     String password;
     String deviceName;
@@ -313,6 +595,9 @@ void WebConsole::handleWifiPost(AsyncWebServerRequest *request) {
 }
 
 void WebConsole::handleMqttGet(AsyncWebServerRequest *request) {
+    if (!requireAdmin(request, nullptr)) {
+        return;
+    }
     GlobalSettings *settings = settingsManager->getSettings();
     String json = "{";
     json += "\"enabled\":";
@@ -340,6 +625,9 @@ void WebConsole::handleMqttGet(AsyncWebServerRequest *request) {
 }
 
 void WebConsole::handleMqttPost(AsyncWebServerRequest *request) {
+    if (!requireAdmin(request, nullptr)) {
+        return;
+    }
     String server;
     String username;
     String password;
@@ -411,6 +699,9 @@ void WebConsole::appendRequestBody(uint8_t *data, size_t len, size_t index) {
 }
 
 void WebConsole::handleZigbeeGet(AsyncWebServerRequest *request) {
+    if (!requireAdmin(request, nullptr)) {
+        return;
+    }
     GlobalSettings *settings = settingsManager->getSettings();
     String json = "{";
     json += "\"channel\":";
@@ -424,6 +715,9 @@ void WebConsole::handleZigbeeGet(AsyncWebServerRequest *request) {
 }
 
 void WebConsole::handleZigbeePost(AsyncWebServerRequest *request) {
+    if (!requireAdmin(request, nullptr)) {
+        return;
+    }
     int channel = DEFAULT_ZIGBEE_CHANNEL;
     int permitJoinOnBootSec = DEFAULT_PERMIT_JOIN_SEC;
     if (!extractJsonInt(requestBody.c_str(), "channel", channel)
@@ -479,6 +773,9 @@ void WebConsole::setHardwareApplyHandler(WebConsole::HardwareApplyFn handler) {
 }
 
 void WebConsole::handleHardwareGet(AsyncWebServerRequest *request) {
+    if (!requireAdmin(request, nullptr)) {
+        return;
+    }
     const uint32_t speedHz = settingsManager->spiSpeedHz();
     LOGGER.info("Hardware GET spiSpeedHz=" + String((unsigned long)speedHz));
     String json = "{\"spiSpeedHz\":";
@@ -488,6 +785,9 @@ void WebConsole::handleHardwareGet(AsyncWebServerRequest *request) {
 }
 
 void WebConsole::handleHardwarePost(AsyncWebServerRequest *request) {
+    if (!requireAdmin(request, nullptr)) {
+        return;
+    }
     int spiSpeedHz = DEFAULT_SPI_SPEED_HZ;
     if (!extractJsonInt(requestBody.c_str(), "spiSpeedHz", spiSpeedHz)) {
         request->send(400, "text/plain", "Need spiSpeedHz");
@@ -619,6 +919,10 @@ bool WebConsole::applyHardwareJson(const char *json, String *errorText) {
 }
 
 void WebConsole::handleSettingsExportGet(AsyncWebServerRequest *request) {
+    const UserRecord *user = nullptr;
+    if (!requireAdmin(request, &user)) {
+        return;
+    }
     GlobalSettings *settings = settingsManager->getSettings();
     String json = "{";
     json += "\"version\":\"";
@@ -650,9 +954,11 @@ void WebConsole::handleSettingsExportGet(AsyncWebServerRequest *request) {
     json += "},\"hardware\":{\"spiSpeedHz\":";
     json += String((unsigned long)settingsManager->spiSpeedHz());
     json += "},\"ui\":{\"theme\":\"";
-    json += SettingsManager::uiThemeJsonId(settingsManager->uiTheme());
+    json += UserStore::themeJsonId(user->theme);
     json += "\"},\"devices\":";
     json += settingsManager->deviceMap()->listStoreJson();
+    json += ",\"users\":";
+    json += userStore->listExportJson();
     json += "}";
     AsyncWebServerResponse *response = request->beginResponse(200, "application/json", json);
     response->addHeader("Cache-Control", "no-store");
@@ -660,6 +966,10 @@ void WebConsole::handleSettingsExportGet(AsyncWebServerRequest *request) {
 }
 
 void WebConsole::handleSettingsRestorePost(AsyncWebServerRequest *request) {
+    const UserRecord *user = nullptr;
+    if (!requireAdmin(request, &user)) {
+        return;
+    }
     String errorText;
     String mqttJson;
     String zigbeeJson;
@@ -670,7 +980,9 @@ void WebConsole::handleSettingsRestorePost(AsyncWebServerRequest *request) {
     const bool haveZigbee = extractJsonKeyedSlice(requestBody.c_str(), "zigbee", '{', zigbeeJson);
     const bool haveHardware = extractJsonKeyedSlice(requestBody.c_str(), "hardware", '{', hardwareJson);
     const bool haveDevices = extractJsonKeyedSlice(requestBody.c_str(), "devices", '[', devicesJson);
+    String usersJson;
     const bool haveUi = extractJsonKeyedSlice(requestBody.c_str(), "ui", '{', uiJson);
+    const bool haveUsers = extractJsonKeyedSlice(requestBody.c_str(), "users", '[', usersJson);
     if (haveMqtt && !applyMqttJson(mqttJson.c_str(), &errorText)) {
         request->send(400, "text/plain", errorText);
         return;
@@ -683,7 +995,14 @@ void WebConsole::handleSettingsRestorePost(AsyncWebServerRequest *request) {
         request->send(400, "text/plain", errorText);
         return;
     }
-    if (haveUi && !applyThemeJson(uiJson.c_str(), &errorText)) {
+    char actorName[USER_NAME_MAX];
+    strncpy(actorName, user->userName, sizeof(actorName) - 1);
+    actorName[sizeof(actorName) - 1] = '\0';
+    if (haveUsers && !userStore->replaceFromExportJson(usersJson)) {
+        request->send(400, "text/plain", "Need a valid users list with at least one admin");
+        return;
+    }
+    if (haveUi && !applyThemeJson(uiJson.c_str(), userStore->findByName(actorName), &errorText)) {
         request->send(400, "text/plain", errorText);
         return;
     }
@@ -727,8 +1046,14 @@ void WebConsole::handleSettingsRestorePost(AsyncWebServerRequest *request) {
     request->send(200, "text/plain", "Restored");
 }
 
-bool WebConsole::applyThemeJson(const char *json, String *errorText) {
+bool WebConsole::applyThemeJson(const char *json, UserRecord *user, String *errorText) {
     String themeText;
+    if (user == nullptr) {
+        if (errorText != nullptr) {
+            *errorText = "Need signed-in user";
+        }
+        return false;
+    }
     if (!extractJsonString(json, "theme", themeText)) {
         if (errorText != nullptr) {
             *errorText = "Need ui theme";
@@ -742,13 +1067,17 @@ bool WebConsole::applyThemeJson(const char *json, String *errorText) {
         }
         return false;
     }
-    settingsManager->setUiTheme(SettingsManager::uiThemeFromJsonId(themeText.c_str()));
-    return true;
+    user->theme = UserStore::themeFromJsonId(themeText.c_str());
+    return userStore->saveToFile();
 }
 
 void WebConsole::handleThemeGet(AsyncWebServerRequest *request) {
+    const UserRecord *user = nullptr;
+    if (!requireUser(request, &user)) {
+        return;
+    }
     String json = "{\"theme\":\"";
-    json += SettingsManager::uiThemeJsonId(settingsManager->uiTheme());
+    json += UserStore::themeJsonId(user->theme);
     json += "\"}";
     AsyncWebServerResponse *response = request->beginResponse(200, "application/json", json);
     response->addHeader("Cache-Control", "no-store");
@@ -756,12 +1085,15 @@ void WebConsole::handleThemeGet(AsyncWebServerRequest *request) {
 }
 
 void WebConsole::handleThemePost(AsyncWebServerRequest *request) {
+    const UserRecord *user = nullptr;
+    if (!requireUser(request, &user)) {
+        return;
+    }
     String errorText;
-    if (!applyThemeJson(requestBody.c_str(), &errorText)) {
+    if (!applyThemeJson(requestBody.c_str(), userStore->findByName(user->userName), &errorText)) {
         request->send(400, "text/plain", errorText);
         return;
     }
-    settingsManager->saveMain(false);
     request->send(200, "text/plain", "Saved");
 }
 
@@ -780,6 +1112,9 @@ void WebConsole::setDeviceServices(
 }
 
 void WebConsole::handleDevicesGet(AsyncWebServerRequest *request) {
+    if (!requireUser(request, nullptr)) {
+        return;
+    }
     DeviceTopicMap *deviceMap = settingsManager->deviceMap();
     String json = deviceMap->listJson(isDeviceOnline, lastDeviceRssi, appendDeviceTelemetry);
     AsyncWebServerResponse *response = request->beginResponse(200, "application/json", json);
@@ -788,6 +1123,10 @@ void WebConsole::handleDevicesGet(AsyncWebServerRequest *request) {
 }
 
 void WebConsole::handleDevicesPost(AsyncWebServerRequest *request) {
+    const UserRecord *user = nullptr;
+    if (!requireUser(request, &user)) {
+        return;
+    }
     String ieeeText;
     String friendlyName;
     String stateTopic;
@@ -817,6 +1156,15 @@ void WebConsole::handleDevicesPost(AsyncWebServerRequest *request) {
         return;
     }
     DeviceTopicEntry *existing = deviceMap->findByIeee(ieee);
+    if (existing != nullptr && existing->used) {
+        if (!userCanEditDevices(user)) {
+            request->send(403, "text/plain", "Forbidden");
+            return;
+        }
+    } else if (!userCanAddDevices(user)) {
+        request->send(403, "text/plain", "Forbidden");
+        return;
+    }
     const uint8_t storedType =
         existing != nullptr && existing->used ? existing->zigbeeType : ZigbeeDeviceTypeUnknown;
     DeviceTopicEntry *entry = deviceMap->upsert(
@@ -857,6 +1205,14 @@ void WebConsole::handleDevicesPost(AsyncWebServerRequest *request) {
 }
 
 void WebConsole::handleDevicesDelete(AsyncWebServerRequest *request) {
+    const UserRecord *user = nullptr;
+    if (!requireUser(request, &user)) {
+        return;
+    }
+    if (!userCanRemoveDevices(user)) {
+        request->send(403, "text/plain", "Forbidden");
+        return;
+    }
     String ieeeText;
     if (!extractJsonString(requestBody.c_str(), "ieee", ieeeText)) {
         request->send(400, "text/plain", "Need ieee");
@@ -880,6 +1236,9 @@ void WebConsole::handleDevicesDelete(AsyncWebServerRequest *request) {
 }
 
 void WebConsole::handleDevicesCommandPost(AsyncWebServerRequest *request) {
+    if (!requireUser(request, nullptr)) {
+        return;
+    }
     if (applyDeviceCommand == nullptr) {
         request->send(503, "text/plain", "Command path is not ready");
         return;
@@ -912,6 +1271,14 @@ void WebConsole::handleDevicesCommandPost(AsyncWebServerRequest *request) {
 }
 
 void WebConsole::handleDevicesFoundGet(AsyncWebServerRequest *request) {
+    const UserRecord *user = nullptr;
+    if (!requireUser(request, &user)) {
+        return;
+    }
+    if (!userCanAddDevices(user)) {
+        request->send(403, "text/plain", "Forbidden");
+        return;
+    }
     if (foundDevices == nullptr) {
         request->send(200, "application/json", "[]");
         return;
@@ -923,6 +1290,14 @@ void WebConsole::handleDevicesFoundGet(AsyncWebServerRequest *request) {
 }
 
 void WebConsole::handleDevicesSearchPost(AsyncWebServerRequest *request) {
+    const UserRecord *user = nullptr;
+    if (!requireUser(request, &user)) {
+        return;
+    }
+    if (!userCanAddDevices(user)) {
+        request->send(403, "text/plain", "Forbidden");
+        return;
+    }
     if (startSearch == nullptr || !startSearch()) {
         LOGGER.warning("Device search did not start");
         request->send(500, "text/plain", "Slave is not ready for pairing");
@@ -933,6 +1308,9 @@ void WebConsole::handleDevicesSearchPost(AsyncWebServerRequest *request) {
 }
 
 void WebConsole::handleDevicesStoreGet(AsyncWebServerRequest *request) {
+    if (!requireAdmin(request, nullptr)) {
+        return;
+    }
     String json = devicesFileJson != nullptr ? devicesFileJson() : String("[]");
     AsyncWebServerResponse *response = request->beginResponse(200, "application/json", json);
     response->addHeader("Cache-Control", "no-store");
@@ -940,6 +1318,9 @@ void WebConsole::handleDevicesStoreGet(AsyncWebServerRequest *request) {
 }
 
 void WebConsole::handleGatewayStatusGet(AsyncWebServerRequest *request) {
+    if (!requireUser(request, nullptr)) {
+        return;
+    }
     String json = gatewayStatusJson != nullptr ? gatewayStatusJson() : String("{}");
     AsyncWebServerResponse *response = request->beginResponse(200, "application/json", json);
     response->addHeader("Cache-Control", "no-store");
@@ -947,6 +1328,14 @@ void WebConsole::handleGatewayStatusGet(AsyncWebServerRequest *request) {
 }
 
 void WebConsole::handleDevicesSearchStopPost(AsyncWebServerRequest *request) {
+    const UserRecord *user = nullptr;
+    if (!requireUser(request, &user)) {
+        return;
+    }
+    if (!userCanAddDevices(user)) {
+        request->send(403, "text/plain", "Forbidden");
+        return;
+    }
     if (stopSearch != nullptr) {
         stopSearch();
     }
@@ -954,6 +1343,9 @@ void WebConsole::handleDevicesSearchStopPost(AsyncWebServerRequest *request) {
 }
 
 void WebConsole::handleLogGet(AsyncWebServerRequest *request) {
+    if (!requireUser(request, nullptr)) {
+        return;
+    }
     size_t start = 0;
     size_t length = 0;
     LOGGER.snapshotRing(&start, &length);
@@ -968,6 +1360,9 @@ void WebConsole::handleLogGet(AsyncWebServerRequest *request) {
 }
 
 void WebConsole::handleVersionGet(AsyncWebServerRequest *request) {
+    if (!requireUser(request, nullptr)) {
+        return;
+    }
     String json = "{\"version\":\"";
     json += FIRMWARE_VERSION;
     json += "\"}";
@@ -977,6 +1372,9 @@ void WebConsole::handleVersionGet(AsyncWebServerRequest *request) {
 }
 
 void WebConsole::handleFirmwareUpdateStatusGet(AsyncWebServerRequest *request) {
+    if (!requireAdmin(request, nullptr)) {
+        return;
+    }
     AsyncWebServerResponse *response = request->beginResponse(200, "application/json", FIRMWARE_OTA.statusJson());
     response->addHeader("Cache-Control", "no-store");
     request->send(response);
@@ -993,6 +1391,11 @@ void WebConsole::handleOtaUpload(
 ) {
     (void)filename;
     if (index == 0) {
+        const UserRecord *user = authenticatedUser(request);
+        if (user == nullptr || !user->isAdmin) {
+            otaFailed = true;
+            return;
+        }
         otaStarted = true;
         otaFailed = false;
         otaCommand = command;
@@ -1035,6 +1438,9 @@ void WebConsole::handleOtaUpload(
 }
 
 void WebConsole::handleOtaDone(AsyncWebServerRequest *request) {
+    if (!requireAdmin(request, nullptr)) {
+        return;
+    }
     if (otaCommand == U_FLASH) {
         if (!otaStarted || otaFailed || FIRMWARE_OTA.phase() != FirmwareOta::Phase::Slave) {
             String errorMessage = "Upload failed";
