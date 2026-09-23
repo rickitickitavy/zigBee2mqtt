@@ -223,6 +223,7 @@
             setHidden(document.querySelector('.system-tab-btn[data-tab="update"]'), !admin);
             setHidden(document.querySelector('.system-tab-btn[data-tab="hardware"]'), !admin);
             setHidden(document.querySelector('.system-tab-btn[data-tab="security"]'), !canEditUsers);
+            setHidden(document.querySelector('.system-tab-btn[data-tab="maintenance"]'), !admin);
             setHidden(document.getElementById("maintenanceSettingsCard"), !admin);
             setHidden(document.getElementById("addDeviceBtn"), !canAdd);
             setHidden(document.getElementById("exportDevicesBtn"), !admin);
@@ -306,7 +307,16 @@
             });
         }
 
+        function openSignOutConfirm() {
+            document.getElementById("signOutConfirmDialog").hidden = false;
+        }
+
+        function closeSignOutConfirm() {
+            document.getElementById("signOutConfirmDialog").hidden = true;
+        }
+
         function signOut() {
+            closeSignOutConfirm();
             fetch("/api/auth/logout", { method: "POST" }).finally(function () {
                 showLoginForm();
             });
@@ -2856,6 +2866,10 @@
                 closeDeleteConfirmDialog();
                 return true;
             }
+            if (dialogId === "signOutConfirmDialog") {
+                closeSignOutConfirm();
+                return true;
+            }
             if (dialogId === "settingsRestoreConfirmDialog") {
                 closeSettingsRestoreConfirmDialog();
                 return true;
@@ -2944,8 +2958,9 @@
         <button type="button" class="sidebar-btn" data-section="mqtt" onclick="showMainSection('mqtt')">MQTT</button>
         <button type="button" class="sidebar-btn" data-section="zigbee" onclick="showMainSection('zigbee')">ZigBee</button>
         <button type="button" class="sidebar-btn" data-section="devices" onclick="showMainSection('devices')">Devices</button>
+        <button type="button" class="sidebar-btn" data-section="appearance" onclick="showMainSection('appearance')">Appearance</button>
         <button type="button" class="sidebar-btn" data-section="system" onclick="showMainSection('system')">System</button>
-        <button type="button" class="sidebar-btn sidebar-signout" onclick="signOut()">Sign out</button>
+        <button type="button" class="sidebar-btn sidebar-signout" onclick="openSignOutConfirm()">Sign out</button>
     </nav>
     <div class="main-panel">
         <section id="section-status" class="section-panel active" aria-label="Status">
@@ -3333,6 +3348,26 @@
             </div>
         </div>
 
+        <section id="section-appearance" class="section-panel" aria-label="Appearance">
+            <h2 class="section-title">Appearance</h2>
+            <div class="settings-scroll">
+                <div class="upload-card">
+                    <h3 class="upload-title">Theme</h3>
+                    <p id="themeSaveError" class="save-error" hidden></p>
+                    <div class="theme-row">
+                        <div class="field">
+                            <label for="uiTheme">Theme</label>
+                            <select id="uiTheme" onchange="onThemePickerChange()">
+                                <option value="light">Light</option>
+                                <option value="dark">Dark</option>
+                            </select>
+                        </div>
+                        <button type="button" class="btn btn-secondary btn-icon" aria-label="Save theme" title="Save theme" onclick="saveTheme()">💾</button>
+                    </div>
+                </div>
+            </div>
+        </section>
+
         <section id="section-system" class="section-panel" aria-label="System">
             <h2 class="section-title">System</h2>
             <nav class="tabs system-tabs" role="tablist" aria-label="System groups">
@@ -3398,21 +3433,7 @@
                     </div>
                 </div>
                 <div id="system-tab-maintenance" class="system-tab-panel tab-panel" role="tabpanel">
-                    <div class="upload-card">
-                        <h3 class="upload-title">Appearance</h3>
-                        <p id="themeSaveError" class="save-error" hidden></p>
-                        <div class="theme-row">
-                            <div class="field">
-                                <label for="uiTheme">Theme</label>
-                                <select id="uiTheme" onchange="onThemePickerChange()">
-                                    <option value="light">Light</option>
-                                    <option value="dark">Dark</option>
-                                </select>
-                            </div>
-                            <button type="button" class="btn btn-secondary btn-icon" aria-label="Save theme" title="Save theme" onclick="saveTheme()">💾</button>
-                        </div>
-                    </div>
-                    <div id="maintenanceSettingsCard" class="upload-card">
+                    <div id="maintenanceSettingsCard" class="upload-card" hidden>
                         <h3 class="upload-title">Settings</h3>
                         <p class="field-hint">Export MQTT, Zigbee, hardware, and devices. Restore replaces those groups. Wi-Fi is never included.</p>
                         <p id="settingsRestoreError" class="save-error" hidden></p>
@@ -3506,6 +3527,16 @@
         <div class="dialog-actions">
             <button type="button" class="btn btn-primary" onclick="confirmDeleteUser()">Delete</button>
             <button type="button" class="btn btn-secondary" onclick="closeUserDeleteConfirm()">Cancel</button>
+        </div>
+    </div>
+</div>
+<div id="signOutConfirmDialog" class="dialog-overlay dialog-overlay-front" hidden>
+    <div class="dialog-panel" role="dialog" aria-label="Sign out">
+        <h3 class="upload-title">Sign out</h3>
+        <p class="field-hint">Sign out of the console?</p>
+        <div class="dialog-actions">
+            <button type="button" class="btn btn-primary" onclick="signOut()">Sign out</button>
+            <button type="button" class="btn btn-secondary" onclick="closeSignOutConfirm()">Cancel</button>
         </div>
     </div>
 </div>

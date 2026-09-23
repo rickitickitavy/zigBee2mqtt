@@ -292,7 +292,9 @@ html, body {
 }
 
 .tab-btn.is-hidden,
-.tab-panel.is-hidden {
+.tab-btn[hidden],
+.tab-panel.is-hidden,
+.sidebar-btn[hidden] {
     display: none !important;
 }
 
@@ -438,6 +440,10 @@ html, body {
     border: 1px solid var(--border);
     border-radius: var(--radius);
     padding: 1rem;
+}
+
+.upload-card[hidden] {
+    display: none !important;
 }
 
 .upload-title {
