@@ -764,6 +764,10 @@ void WebConsole::setDevicesRestoredHandler(WebConsole::DevicesRestoredFn handler
     applyDevicesRestored = handler;
 }
 
+void WebConsole::setUsersRestoredHandler(WebConsole::UsersRestoredFn handler) {
+    applyUsersRestored = handler;
+}
+
 void WebConsole::setDevicesFileHandler(WebConsole::DevicesFileFn handler) {
     devicesFileJson = handler;
 }
@@ -998,8 +1002,21 @@ void WebConsole::handleSettingsRestorePost(AsyncWebServerRequest *request) {
     char actorName[USER_NAME_MAX];
     strncpy(actorName, user->userName, sizeof(actorName) - 1);
     actorName[sizeof(actorName) - 1] = '\0';
-    if (haveUsers && !userStore->replaceFromExportJson(usersJson)) {
+    char removedUserNames[USER_STORE_MAX][USER_NAME_MAX];
+    int removedUserCount = 0;
+    if (haveUsers
+        && !userStore->replaceFromExportJson(
+            usersJson,
+            removedUserNames,
+            &removedUserCount,
+            USER_STORE_MAX
+        )) {
         request->send(400, "text/plain", "Need a valid users list with at least one admin");
+        return;
+    }
+    if (haveUsers && applyUsersRestored != nullptr
+        && !applyUsersRestored(removedUserNames, removedUserCount)) {
+        request->send(503, "text/plain", "Slave is not ready to store the user list");
         return;
     }
     if (haveUi && !applyThemeJson(uiJson.c_str(), userStore->findByName(actorName), &errorText)) {
@@ -1068,7 +1085,8 @@ bool WebConsole::applyThemeJson(const char *json, UserRecord *user, String *erro
         return false;
     }
     user->theme = UserStore::themeFromJsonId(themeText.c_str());
-    return userStore->saveToFile();
+    userStore->noteRecordChanged(user);
+    return true;
 }
 
 void WebConsole::handleThemeGet(AsyncWebServerRequest *request) {

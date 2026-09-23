@@ -257,6 +257,8 @@ void ZigbeeSpiProxy::applyDevicesFile(const SpiFrame &frame) {
         fileCache = filePullBuffer;
         filePullBuffer = "";
         filePullCollecting = false;
+        filePullInFlight = false;
+        filePullStartedMs = 0;
         LOGGER.info("Received slave devices.json (" + String(fileCache.length()) + " bytes)");
     }
 }
@@ -272,6 +274,21 @@ void ZigbeeSpiProxy::requestRegistryPull(DeviceTopicMap *topicMap) {
     if (registryPullStartedMs == 0) {
         registryPullStartedMs = millis();
         LOGGER.info("Waiting for slave device list after radio start");
+    }
+}
+
+void ZigbeeSpiProxy::requestUsersPull(UserStore *store) {
+    if (store == nullptr) {
+        return;
+    }
+    userMap = store;
+    if (userReady || userCollecting) {
+        return;
+    }
+    userPullRequested = true;
+    if (userPullStartedMs == 0) {
+        userPullStartedMs = millis();
+        LOGGER.info("Waiting for slave user list after radio start");
     }
 }
 
@@ -390,6 +407,201 @@ bool ZigbeeSpiProxy::enqueueRegistryFrame(uint8_t flags, const DeviceTopicEntry 
     return INTER_CHIP_HOST.tryEnqueue(SpiCmdSetDevice, payload, (uint16_t)length);
 }
 
+bool ZigbeeSpiProxy::queueUserChange(uint8_t flags, const UserRecord *user) {
+    if (user == nullptr) {
+        return false;
+    }
+    for (int i = 0; i < kPendingChangeSlots; i++) {
+        if (pendingUserChanges[i].used) {
+            continue;
+        }
+        pendingUserChanges[i].used = true;
+        pendingUserChanges[i].flags = flags;
+        pendingUserChanges[i].user = *user;
+        return true;
+    }
+    LOGGER.warning("Only one user record change at a time");
+    return false;
+}
+
+bool ZigbeeSpiProxy::enqueueUserUpsert(const UserRecord *user) {
+    if (user == nullptr || user->userName[0] == '\0') {
+        return false;
+    }
+    return queueUserChange(SPI_USER_SYNC_ENTRY, user);
+}
+
+bool ZigbeeSpiProxy::enqueueUserDelete(const char *userName) {
+    if (userName == nullptr || userName[0] == '\0') {
+        return false;
+    }
+    UserRecord user;
+    memset(&user, 0, sizeof(user));
+    strncpy(user.userName, userName, sizeof(user.userName) - 1);
+    return queueUserChange(SPI_USER_SYNC_DELETE, &user);
+}
+
+void ZigbeeSpiProxy::queueDeletedUserNamesAndPushAll(const char (*removedNames)[USER_NAME_MAX], int removedCount) {
+    pendingUserDeleteCount = 0;
+    pendingUserDeleteIndex = 0;
+    pendingUserUpsertWalk = 0;
+    if (removedNames != nullptr) {
+        const int bounded = removedCount > USER_STORE_MAX ? USER_STORE_MAX : removedCount;
+        for (int i = 0; i < bounded; i++) {
+            strncpy(pendingDeleteUserNames[i], removedNames[i], USER_NAME_MAX - 1);
+            pendingDeleteUserNames[i][USER_NAME_MAX - 1] = '\0';
+        }
+        pendingUserDeleteCount = bounded;
+    }
+    userFullPushActive = true;
+}
+
+void ZigbeeSpiProxy::applyPendingUserChangeToStore(const PendingUserChange *change) {
+    if (userMap == nullptr || change == nullptr) {
+        return;
+    }
+    if ((change->flags & SPI_USER_SYNC_DELETE) != 0) {
+        userMap->removeByName(change->user.userName, false);
+        return;
+    }
+    if ((change->flags & SPI_USER_SYNC_ENTRY) != 0) {
+        userMap->upsertFromRecord(&change->user, false);
+    }
+}
+
+void ZigbeeSpiProxy::replayPendingUserChanges() {
+    for (int i = 0; i < kPendingChangeSlots; i++) {
+        if (pendingUserChanges[i].used) {
+            applyPendingUserChangeToStore(&pendingUserChanges[i]);
+        }
+    }
+}
+
+void ZigbeeSpiProxy::pumpPendingUserChanges() {
+    if (!commandsAllowed() || userPullRequested || userPullActive || userCollecting) {
+        return;
+    }
+    for (int i = 0; i < kPendingChangeSlots; i++) {
+        if (!pendingUserChanges[i].used) {
+            continue;
+        }
+        if (enqueueUserFrame(pendingUserChanges[i].flags, &pendingUserChanges[i].user)) {
+            pendingUserChanges[i].used = false;
+        }
+        return;
+    }
+    if (!userFullPushActive || userMap == nullptr) {
+        return;
+    }
+    if (pendingUserDeleteIndex < pendingUserDeleteCount) {
+        UserRecord deletedUser;
+        memset(&deletedUser, 0, sizeof(deletedUser));
+        strncpy(deletedUser.userName, pendingDeleteUserNames[pendingUserDeleteIndex], sizeof(deletedUser.userName) - 1);
+        if (enqueueUserFrame(SPI_USER_SYNC_DELETE, &deletedUser)) {
+            pendingUserDeleteIndex++;
+        }
+        return;
+    }
+    const int nextIndex = userMap->nextUsedIndex(pendingUserUpsertWalk);
+    if (nextIndex < 0) {
+        userFullPushActive = false;
+        pendingUserDeleteCount = 0;
+        pendingUserDeleteIndex = 0;
+        pendingUserUpsertWalk = 0;
+        return;
+    }
+    const UserRecord *user = userMap->userAt(nextIndex);
+    if (user != nullptr && enqueueUserFrame(SPI_USER_SYNC_ENTRY, user)) {
+        pendingUserUpsertWalk = nextIndex + 1;
+    }
+}
+
+bool ZigbeeSpiProxy::enqueueUserFrame(uint8_t flags, const UserRecord *user) {
+    if ((flags & SPI_USER_SYNC_RESET) != 0) {
+        LOGGER.warning("Host cannot replace the full user store");
+        return false;
+    }
+    const bool isUpsert = (flags & SPI_USER_SYNC_ENTRY) != 0;
+    const bool isDelete = (flags & SPI_USER_SYNC_DELETE) != 0;
+    if (isUpsert == isDelete) {
+        LOGGER.warning("Host user change must be one create/update or one delete");
+        return false;
+    }
+    uint8_t payload[SPI_USER_SYNC_ENTRY_LEN];
+    const size_t length = UserStore::packSyncPayload(payload, sizeof(payload), flags, user);
+    if (length == 0) {
+        return false;
+    }
+    return INTER_CHIP_HOST.tryEnqueue(SpiCmdSetUser, payload, (uint16_t)length);
+}
+
+void ZigbeeSpiProxy::beginUserPullSnapshot() {
+    pullUsers.resetToEmpty();
+    userCollecting = true;
+    userPullActive = true;
+    userPullExpectedCount = -1;
+}
+
+void ZigbeeSpiProxy::applyPulledUsers(const SpiFrame &frame) {
+    if (userMap == nullptr) {
+        return;
+    }
+    uint8_t flags = 0;
+    UserRecord user;
+    if (!UserStore::unpackSyncPayload(frame.payload, frame.length, &flags, &user)) {
+        return;
+    }
+    if ((flags & SPI_USER_SYNC_RESET) != 0) {
+        beginUserPullSnapshot();
+        if (frame.length >= 2) {
+            userPullExpectedCount = frame.payload[1];
+        }
+    }
+    if ((flags & SPI_USER_SYNC_ENTRY) != 0) {
+        if (!userCollecting) {
+            beginUserPullSnapshot();
+        }
+        pullUsers.upsertFromRecord(&user, false);
+    }
+    if ((flags & SPI_USER_SYNC_LAST) != 0) {
+        finishUsersPull();
+    }
+}
+
+void ZigbeeSpiProxy::finishUsersPull() {
+    const int receivedCount = userCollecting ? pullUsers.userCount() : 0;
+    if (userCollecting && userPullExpectedCount >= 0 && receivedCount < userPullExpectedCount) {
+        LOGGER.warning(
+            "User dump incomplete " + String(receivedCount) + "/" + String(userPullExpectedCount)
+        );
+        userCollecting = false;
+        userPullActive = false;
+        userReady = false;
+        if (userPullRetries < 5) {
+            userPullRetries++;
+            userPullRequested = true;
+            userPullStartedMs = millis();
+        }
+        return;
+    }
+    if (userCollecting) {
+        if (receivedCount == 0 && userMap != nullptr && userMap->userCount() > 0) {
+            LOGGER.warning("Ignoring empty user dump; keeping current list");
+        } else if (userMap != nullptr) {
+            userMap->replaceFrom(&pullUsers);
+        }
+    }
+    userCollecting = false;
+    userPullActive = false;
+    userPullRequested = false;
+    userPullStartedMs = 0;
+    userPullRetries = 0;
+    userPullExpectedCount = -1;
+    replayPendingUserChanges();
+    userReady = true;
+    LOGGER.info("Pulled " + String(userMap != nullptr ? userMap->userCount() : 0) + " user(s) from slave");
+}
+
 void ZigbeeSpiProxy::beginPullSnapshot() {
     pullMap.clearAll();
     pullCollecting = true;
@@ -465,9 +677,18 @@ void ZigbeeSpiProxy::finishRegistryPull() {
 }
 
 void ZigbeeSpiProxy::pumpRegistrySync() {
+    if (filePullInFlight && filePullStartedMs != 0
+        && (long)(millis() - filePullStartedMs) >= 15000L) {
+        LOGGER.warning("Slave devices.json not received; continuing");
+        filePullInFlight = false;
+        filePullCollecting = false;
+        filePullStartedMs = 0;
+    }
     if (filePullRequested && commandsAllowed() && !registryPullRequested && !pullCollecting) {
         if (INTER_CHIP_HOST.tryEnqueue(SpiCmdGetDevicesFile, nullptr, 0)) {
             filePullRequested = false;
+            filePullInFlight = true;
+            filePullStartedMs = millis();
             LOGGER.info("Requesting slave devices.json");
         }
         return;
@@ -487,7 +708,24 @@ void ZigbeeSpiProxy::pumpRegistrySync() {
         registryPullRequested = true;
         LOGGER.warning("Slave device list not received; requesting it");
     }
+    if (userPullRequested && commandsAllowed() && !registryPullRequested && !registryPullActive
+        && !pullCollecting && !filePullRequested && !filePullCollecting && !filePullInFlight) {
+        if (INTER_CHIP_HOST.tryEnqueue(SpiCmdGetUsers, nullptr, 0)) {
+            userPullRequested = false;
+            userPullActive = true;
+            userPullStartedMs = millis();
+            LOGGER.info("Requesting user store from slave");
+        }
+        return;
+    }
+    if (!userReady && !userCollecting && !userPullActive && !userPullRequested
+        && userMap != nullptr && commandsAllowed() && userPullStartedMs != 0
+        && (long)(millis() - userPullStartedMs) >= 15000L) {
+        userPullRequested = true;
+        LOGGER.warning("Slave user list not received; requesting it");
+    }
     pumpPendingChanges();
+    pumpPendingUserChanges();
 }
 
 void ZigbeeSpiProxy::onSpiEvent(const SpiFrame &frame) {
@@ -501,6 +739,10 @@ void ZigbeeSpiProxy::onSpiEvent(const SpiFrame &frame) {
     }
     if (frame.cmd == SpiEvtDeviceMap) {
         applyPulledRegistry(frame);
+        return;
+    }
+    if (frame.cmd == SpiEvtUserMap) {
+        applyPulledUsers(frame);
         return;
     }
     if (frame.cmd == SpiEvtAttrReport && frame.length >= SPI_ATTR_REPORT_MESSAGE_OFFSET + 1) {

@@ -12,7 +12,7 @@ The file includes MQTT, Zigbee, hardware, `ui.theme` (signed-in user), devices, 
 
 The file MUST NOT include a Wi-Fi group or a plaintext user password.
 
-Restore applies those groups. A `users` array replaces the host users table. `ui.theme` applies to the signed-in user only. A `wifi` object in the file is ignored.
+Restore applies those groups. A `users` array updates the host cache, then the host pushes per-user create/update and delete frames to the slave. An empty `users` array is rejected. `ui.theme` applies to the signed-in user only. A `wifi` object in the file is ignored.
 
 ## Consequences
 

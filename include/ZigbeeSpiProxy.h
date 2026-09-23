@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include "SpiProtocol.h"
 #include "DeviceTopicMap.h"
+#include "UserStore.h"
 
 class ZigbeeSpiProxy {
 public:
@@ -38,11 +39,15 @@ public:
     );
     void queueDeletedIeeesAndPushAll(const uint8_t (*deletedIeees)[8], int deletedCount);
     void requestRegistryPull(DeviceTopicMap *topicMap);
+    void requestUsersPull(UserStore *store);
     void requestDevicesFile();
     String devicesFileJson() const;
     void pumpRegistrySync();
     bool enqueueDeviceUpsert(const DeviceTopicEntry *entry);
     bool enqueueDeviceDelete(const uint8_t ieee[8]);
+    bool enqueueUserUpsert(const UserRecord *user);
+    bool enqueueUserDelete(const char *userName);
+    void queueDeletedUserNamesAndPushAll(const char (*removedNames)[USER_NAME_MAX], int removedCount);
     bool registryHydrated() const;
     bool isOnline(const uint8_t ieee[8]) const;
     bool lastRssiDbm(const uint8_t ieee[8], int8_t *rssiDbm) const;
@@ -88,12 +93,33 @@ private:
         DeviceTopicEntry entry;
     };
 
+    struct PendingUserChange {
+        bool used;
+        uint8_t flags;
+        UserRecord user;
+    };
+
     CachedDevice devices[kMaxDevices]{};
     LightStateFn lightStateHandler = nullptr;
     DeviceTopicMap *registryMap = nullptr;
     DeviceTopicEntry pullSlots[DEVICE_MAP_SLOTS]{};
     DeviceTopicMap pullMap;
     PendingDeviceChange pendingChanges[kPendingChangeSlots]{};
+    UserStore *userMap = nullptr;
+    UserStore pullUsers;
+    PendingUserChange pendingUserChanges[kPendingChangeSlots]{};
+    bool userPullRequested = false;
+    bool userPullActive = false;
+    bool userReady = false;
+    bool userCollecting = false;
+    int userPullExpectedCount = -1;
+    uint8_t userPullRetries = 0;
+    unsigned long userPullStartedMs = 0;
+    char pendingDeleteUserNames[USER_STORE_MAX][USER_NAME_MAX]{};
+    int pendingUserDeleteCount = 0;
+    int pendingUserDeleteIndex = 0;
+    int pendingUserUpsertWalk = 0;
+    bool userFullPushActive = false;
     bool registryPullRequested = false;
     bool registryPullActive = false;
     bool registryReady = false;
@@ -105,6 +131,8 @@ private:
     void (*registryPullDone)() = nullptr;
     bool filePullRequested = false;
     bool filePullCollecting = false;
+    bool filePullInFlight = false;
+    unsigned long filePullStartedMs = 0;
     String filePullBuffer;
     String fileCache;
     uint32_t packetsRx = 0;
@@ -129,6 +157,14 @@ private:
     void applyPulledRegistry(const SpiFrame &frame);
     void finishRegistryPull();
     void applyDevicesFile(const SpiFrame &frame);
+    bool enqueueUserFrame(uint8_t flags, const UserRecord *user);
+    bool queueUserChange(uint8_t flags, const UserRecord *user);
+    void applyPendingUserChangeToStore(const PendingUserChange *change);
+    void replayPendingUserChanges();
+    void pumpPendingUserChanges();
+    void beginUserPullSnapshot();
+    void applyPulledUsers(const SpiFrame &frame);
+    void finishUsersPull();
 };
 
 extern ZigbeeSpiProxy ZIGBEE_SPI_PROXY;

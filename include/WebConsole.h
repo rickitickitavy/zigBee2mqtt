@@ -19,6 +19,7 @@ public:
     using DeviceTelemetryFn = void (*)(const uint8_t ieee[8], String &json);
     using DeviceCommandFn = int (*)(const char *ieeeText, const char *payload, int channel);
     using DevicesRestoredFn = bool (*)(const uint8_t (*removedIeees)[8], int removedCount);
+    using UsersRestoredFn = bool (*)(const char (*removedNames)[USER_NAME_MAX], int removedCount);
 
     explicit WebConsole(SettingsManager *settingsManager, UserStore *userStore);
 
@@ -39,6 +40,7 @@ public:
     void setDeviceTelemetryHandler(DeviceTelemetryFn handler);
     void setDeviceCommandHandler(DeviceCommandFn handler);
     void setDevicesRestoredHandler(DevicesRestoredFn handler);
+    void setUsersRestoredHandler(UsersRestoredFn handler);
 
 private:
     SettingsManager *settingsManager;
@@ -56,6 +58,7 @@ private:
     DeviceTelemetryFn appendDeviceTelemetry = nullptr;
     DeviceCommandFn applyDeviceCommand = nullptr;
     DevicesRestoredFn applyDevicesRestored = nullptr;
+    UsersRestoredFn applyUsersRestored = nullptr;
     AsyncWebServer server;
     String requestBody;
     bool otaStarted = false;

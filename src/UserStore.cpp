@@ -9,7 +9,11 @@
 #include <stdio.h>
 #include <time.h>
 
-UserStore::UserStore() : storedCount(0) {
+static_assert(USER_NAME_MAX == SPI_USER_SYNC_NAME_LEN, "user name SPI width must match store");
+static_assert(USER_PASSWORD_SALT_LEN == SPI_USER_SYNC_SALT_LEN, "user salt SPI width must match store");
+static_assert(USER_PASSWORD_HASH_LEN == SPI_USER_SYNC_HASH_LEN, "user hash SPI width must match store");
+
+UserStore::UserStore() : storedCount(0), persistEnabled(false), persistPending(false), changedHandler(nullptr) {
     clearUsers();
     memset(sessions, 0, sizeof(sessions));
 }
@@ -21,6 +25,33 @@ void UserStore::clearUsers() {
 
 int UserStore::userCount() const {
     return storedCount;
+}
+
+int UserStore::nextUsedIndex(int startIndex) const {
+    if (startIndex < 0) {
+        startIndex = 0;
+    }
+    for (int index = startIndex; index < storedCount; index++) {
+        if (users[index].userName[0] != '\0') {
+            return index;
+        }
+    }
+    return -1;
+}
+
+UserRecord *UserStore::userAt(int index) {
+    return const_cast<UserRecord *>(static_cast<const UserStore *>(this)->userAt(index));
+}
+
+const UserRecord *UserStore::userAt(int index) const {
+    if (index < 0 || index >= storedCount) {
+        return nullptr;
+    }
+    return &users[index];
+}
+
+void UserStore::setChangedHandler(ChangedFn handler) {
+    changedHandler = handler;
 }
 
 bool UserStore::nameEquals(const char *left, const char *right) {
@@ -165,7 +196,6 @@ void UserStore::seedAdmin() {
     admin->addedAt = wallClock > 1600000000 ? (uint32_t)wallClock : 0;
     setPassword(admin, "admin");
     storedCount = 1;
-    saveToFile();
     LOGGER.info("Seeded console user admin");
 }
 
@@ -249,23 +279,267 @@ bool UserStore::loadFromFile() {
     return parseUsersJson(json, true);
 }
 
-bool UserStore::loadOrSeed() {
+bool UserStore::begin(bool persistToLittleFs) {
+    persistEnabled = persistToLittleFs;
+    if (!persistEnabled) {
+        return true;
+    }
     if (loadFromFile()) {
-        LOGGER.info("Loaded " + String(storedCount) + " console user(s)");
+        LOGGER.info("Loaded " + String(storedCount) + " console user(s) from slave store");
         return true;
     }
     seedAdmin();
+    if (!persistNow()) {
+        LOGGER.error("Slave user seed persist failed");
+        return false;
+    }
     return storedCount > 0;
 }
 
-bool UserStore::replaceFromExportJson(const String &json) {
+bool UserStore::persistNow() {
+    if (!persistEnabled) {
+        return true;
+    }
+    if (storedCount == 0) {
+        LOGGER.warning("Refusing to erase slave user store with an empty list");
+        loadFromFile();
+        return false;
+    }
+    if (!saveToFile()) {
+        LOGGER.error("Slave user store write failed");
+        return false;
+    }
+    LOGGER.info("Slave user store saved " + String(storedCount) + " user(s)");
+    return true;
+}
+
+void UserStore::requestPersist() {
+    persistPending = true;
+}
+
+void UserStore::persistIfDue() {
+    if (!persistPending) {
+        return;
+    }
+    persistPending = false;
+    if (storedCount == 0) {
+        LOGGER.warning("Refusing to erase slave user store with an empty list");
+        loadFromFile();
+        return;
+    }
+    if (!saveToFile()) {
+        LOGGER.error("Slave user store write failed");
+        persistPending = true;
+        return;
+    }
+    LOGGER.info("Slave user store saved " + String(storedCount) + " user(s)");
+}
+
+void UserStore::afterMutation(UserChangeKind kind, const UserRecord *user) {
+    if (persistEnabled) {
+        requestPersist();
+        return;
+    }
+    if (changedHandler != nullptr && user != nullptr) {
+        changedHandler(kind, user);
+    }
+}
+
+void UserStore::noteRecordChanged(const UserRecord *user) {
+    afterMutation(UserChangeUpsert, user);
+}
+
+void UserStore::replaceFrom(const UserStore *source) {
+    if (source == nullptr) {
+        return;
+    }
+    memcpy(users, source->users, sizeof(users));
+    storedCount = source->storedCount;
+}
+
+void UserStore::resetToEmpty() {
+    clearUsers();
+    memset(sessions, 0, sizeof(sessions));
+    persistPending = false;
+}
+
+bool UserStore::upsertFromRecord(const UserRecord *source, bool notify) {
+    if (source == nullptr || source->userName[0] == '\0') {
+        return false;
+    }
+    UserRecord *existing = findByName(source->userName);
+    if (existing != nullptr) {
+        *existing = *source;
+        if (notify) {
+            afterMutation(UserChangeUpsert, existing);
+        }
+        return true;
+    }
+    if (storedCount >= USER_STORE_MAX) {
+        return false;
+    }
+    users[storedCount] = *source;
+    storedCount++;
+    if (notify) {
+        afterMutation(UserChangeUpsert, &users[storedCount - 1]);
+    }
+    return true;
+}
+
+bool UserStore::removeByName(const char *userName, bool notify) {
+    int foundIndex = -1;
+    for (int index = 0; index < storedCount; index++) {
+        if (nameEquals(users[index].userName, userName)) {
+            foundIndex = index;
+            break;
+        }
+    }
+    if (foundIndex < 0) {
+        return false;
+    }
+    UserRecord removed = users[foundIndex];
+    if (foundIndex < storedCount - 1) {
+        memmove(&users[foundIndex], &users[foundIndex + 1], sizeof(UserRecord) * (storedCount - foundIndex - 1));
+    }
+    storedCount--;
+    memset(&users[storedCount], 0, sizeof(UserRecord));
+    if (notify) {
+        afterMutation(UserChangeDelete, &removed);
+    }
+    return true;
+}
+
+bool UserStore::replaceFromExportJson(
+    const String &json,
+    char (*removedNames)[USER_NAME_MAX],
+    int *removedCount,
+    int removedMax
+) {
     UserStore scratch;
     if (!scratch.parseUsersJson(json, true) || scratch.adminCount() < 1) {
         return false;
     }
+    int collected = 0;
+    for (int index = 0; index < storedCount; index++) {
+        if (scratch.findByName(users[index].userName) != nullptr) {
+            continue;
+        }
+        if (removedNames != nullptr && collected < removedMax) {
+            strncpy(removedNames[collected], users[index].userName, USER_NAME_MAX - 1);
+            removedNames[collected][USER_NAME_MAX - 1] = '\0';
+            collected++;
+        }
+    }
+    if (removedCount != nullptr) {
+        *removedCount = collected;
+    }
     memcpy(users, scratch.users, sizeof(users));
     storedCount = scratch.storedCount;
-    return saveToFile();
+    if (persistEnabled) {
+        requestPersist();
+    }
+    return true;
+}
+
+size_t UserStore::packSyncPayload(uint8_t *out, size_t outMax, uint8_t flags, const UserRecord *user) {
+    if (out == nullptr) {
+        return 0;
+    }
+    if ((flags & SPI_USER_SYNC_RESET) != 0 || (flags & SPI_USER_SYNC_LAST) != 0) {
+        if (outMax < 2 && (flags & SPI_USER_SYNC_RESET) != 0) {
+            return 0;
+        }
+        if (outMax < 1) {
+            return 0;
+        }
+        out[0] = flags;
+        if ((flags & SPI_USER_SYNC_RESET) != 0) {
+            return 1;
+        }
+        return 1;
+    }
+    if (user == nullptr || outMax < SPI_USER_SYNC_ENTRY_LEN) {
+        return 0;
+    }
+    memset(out, 0, SPI_USER_SYNC_ENTRY_LEN);
+    out[0] = flags;
+    strncpy((char *)out + 1, user->userName, SPI_USER_SYNC_NAME_LEN - 1);
+    if ((flags & SPI_USER_SYNC_DELETE) != 0) {
+        return SPI_USER_SYNC_ENTRY_LEN;
+    }
+    uint8_t salt[SPI_USER_SYNC_SALT_LEN];
+    uint8_t hash[SPI_USER_SYNC_HASH_LEN];
+    if (!hexToBytes(user->passwordSaltHex, salt, sizeof(salt))
+        || !hexToBytes(user->passwordHashHex, hash, sizeof(hash))) {
+        return 0;
+    }
+    memcpy(out + 1 + SPI_USER_SYNC_NAME_LEN, salt, sizeof(salt));
+    memcpy(out + 1 + SPI_USER_SYNC_NAME_LEN + SPI_USER_SYNC_SALT_LEN, hash, sizeof(hash));
+    const size_t addedAtOffset = 1 + SPI_USER_SYNC_NAME_LEN + SPI_USER_SYNC_SALT_LEN + SPI_USER_SYNC_HASH_LEN;
+    out[addedAtOffset] = (uint8_t)(user->addedAt & 0xFF);
+    out[addedAtOffset + 1] = (uint8_t)((user->addedAt >> 8) & 0xFF);
+    out[addedAtOffset + 2] = (uint8_t)((user->addedAt >> 16) & 0xFF);
+    out[addedAtOffset + 3] = (uint8_t)((user->addedAt >> 24) & 0xFF);
+    uint8_t roleFlags = 0;
+    if (user->isAdmin) {
+        roleFlags |= SPI_USER_FLAG_ADMIN;
+    }
+    if (user->editDevices) {
+        roleFlags |= SPI_USER_FLAG_EDIT_DEVICES;
+    }
+    if (user->addDevices) {
+        roleFlags |= SPI_USER_FLAG_ADD_DEVICES;
+    }
+    if (user->removeDevices) {
+        roleFlags |= SPI_USER_FLAG_REMOVE_DEVICES;
+    }
+    if (user->editUsers) {
+        roleFlags |= SPI_USER_FLAG_EDIT_USERS;
+    }
+    if (user->isBlocked) {
+        roleFlags |= SPI_USER_FLAG_BLOCKED;
+    }
+    out[addedAtOffset + 4] = roleFlags;
+    out[addedAtOffset + 5] = user->theme == UI_THEME_DARK ? UI_THEME_DARK : UI_THEME_LIGHT;
+    return SPI_USER_SYNC_ENTRY_LEN;
+}
+
+bool UserStore::unpackSyncPayload(const uint8_t *in, uint16_t length, uint8_t *flags, UserRecord *user) {
+    if (in == nullptr || flags == nullptr || length < 1) {
+        return false;
+    }
+    *flags = in[0];
+    if ((*flags & SPI_USER_SYNC_RESET) != 0 || (*flags & SPI_USER_SYNC_LAST) != 0) {
+        return true;
+    }
+    if (user == nullptr || length < 1 + SPI_USER_SYNC_NAME_LEN) {
+        return false;
+    }
+    memset(user, 0, sizeof(*user));
+    memcpy(user->userName, in + 1, SPI_USER_SYNC_NAME_LEN - 1);
+    user->userName[USER_NAME_MAX - 1] = '\0';
+    if ((*flags & SPI_USER_SYNC_DELETE) != 0) {
+        return true;
+    }
+    if (length < SPI_USER_SYNC_ENTRY_LEN) {
+        return false;
+    }
+    const uint8_t *salt = in + 1 + SPI_USER_SYNC_NAME_LEN;
+    const uint8_t *hash = salt + SPI_USER_SYNC_SALT_LEN;
+    bytesToHex(salt, SPI_USER_SYNC_SALT_LEN, user->passwordSaltHex);
+    bytesToHex(hash, SPI_USER_SYNC_HASH_LEN, user->passwordHashHex);
+    const size_t addedAtOffset = 1 + SPI_USER_SYNC_NAME_LEN + SPI_USER_SYNC_SALT_LEN + SPI_USER_SYNC_HASH_LEN;
+    user->addedAt = (uint32_t)in[addedAtOffset] | ((uint32_t)in[addedAtOffset + 1] << 8)
+        | ((uint32_t)in[addedAtOffset + 2] << 16) | ((uint32_t)in[addedAtOffset + 3] << 24);
+    const uint8_t roleFlags = in[addedAtOffset + 4];
+    user->isAdmin = (roleFlags & SPI_USER_FLAG_ADMIN) != 0;
+    user->editDevices = (roleFlags & SPI_USER_FLAG_EDIT_DEVICES) != 0;
+    user->addDevices = (roleFlags & SPI_USER_FLAG_ADD_DEVICES) != 0;
+    user->removeDevices = (roleFlags & SPI_USER_FLAG_REMOVE_DEVICES) != 0;
+    user->editUsers = (roleFlags & SPI_USER_FLAG_EDIT_USERS) != 0;
+    user->isBlocked = (roleFlags & SPI_USER_FLAG_BLOCKED) != 0;
+    user->theme = in[addedAtOffset + 5] == UI_THEME_DARK ? UI_THEME_DARK : UI_THEME_LIGHT;
+    return true;
 }
 
 UserWriteResult UserStore::createUser(const UserRecord *actor, const UserRecord *source, const char *password) {
@@ -300,7 +574,7 @@ UserWriteResult UserStore::createUser(const UserRecord *actor, const UserRecord 
         return UserWriteNeedPassword;
     }
     storedCount++;
-    saveToFile();
+    afterMutation(UserChangeUpsert, user);
     return UserWriteOk;
 }
 
@@ -335,7 +609,7 @@ UserWriteResult UserStore::updateUser(
             return UserWriteNeedPassword;
         }
     }
-    saveToFile();
+    afterMutation(UserChangeUpsert, user);
     return UserWriteOk;
 }
 
@@ -359,12 +633,13 @@ UserWriteResult UserStore::deleteUser(const UserRecord *actor, const char *userN
     if (users[foundIndex].isAdmin && adminCount() <= 1) {
         return UserWriteForbidden;
     }
+    UserRecord removed = users[foundIndex];
     if (foundIndex < storedCount - 1) {
         memmove(&users[foundIndex], &users[foundIndex + 1], sizeof(UserRecord) * (storedCount - foundIndex - 1));
     }
     storedCount--;
     memset(&users[storedCount], 0, sizeof(UserRecord));
-    saveToFile();
+    afterMutation(UserChangeDelete, &removed);
     return UserWriteOk;
 }
 

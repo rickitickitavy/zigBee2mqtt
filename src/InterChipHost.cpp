@@ -10,6 +10,8 @@
 #include <freertos/task.h>
 
 static TaskHandle_t hostSpiTaskHandle = nullptr;
+static uint8_t hostSpiTx[SPI_MAX_FRAME] __attribute__((aligned(4)));
+static uint8_t hostSpiRx[SPI_MAX_FRAME] __attribute__((aligned(4)));
 
 static void hostSpiTask(void *arg) {
     (void)arg;
@@ -75,7 +77,7 @@ void InterChipHost::begin() {
     if (!bootResetCompleted) {
         resetSlaveSynchronous();
     }
-    xTaskCreate(hostSpiTask, "hostSpi", 4096, nullptr, 1, &hostSpiTaskHandle);
+    xTaskCreate(hostSpiTask, "hostSpi", 8192, nullptr, 1, &hostSpiTaskHandle);
 }
 
 void InterChipHost::setSettingsSource(uint8_t channel, uint8_t permitJoinSecValue) {
@@ -383,10 +385,8 @@ void InterChipHost::emitLocalTimeout() {
 }
 
 void InterChipHost::transferOnce(const SpiFrame *hostFrame) {
-    uint8_t tx[SPI_MAX_FRAME];
-    uint8_t rx[SPI_MAX_FRAME];
-    memset(tx, 0, sizeof(tx));
-    memset(rx, 0, sizeof(rx));
+    memset(hostSpiTx, 0, sizeof(hostSpiTx));
+    memset(hostSpiRx, 0, sizeof(hostSpiRx));
     SpiFrame toSend;
     if (hostFrame != nullptr) {
         toSend = *hostFrame;
@@ -398,21 +398,21 @@ void InterChipHost::transferOnce(const SpiFrame *hostFrame) {
         }
         toSend.length = 0;
     }
-    if (spiEncodeFrame(toSend, tx, sizeof(tx)) == 0) {
+    if (spiEncodeFrame(toSend, hostSpiTx, sizeof(hostSpiTx)) == 0) {
         return;
     }
 
     SPI.beginTransaction(SPISettings((int)spiClockHz, MSBFIRST, SPI_MODE0));
     digitalWrite(PIN_SPI_CS, LOW);
     delayMicroseconds(50);
-    SPI.transferBytes(tx, rx, SPI_MAX_FRAME);
+    SPI.transferBytes(hostSpiTx, hostSpiRx, SPI_MAX_FRAME);
     digitalWrite(PIN_SPI_CS, HIGH);
     SPI.endTransaction();
     const unsigned long transferGapUs = FIRMWARE_OTA.isUpdatingSlave() ? 50UL : kMinTransferGapUs;
     delayMicroseconds(transferGapUs);
 
     SpiFrame inbound;
-    if (spiDecodeFrame(rx, SPI_MAX_FRAME, inbound)) {
+    if (spiDecodeFrame(hostSpiRx, SPI_MAX_FRAME, inbound)) {
         handleInbound(inbound);
     }
 }

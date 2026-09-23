@@ -536,7 +536,10 @@ html, body {
 }
 
 .btn {
-    flex: 1;
+    flex: 0 0 auto;
+    align-self: flex-start;
+    width: auto;
+    min-width: 0;
     min-height: 44px;
     padding: 0.6rem 1rem;
     border-radius: var(--radius);
@@ -607,8 +610,6 @@ html, body {
 
 .upload-card .btn,
 .btn-inline {
-    flex: 0 0 auto;
-    width: auto;
     align-self: flex-start;
 }
 
@@ -849,19 +850,18 @@ html, body {
     min-height: 10rem;
 }
 
-.theme-row {
+.theme-control-row {
     display: flex;
     flex-wrap: wrap;
-    align-items: flex-end;
+    align-items: center;
     gap: 0.5rem;
 }
 
-.theme-row .field {
+.theme-control-row select {
     flex: 0 1 12rem;
-}
-
-.theme-row select {
-    width: 100%;
+    width: auto;
+    max-width: 12rem;
+    min-width: 8rem;
 }
 
 .btn-icon {

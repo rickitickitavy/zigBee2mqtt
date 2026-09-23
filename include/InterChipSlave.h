@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include "SpiProtocol.h"
 #include "DeviceTopicMap.h"
+#include "UserStore.h"
 
 class InterChipSlave {
 public:
@@ -32,6 +33,7 @@ public:
         uint8_t payloadLength
     );
     using DeviceSyncFn = void (*)(uint8_t flags, const DeviceTopicEntry *entry);
+    using UserSyncFn = void (*)(uint8_t flags, const UserRecord *user);
     using DevicesFileFn = String (*)();
 
     void begin();
@@ -60,13 +62,17 @@ public:
     void setReadAttrHandler(ReadAttrFn handler);
     void setZclCommandHandler(ZclCommandFn handler);
     void setDeviceSyncHandler(DeviceSyncFn handler);
+    void setUserSyncHandler(UserSyncFn handler);
     void setDeviceMapSource(DeviceTopicMap *deviceMap);
+    void setUserMapSource(UserStore *userStore);
     void applyHostTime(uint32_t unixSec);
     void applyDeferredSettings();
     void applyDeferredRadioCommands();
     void pumpDeviceDump();
+    void pumpUserDump();
     void pumpDevicesFileDump();
     void requestDeviceDump();
+    void requestUserDump();
     void requestDevicesFileDump();
     void setDevicesFileSource(DevicesFileFn handler);
     void setPumpPaused(bool paused);
@@ -110,11 +116,16 @@ private:
     ReadAttrFn readAttrHandler = nullptr;
     ZclCommandFn zclCommandHandler = nullptr;
     DeviceSyncFn deviceSyncHandler = nullptr;
+    UserSyncFn userSyncHandler = nullptr;
     DeviceTopicMap *deviceMapSource = nullptr;
+    UserStore *userMapSource = nullptr;
     DevicesFileFn devicesFileSource = nullptr;
     bool deviceDumpPending = false;
     bool deviceDumpHeaderSent = false;
     int deviceDumpIndex = 0;
+    bool userDumpPending = false;
+    bool userDumpHeaderSent = false;
+    int userDumpIndex = 0;
     bool fileDumpPending = false;
     bool fileDumpStarted = false;
     int fileDumpOffset = 0;
@@ -140,6 +151,7 @@ private:
     bool dropOldestLogRecord();
     bool dropOldestAttrReport();
     bool enqueueDeviceMap(const uint8_t *payload, uint16_t length);
+    bool enqueueUserMap(const uint8_t *payload, uint16_t length);
     void removeOutboundAt(int index);
     void clearOutbound();
     void updateIrq();

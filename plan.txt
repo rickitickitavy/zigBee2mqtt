@@ -17,6 +17,14 @@ Any additional roles give to user additional abilities:
 4) edit users - user can see tab Sequrity and edit users EXCEPT admin. This user cant create user with role admin. Only user with role admin can create user with ADMIN role.
 5) admin - can see all tabs and perform all operations and actions.
 
+1) move System/Sequrity to top level tab Sequrity
+2) Add to web UI skill NEVER don't dmake button width to full page. ALWAYS make mindful width.
+3) Add to Web UI skill: ALWAY close dialogs if user click outside the dialog
+4) add to web UI skill: ALWAYS check if user change data on dialog and ask him to close without saving
+5) apply new rules from Web UI skill
+6) if user session is timed out - redirect the user to login page
+7) after firmware update user is signed out so update dialog must check login window to detect that router came back
+8) you duplicate THEME label in APPEARANCE card. remove extra frames. also move the button SAVE immediatelly to the right from the combobox. inside the frame
 
 task: Lightweight MQTT server. this feature to optionally replace homeassist with this lightweight router.
 1) add lightweight MQTT server starts optionally.
