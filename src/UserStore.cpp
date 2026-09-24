@@ -155,6 +155,16 @@ int UserStore::adminCount() const {
     return count;
 }
 
+int UserStore::unlockedAdminCount() const {
+    int count = 0;
+    for (int index = 0; index < storedCount; index++) {
+        if (users[index].isAdmin && !users[index].isBlocked) {
+            count++;
+        }
+    }
+    return count;
+}
+
 bool UserStore::setPassword(UserRecord *user, const char *password) {
     if (user == nullptr || password == nullptr || password[0] == '\0') {
         return false;
@@ -416,7 +426,7 @@ bool UserStore::replaceFromExportJson(
     int removedMax
 ) {
     UserStore scratch;
-    if (!scratch.parseUsersJson(json, true) || scratch.adminCount() < 1) {
+    if (!scratch.parseUsersJson(json, true) || scratch.unlockedAdminCount() < 1) {
         return false;
     }
     int collected = 0;
@@ -574,6 +584,11 @@ UserWriteResult UserStore::createUser(const UserRecord *actor, const UserRecord 
         return UserWriteNeedPassword;
     }
     storedCount++;
+    if (unlockedAdminCount() < 1) {
+        storedCount--;
+        memset(user, 0, sizeof(*user));
+        return UserWriteLastAdmin;
+    }
     afterMutation(UserChangeUpsert, user);
     return UserWriteOk;
 }
@@ -597,15 +612,18 @@ UserWriteResult UserStore::updateUser(
     if (source->isAdmin && !actor->isAdmin) {
         return UserWriteForbidden;
     }
-    if (user->isAdmin && !source->isAdmin && adminCount() <= 1) {
-        return UserWriteForbidden;
-    }
+    UserRecord previous = *user;
     copyRolesAndFlags(user, source);
     if (!actor->isAdmin) {
         user->isAdmin = false;
     }
+    if (unlockedAdminCount() < 1) {
+        *user = previous;
+        return UserWriteLastAdmin;
+    }
     if (password != nullptr && password[0] != '\0') {
         if (!setPassword(user, password)) {
+            *user = previous;
             return UserWriteNeedPassword;
         }
     }
@@ -630,8 +648,12 @@ UserWriteResult UserStore::deleteUser(const UserRecord *actor, const char *userN
     if (users[foundIndex].isAdmin && !actor->isAdmin) {
         return UserWriteForbidden;
     }
-    if (users[foundIndex].isAdmin && adminCount() <= 1) {
-        return UserWriteForbidden;
+    int remainingUnlockedAdmins = unlockedAdminCount();
+    if (users[foundIndex].isAdmin && !users[foundIndex].isBlocked) {
+        remainingUnlockedAdmins--;
+    }
+    if (remainingUnlockedAdmins < 1) {
+        return UserWriteLastAdmin;
     }
     UserRecord removed = users[foundIndex];
     if (foundIndex < storedCount - 1) {

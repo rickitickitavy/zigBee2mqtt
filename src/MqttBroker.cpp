@@ -42,6 +42,17 @@ bool MqttBroker::isListening() const {
     return server != nullptr;
 }
 
+int MqttBroker::AuthServer::connectedClientCount() const {
+    return (int)clients.size();
+}
+
+int MqttBroker::connectionCount() const {
+    if (server == nullptr) {
+        return 0;
+    }
+    return server->connectedClientCount();
+}
+
 void MqttBroker::bindHostSubscriptions() {
     if (server == nullptr) {
         return;

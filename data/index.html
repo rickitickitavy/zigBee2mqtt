@@ -134,41 +134,57 @@
             if (!(totalSeconds >= 0)) {
                 return "—";
             }
-            var hours = Math.floor(totalSeconds / 3600);
+            var days = Math.floor(totalSeconds / 86400);
+            var hours = Math.floor((totalSeconds % 86400) / 3600);
             var minutes = Math.floor((totalSeconds % 3600) / 60);
             var seconds = Math.floor(totalSeconds % 60);
-            return hours + "h " + minutes + "m " + seconds + "s";
+            return days + "d " + hours + "h " + minutes + "m " + seconds + "s";
+        }
+
+        function setStatusText(elementId, value) {
+            var label = document.getElementById(elementId);
+            if (label) {
+                label.textContent = value;
+            }
+        }
+
+        function formatMqttLocalStatus(statusId) {
+            if (statusId === "listening") {
+                return "listening";
+            }
+            if (statusId === "down") {
+                return "down";
+            }
+            return "unused";
         }
 
         function applyGatewayStatus(payload) {
-            var devicesLabel = document.getElementById("statusDevices");
-            var onlineLabel = document.getElementById("statusOnline");
-            var packetsRxLabel = document.getElementById("statusPacketsRx");
-            var packetsTxLabel = document.getElementById("statusPacketsTx");
-            if (devicesLabel) {
-                devicesLabel.textContent = payload && payload.devices != null ? String(payload.devices) : "—";
-            }
-            if (onlineLabel) {
-                onlineLabel.textContent = payload && payload.online != null ? String(payload.online) : "—";
-            }
-            if (packetsRxLabel) {
-                packetsRxLabel.textContent = payload && payload.packetsRx != null ? String(payload.packetsRx) : "—";
-            }
-            if (packetsTxLabel) {
-                packetsTxLabel.textContent = payload && payload.packetsTx != null ? String(payload.packetsTx) : "—";
-            }
-            var onlineTimeLabel = document.getElementById("statusOnlineTime");
-            if (onlineTimeLabel) {
-                onlineTimeLabel.textContent = formatOnlineTime(payload && payload.onlineSec);
-            }
+            setStatusText("statusDevices", payload && payload.devices != null ? String(payload.devices) : "—");
+            setStatusText("statusOnline", payload && payload.online != null ? String(payload.online) : "—");
+            setStatusText("statusPacketsRx", payload && payload.packetsRx != null ? String(payload.packetsRx) : "—");
+            setStatusText("statusPacketsTx", payload && payload.packetsTx != null ? String(payload.packetsTx) : "—");
+            setStatusText("statusOnlineTime", formatOnlineTime(payload && payload.onlineSec));
             var masterVersion = payload && payload.masterVersion
                 ? payload.masterVersion
                 : (payload && payload.version ? payload.version : "");
             var slaveVersion = payload && payload.slaveVersion ? payload.slaveVersion : "";
             applyChipFirmwareVersion(masterVersion);
-            var slaveLabel = document.getElementById("statusSlaveFirmwareVersion");
-            if (slaveLabel) {
-                slaveLabel.textContent = slaveVersion ? slaveVersion : "—";
+            setStatusText("statusSlaveFirmwareVersion", slaveVersion ? slaveVersion : "—");
+            setStatusText("statusMqttLocal", formatMqttLocalStatus(payload && payload.mqttLocalStatus));
+            setStatusText(
+                "statusMqttTopics",
+                payload && payload.mqttTopicCount != null ? String(payload.mqttTopicCount) : "—"
+            );
+            setStatusText(
+                "statusMqttConnections",
+                payload && payload.mqttConnectionCount != null ? String(payload.mqttConnectionCount) : "—"
+            );
+            setStatusText("statusWifiMode", payload && payload.wifiMode ? payload.wifiMode : "—");
+            setStatusText("statusWifiBssid", payload && payload.wifiBssid ? payload.wifiBssid : "—");
+            if (payload && payload.wifiRssiDbm != null) {
+                setStatusText("statusWifiSignal", String(payload.wifiRssiDbm) + " dBm");
+            } else {
+                setStatusText("statusWifiSignal", "—");
             }
         }
 
@@ -3071,33 +3087,73 @@
         <section id="section-status" class="section-panel active" aria-label="Status">
             <h2 class="section-title">Status</h2>
             <div class="settings-scroll">
-                <div class="field">
-                    <label>DEVICES</label>
-                    <p id="statusDevices" class="status-value">—</p>
-                </div>
-                <div class="field">
-                    <label>ONLINE</label>
-                    <p id="statusOnline" class="status-value">—</p>
-                </div>
-                <div class="field">
-                    <label>ONLINE TIME</label>
-                    <p id="statusOnlineTime" class="status-value">—</p>
-                </div>
-                <div class="field">
-                    <label>PACKETS RECEIVED</label>
-                    <p id="statusPacketsRx" class="status-value">—</p>
-                </div>
-                <div class="field">
-                    <label>PACKETS SENT</label>
-                    <p id="statusPacketsTx" class="status-value">—</p>
-                </div>
-                <div class="field">
-                    <label>MASTER VERSION</label>
-                    <p id="statusMasterFirmwareVersion" class="status-value">—</p>
-                </div>
-                <div class="field">
-                    <label>SLAVE VERSION</label>
-                    <p id="statusSlaveFirmwareVersion" class="status-value">—</p>
+                <div class="status-stack">
+                    <div class="status-online-time">
+                        <div class="status-row">
+                            <span class="status-row-label">Online time</span>
+                            <p id="statusOnlineTime" class="status-value">—</p>
+                        </div>
+                    </div>
+                    <div class="status-group">
+                        <h3 class="group-title">Version</h3>
+                        <div class="status-row">
+                            <span class="status-row-label">Master</span>
+                            <p id="statusMasterFirmwareVersion" class="status-value">—</p>
+                        </div>
+                        <div class="status-row">
+                            <span class="status-row-label">Slave</span>
+                            <p id="statusSlaveFirmwareVersion" class="status-value">—</p>
+                        </div>
+                    </div>
+                    <div class="status-group">
+                        <h3 class="group-title">Devices</h3>
+                        <div class="status-row">
+                            <span class="status-row-label">Devices</span>
+                            <p id="statusDevices" class="status-value">—</p>
+                        </div>
+                        <div class="status-row">
+                            <span class="status-row-label">Online</span>
+                            <p id="statusOnline" class="status-value">—</p>
+                        </div>
+                        <div class="status-row">
+                            <span class="status-row-label">Packets sent</span>
+                            <p id="statusPacketsTx" class="status-value">—</p>
+                        </div>
+                        <div class="status-row">
+                            <span class="status-row-label">Packets received</span>
+                            <p id="statusPacketsRx" class="status-value">—</p>
+                        </div>
+                    </div>
+                    <div class="status-group">
+                        <h3 class="group-title">MQTT</h3>
+                        <div class="status-row">
+                            <span class="status-row-label">Local status</span>
+                            <p id="statusMqttLocal" class="status-value">—</p>
+                        </div>
+                        <div class="status-row">
+                            <span class="status-row-label">Active topics</span>
+                            <p id="statusMqttTopics" class="status-value">—</p>
+                        </div>
+                        <div class="status-row">
+                            <span class="status-row-label">Connections</span>
+                            <p id="statusMqttConnections" class="status-value">—</p>
+                        </div>
+                    </div>
+                    <div class="status-group">
+                        <h3 class="group-title">WiFi</h3>
+                        <div class="status-row">
+                            <span class="status-row-label">WiFi mode</span>
+                            <p id="statusWifiMode" class="status-value">—</p>
+                        </div>
+                        <div class="status-row">
+                            <span class="status-row-label">BSSID</span>
+                            <p id="statusWifiBssid" class="status-value">—</p>
+                        </div>
+                        <div class="status-row">
+                            <span class="status-row-label">Signal strength</span>
+                            <p id="statusWifiSignal" class="status-value">—</p>
+                        </div>
+                    </div>
                 </div>
             </div>
         </section>
@@ -3485,7 +3541,6 @@
             <div class="tab-content">
                 <div id="system-tab-log" class="system-tab-panel tab-panel active" role="tabpanel">
                     <div class="upload-card log-card">
-                        <h3 class="upload-title">Log</h3>
                         <p class="field-hint">In-memory firmware log (oldest lines drop when the ring is full).</p>
                         <textarea id="memoryLogViewer" class="log-viewer" readonly></textarea>
                         <p id="logDownloadError" class="save-error" hidden></p>

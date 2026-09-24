@@ -48,6 +48,41 @@ int DeviceTopicMap::usedCount() const {
     return count;
 }
 
+int DeviceTopicMap::uniqueMqttTopicCount() const {
+    const char *uniqueTopics[DEVICE_MAP_SLOTS * 2];
+    int uniqueCount = 0;
+    if (slots == nullptr) {
+        return 0;
+    }
+    for (int slotIndex = 0; slotIndex < DEVICE_MAP_SLOTS; slotIndex++) {
+        if (!slots[slotIndex].used) {
+            continue;
+        }
+        const char *candidateTopics[2] = {
+            slots[slotIndex].stateTopic,
+            slots[slotIndex].commandTopic
+        };
+        for (int topicIndex = 0; topicIndex < 2; topicIndex++) {
+            const char *topic = candidateTopics[topicIndex];
+            if (topic == nullptr || topic[0] == '\0') {
+                continue;
+            }
+            bool alreadySeen = false;
+            for (int seenIndex = 0; seenIndex < uniqueCount; seenIndex++) {
+                if (strcmp(uniqueTopics[seenIndex], topic) == 0) {
+                    alreadySeen = true;
+                    break;
+                }
+            }
+            if (!alreadySeen) {
+                uniqueTopics[uniqueCount] = topic;
+                uniqueCount++;
+            }
+        }
+    }
+    return uniqueCount;
+}
+
 DeviceTopicEntry *DeviceTopicMap::findByIeee(const uint8_t ieee[8]) {
     return const_cast<DeviceTopicEntry *>(
         static_cast<const DeviceTopicMap *>(this)->findByIeee(ieee)

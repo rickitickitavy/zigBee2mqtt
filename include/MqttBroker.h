@@ -12,12 +12,14 @@ public:
     void setLocalMessageHandler(LocalMessageFn handler);
     void dispatch(bool wifiHasAddress);
     bool isListening() const;
+    int connectionCount() const;
     bool publishFromHost(const char *topic, const char *payload, bool retained);
 
 private:
     class AuthServer : public PicoMQTT::Server {
     public:
         explicit AuthServer(SettingsManager *settingsManager);
+        int connectedClientCount() const;
 
     protected:
         PicoMQTT::ConnectReturnCode auth(

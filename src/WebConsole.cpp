@@ -384,6 +384,10 @@ void WebConsole::sendUserWriteResult(AsyncWebServerRequest *request, UserWriteRe
         request->send(403, "text/plain", "Forbidden");
         return;
     }
+    if (result == UserWriteLastAdmin) {
+        request->send(403, "text/plain", "At least one unlocked admin must remain");
+        return;
+    }
     if (result == UserWriteNotFound) {
         request->send(404, "text/plain", "User not found");
         return;
@@ -983,7 +987,7 @@ void WebConsole::handleSettingsRestorePost(AsyncWebServerRequest *request) {
             &removedUserCount,
             USER_STORE_MAX
         )) {
-        request->send(400, "text/plain", "Need a valid users list with at least one admin");
+        request->send(400, "text/plain", "Need a valid users list with at least one unlocked admin");
         return;
     }
     if (haveUsers && applyUsersRestored != nullptr
