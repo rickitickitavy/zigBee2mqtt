@@ -131,8 +131,16 @@ void InterChipSlave::setDeviceSyncHandler(DeviceSyncFn handler) {
     deviceSyncHandler = handler;
 }
 
+void InterChipSlave::setUserSyncHandler(UserSyncFn handler) {
+    userSyncHandler = handler;
+}
+
 void InterChipSlave::setDeviceMapSource(DeviceTopicMap *deviceMap) {
     deviceMapSource = deviceMap;
+}
+
+void InterChipSlave::setUserMapSource(UserStore *userStore) {
+    userMapSource = userStore;
 }
 
 void InterChipSlave::setDevicesFileSource(DevicesFileFn handler) {
@@ -150,7 +158,7 @@ void InterChipSlave::pumpDevicesFileDump() {
     if (!fileDumpPending) {
         return;
     }
-    if (deviceDumpPending) {
+    if (deviceDumpPending || userDumpPending) {
         return;
     }
     if (!fileDumpStarted) {
@@ -237,6 +245,64 @@ void InterChipSlave::pumpDeviceDump() {
         return;
     }
     deviceDumpPending = false;
+}
+
+void InterChipSlave::requestUserDump() {
+    if (userDumpPending) {
+        return;
+    }
+    userDumpPending = true;
+    userDumpHeaderSent = false;
+    userDumpIndex = 0;
+}
+
+void InterChipSlave::pumpUserDump() {
+    if (!userDumpPending || userMapSource == nullptr) {
+        return;
+    }
+    if (deviceDumpPending || fileDumpPending) {
+        return;
+    }
+    uint8_t payload[SPI_USER_SYNC_ENTRY_LEN];
+    if (!userDumpHeaderSent) {
+        payload[0] = SPI_USER_SYNC_RESET;
+        payload[1] = (uint8_t)userMapSource->userCount();
+        if (!enqueueUserMap(payload, 2)) {
+            return;
+        }
+        userDumpHeaderSent = true;
+        userDumpIndex = 0;
+        LOGGER.info("Dumping " + String((int)payload[1]) + " user(s) to host");
+    }
+
+    while (true) {
+        const int slotIndex = userMapSource->nextUsedIndex(userDumpIndex);
+        if (slotIndex < 0) {
+            break;
+        }
+        const UserRecord *user = userMapSource->userAt(slotIndex);
+        const size_t length = UserStore::packSyncPayload(
+            payload,
+            sizeof(payload),
+            SPI_USER_SYNC_ENTRY,
+            user
+        );
+        if (length == 0 || !enqueueUserMap(payload, (uint16_t)length)) {
+            return;
+        }
+        userDumpIndex = slotIndex + 1;
+    }
+
+    const size_t lastLength = UserStore::packSyncPayload(
+        payload,
+        sizeof(payload),
+        SPI_USER_SYNC_LAST,
+        nullptr
+    );
+    if (lastLength == 0 || !enqueueUserMap(payload, (uint16_t)lastLength)) {
+        return;
+    }
+    userDumpPending = false;
 }
 
 void InterChipSlave::applyHostTime(uint32_t unixSec) {
@@ -326,6 +392,18 @@ bool InterChipSlave::enqueueDeviceMap(const uint8_t *payload, uint16_t length) {
     }
     while (dropOldestLogRecord()) {
         if (tryEnqueue(SpiEvtDeviceMap, 0, payload, length)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool InterChipSlave::enqueueUserMap(const uint8_t *payload, uint16_t length) {
+    if (tryEnqueue(SpiEvtUserMap, 0, payload, length)) {
+        return true;
+    }
+    while (dropOldestLogRecord()) {
+        if (tryEnqueue(SpiEvtUserMap, 0, payload, length)) {
             return true;
         }
     }
@@ -682,6 +760,19 @@ void InterChipSlave::handleHostFrame(const SpiFrame &frame) {
     }
     if (frame.cmd == SpiCmdGetDevicesFile) {
         requestDevicesFileDump();
+        return;
+    }
+    if (frame.cmd == SpiCmdSetUser && frame.length >= 1 && userSyncHandler != nullptr) {
+        uint8_t flags = 0;
+        UserRecord user;
+        if (!UserStore::unpackSyncPayload(frame.payload, frame.length, &flags, &user)) {
+            return;
+        }
+        userSyncHandler(flags, &user);
+        return;
+    }
+    if (frame.cmd == SpiCmdGetUsers) {
+        requestUserDump();
         return;
     }
 }

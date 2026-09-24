@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -52,6 +52,9 @@
                 if (searchDialog && !searchDialog.hidden) {
                     closeSearchDialog(true);
                 }
+            }
+            if (name == "security") {
+                loadUsers();
             }
         }
 
@@ -184,6 +187,458 @@
                 return;
             }
             statusPollTimer = window.setInterval(refreshGatewayStatus, 2000);
+        }
+
+        function normalizeThemeId(themeId) {
+            return themeId === "dark" ? "dark" : "light";
+        }
+
+        function applyThemeToDocument(themeId) {
+            document.documentElement.setAttribute("data-theme", normalizeThemeId(themeId));
+        }
+
+        var signedInUser = null;
+        var sessionWatchTimer = null;
+        var firmwareRebootWaitActive = false;
+        var nativeFetch = window.fetch.bind(window);
+        window.fetch = function (input, init) {
+            return nativeFetch(input, init).then(function (response) {
+                if (response.status === 401 && signedInUser && !firmwareRebootWaitActive) {
+                    showLoginForm();
+                }
+                return response;
+            });
+        };
+
+        function isAdminUser() {
+            return !!(signedInUser && signedInUser.isAdmin);
+        }
+
+        function hasRole(roleName) {
+            return isAdminUser() || !!(signedInUser && signedInUser[roleName]);
+        }
+
+        function setHidden(element, hidden) {
+            if (element) {
+                element.hidden = !!hidden;
+            }
+        }
+
+        function applyChromeForRoles() {
+            var admin = isAdminUser();
+            var canEditUsers = admin || hasRole("editUsers");
+            var canAdd = admin || hasRole("addDevices");
+            setHidden(document.querySelector('.sidebar-btn[data-section="wifi"]'), !admin);
+            setHidden(document.querySelector('.sidebar-btn[data-section="mqtt"]'), !admin);
+            setHidden(document.querySelector('.sidebar-btn[data-section="zigbee"]'), !admin);
+            setHidden(document.querySelector('.system-tab-btn[data-tab="update"]'), !admin);
+            setHidden(document.querySelector('.system-tab-btn[data-tab="hardware"]'), !admin);
+            setHidden(document.querySelector('.sidebar-btn[data-section="security"]'), !canEditUsers);
+            setHidden(document.querySelector('.system-tab-btn[data-tab="maintenance"]'), !admin);
+            setHidden(document.getElementById("maintenanceSettingsCard"), !admin);
+            setHidden(document.getElementById("addDeviceBtn"), !canAdd);
+            setHidden(document.getElementById("exportDevicesBtn"), !admin);
+            setHidden(document.getElementById("restoreDevicesBtn"), !admin);
+        }
+
+        function stopSessionWatch() {
+            if (sessionWatchTimer != null) {
+                window.clearInterval(sessionWatchTimer);
+                sessionWatchTimer = null;
+            }
+        }
+
+        function startSessionWatch() {
+            if (sessionWatchTimer != null) {
+                return;
+            }
+            sessionWatchTimer = window.setInterval(function () {
+                if (!signedInUser || firmwareRebootWaitActive) {
+                    return;
+                }
+                fetch("/api/auth/me", { cache: "no-store" }).catch(function () {
+                });
+            }, 10000);
+        }
+
+        function showLoginForm() {
+            signedInUser = null;
+            stopSessionWatch();
+            applyThemeToDocument("dark");
+            setHidden(document.getElementById("appShell"), true);
+            setHidden(document.getElementById("loginOverlay"), false);
+            setHidden(document.getElementById("firmwareUpdateDialog"), true);
+            stopStatusPolling();
+            stopLogPolling();
+            stopDevicesPolling();
+        }
+
+        function enterSignedInConsole(user) {
+            signedInUser = user;
+            setHidden(document.getElementById("loginOverlay"), true);
+            setHidden(document.getElementById("appShell"), false);
+            applyChromeForRoles();
+            applyThemeToDocument(user && user.theme);
+            var picker = document.getElementById("uiTheme");
+            if (picker) {
+                picker.value = normalizeThemeId(user && user.theme);
+            }
+            startSessionWatch();
+            showMainSection("status");
+        }
+
+        function checkSession() {
+            fetch("/api/auth/me", { cache: "no-store" }).then(function (response) {
+                if (response.status === 401) {
+                    showLoginForm();
+                    return null;
+                }
+                if (!response.ok) {
+                    throw new Error("HTTP " + response.status);
+                }
+                return response.json();
+            }).then(function (user) {
+                if (user) {
+                    enterSignedInConsole(user);
+                }
+            }).catch(function () {
+                showLoginForm();
+            });
+        }
+
+        function submitLogin() {
+            var errorLine = document.getElementById("loginError");
+            if (errorLine) {
+                errorLine.hidden = true;
+            }
+            var userNameInput = document.getElementById("loginUserName");
+            var passwordInput = document.getElementById("loginPassword");
+            var rememberInput = document.getElementById("loginRememberMe");
+            fetch("/api/auth/login", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    userName: userNameInput ? userNameInput.value : "",
+                    password: passwordInput ? passwordInput.value : "",
+                    rememberMe: !!(rememberInput && rememberInput.checked)
+                })
+            }).then(function (response) {
+                return response.text().then(function (text) {
+                    if (!response.ok) {
+                        throw new Error(text || ("HTTP " + response.status));
+                    }
+                });
+            }).then(function () {
+                if (passwordInput) {
+                    passwordInput.value = "";
+                }
+                checkSession();
+            }).catch(function (error) {
+                if (errorLine) {
+                    errorLine.hidden = false;
+                    errorLine.textContent = error && error.message ? error.message : "Sign in failed";
+                }
+            });
+        }
+
+        function openSignOutConfirm() {
+            document.getElementById("signOutConfirmDialog").hidden = false;
+        }
+
+        function closeSignOutConfirm() {
+            document.getElementById("signOutConfirmDialog").hidden = true;
+        }
+
+        function signOut() {
+            closeSignOutConfirm();
+            fetch("/api/auth/logout", { method: "POST" }).finally(function () {
+                showLoginForm();
+            });
+        }
+
+        function formatAddedAt(addedAt) {
+            var seconds = Number(addedAt);
+            if (!(seconds > 0)) {
+                return "—";
+            }
+            return new Date(seconds * 1000).toISOString().slice(0, 19).replace("T", " ");
+        }
+
+        function formatUserRoles(user) {
+            if (user && user.isAdmin) {
+                return "admin";
+            }
+            var roles = [];
+            if (user && user.editDevices) {
+                roles.push("edit devices");
+            }
+            if (user && user.addDevices) {
+                roles.push("add devices");
+            }
+            if (user && user.removeDevices) {
+                roles.push("delete devices");
+            }
+            if (user && user.editUsers) {
+                roles.push("edit users");
+            }
+            return roles.length ? roles.join(", ") : "simple";
+        }
+
+        function loadUsers() {
+            var errorLine = document.getElementById("usersSaveError");
+            if (errorLine) {
+                errorLine.hidden = true;
+            }
+            fetch("/api/users", { cache: "no-store" }).then(function (response) {
+                return response.text().then(function (text) {
+                    if (!response.ok) {
+                        throw new Error(text || ("HTTP " + response.status));
+                    }
+                    return JSON.parse(text || "[]");
+                });
+            }).then(function (rows) {
+                renderUserTable(rows || []);
+            }).catch(function (error) {
+                if (errorLine) {
+                    errorLine.hidden = false;
+                    errorLine.textContent = error && error.message ? error.message : "Users load failed";
+                }
+            });
+        }
+
+        function renderUserTable(rows) {
+            var body = document.getElementById("userTableBody");
+            if (!body) {
+                return;
+            }
+            body.innerHTML = "";
+            var index;
+            for (index = 0; index < rows.length; index++) {
+                var user = rows[index];
+                var row = document.createElement("tr");
+                row.onclick = (function (stored) {
+                    return function () {
+                        openUserDialog(stored);
+                    };
+                })(user);
+                var nameCell = document.createElement("td");
+                nameCell.textContent = user.userName || "";
+                var addedCell = document.createElement("td");
+                addedCell.textContent = formatAddedAt(user.addedAt);
+                var rolesCell = document.createElement("td");
+                rolesCell.textContent = formatUserRoles(user);
+                var blockedCell = document.createElement("td");
+                blockedCell.textContent = user.isBlocked ? "yes" : "no";
+                var themeCell = document.createElement("td");
+                themeCell.textContent = user.theme === "dark" ? "Dark" : "Light";
+                row.appendChild(nameCell);
+                row.appendChild(addedCell);
+                row.appendChild(rolesCell);
+                row.appendChild(blockedCell);
+                row.appendChild(themeCell);
+                body.appendChild(row);
+            }
+        }
+
+        function setUserDialogAdminLocked(locked) {
+            var adminCheck = document.getElementById("userIsAdmin");
+            var saveButton = document.getElementById("userSaveBtn");
+            var deleteButton = document.getElementById("userDeleteBtn");
+            if (adminCheck) {
+                adminCheck.disabled = locked || !isAdminUser();
+            }
+            if (saveButton) {
+                saveButton.disabled = locked;
+            }
+            if (deleteButton) {
+                deleteButton.disabled = locked;
+            }
+        }
+
+        function openUserDialog(user) {
+            var isEdit = !!(user && user.userName);
+            userDialogIsEdit = isEdit;
+            var targetIsAdmin = !!(user && user.isAdmin);
+            var locked = isEdit && targetIsAdmin && !isAdminUser();
+            document.getElementById("userDialogTitle").textContent = isEdit ? "Edit user" : "Add user";
+            document.getElementById("userDialogError").hidden = true;
+            document.getElementById("userName").value = isEdit ? user.userName : "";
+            document.getElementById("userName").readOnly = isEdit;
+            document.getElementById("userPassword").value = "";
+            document.getElementById("userIsAdmin").checked = targetIsAdmin;
+            document.getElementById("userEditDevices").checked = !!(user && user.editDevices);
+            document.getElementById("userAddDevices").checked = !!(user && user.addDevices);
+            document.getElementById("userRemoveDevices").checked = !!(user && user.removeDevices);
+            document.getElementById("userEditUsers").checked = !!(user && user.editUsers);
+            document.getElementById("userIsBlocked").checked = !!(user && user.isBlocked);
+            document.getElementById("userTheme").value = user && user.theme === "light" ? "light" : "dark";
+            document.getElementById("userDeleteBtn").hidden = !isEdit;
+            setUserDialogAdminLocked(locked);
+            if (!isAdminUser()) {
+                document.getElementById("userIsAdmin").checked = false;
+            }
+            document.getElementById("userDialog").hidden = false;
+            userDialogBaseline = JSON.stringify(readUserDialogBody());
+        }
+
+        function closeUserDialog() {
+            userDialogBaseline = null;
+            userDialogIsEdit = false;
+            document.getElementById("userDialog").hidden = true;
+        }
+
+        var userDialogBaseline = null;
+        var userDialogIsEdit = false;
+
+        function userDialogHasUnsavedChanges() {
+            if (userDialogBaseline == null) {
+                return false;
+            }
+            return userDialogBaseline !== JSON.stringify(readUserDialogBody());
+        }
+
+        function requestCloseUserDialog() {
+            if (userDialogHasUnsavedChanges()) {
+                openUnsavedChangesDialog(closeUserDialog);
+                return;
+            }
+            closeUserDialog();
+        }
+
+        function readUserDialogBody() {
+            return {
+                userName: document.getElementById("userName").value,
+                password: document.getElementById("userPassword").value,
+                isAdmin: isAdminUser() && document.getElementById("userIsAdmin").checked,
+                editDevices: document.getElementById("userEditDevices").checked,
+                addDevices: document.getElementById("userAddDevices").checked,
+                removeDevices: document.getElementById("userRemoveDevices").checked,
+                editUsers: document.getElementById("userEditUsers").checked,
+                isBlocked: document.getElementById("userIsBlocked").checked,
+                theme: document.getElementById("userTheme").value
+            };
+        }
+
+        function saveUserDialog() {
+            var errorLine = document.getElementById("userDialogError");
+            errorLine.hidden = true;
+            var isEdit = userDialogIsEdit;
+            var body = readUserDialogBody();
+            body.isEdit = isEdit;
+            if (!body.userName) {
+                errorLine.hidden = false;
+                errorLine.textContent = "User name is required";
+                return;
+            }
+            if (!isEdit && !body.password) {
+                errorLine.hidden = false;
+                errorLine.textContent = "Password is required";
+                return;
+            }
+            fetch(isEdit ? "/api/users/update" : "/api/users", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body)
+            }).then(function (response) {
+                return response.text().then(function (text) {
+                    if (!response.ok) {
+                        throw new Error(text || ("HTTP " + response.status));
+                    }
+                });
+            }).then(function () {
+                closeUserDialog();
+                loadUsers();
+            }).catch(function (error) {
+                errorLine.hidden = false;
+                errorLine.textContent = error && error.message ? error.message : "Save failed";
+            });
+        }
+
+        function openUserDeleteConfirm() {
+            var name = document.getElementById("userName").value;
+            var detail = document.getElementById("userDeleteConfirmDetail");
+            if (detail) {
+                detail.textContent = "Delete user \"" + name + "\"?";
+            }
+            document.getElementById("userDeleteConfirmDialog").hidden = false;
+        }
+
+        function closeUserDeleteConfirm() {
+            document.getElementById("userDeleteConfirmDialog").hidden = true;
+        }
+
+        function confirmDeleteUser() {
+            var errorLine = document.getElementById("userDialogError");
+            var name = document.getElementById("userName").value;
+            closeUserDeleteConfirm();
+            fetch("/api/users", {
+                method: "DELETE",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ userName: name })
+            }).then(function (response) {
+                return response.text().then(function (text) {
+                    if (!response.ok) {
+                        throw new Error(text || ("HTTP " + response.status));
+                    }
+                });
+            }).then(function () {
+                closeUserDialog();
+                loadUsers();
+            }).catch(function (error) {
+                if (errorLine) {
+                    errorLine.hidden = false;
+                    errorLine.textContent = error && error.message ? error.message : "Delete failed";
+                }
+            });
+        }
+
+        function loadTheme() {
+            var picker = document.getElementById("uiTheme");
+            var errorLine = document.getElementById("themeSaveError");
+            if (errorLine) {
+                errorLine.hidden = true;
+            }
+            fetch("/api/theme", { cache: "no-store" }).then(function (response) {
+                return response.json();
+            }).then(function (body) {
+                var themeId = normalizeThemeId(body && body.theme);
+                applyThemeToDocument(themeId);
+                if (picker) {
+                    picker.value = themeId;
+                }
+            }).catch(function () {
+            });
+        }
+
+        function onThemePickerChange() {
+            var picker = document.getElementById("uiTheme");
+            applyThemeToDocument(picker ? picker.value : "light");
+        }
+
+        function saveTheme() {
+            var picker = document.getElementById("uiTheme");
+            var errorLine = document.getElementById("themeSaveError");
+            if (errorLine) {
+                errorLine.hidden = true;
+            }
+            var themeId = normalizeThemeId(picker ? picker.value : "light");
+            applyThemeToDocument(themeId);
+            fetch("/api/theme", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ theme: themeId })
+            }).then(function (response) {
+                return response.text().then(function (text) {
+                    if (!response.ok) {
+                        throw new Error(text || ("HTTP " + response.status));
+                    }
+                });
+            }).catch(function (error) {
+                if (errorLine) {
+                    errorLine.hidden = false;
+                    errorLine.textContent = error && error.message ? error.message : "Theme save failed";
+                }
+            });
         }
 
         function loadHardware() {
@@ -531,6 +986,7 @@
                     loadMqtt();
                     loadZigbee();
                     loadHardware();
+                    loadTheme();
                     loadDevices();
                 });
             }).catch(function (error) {
@@ -902,7 +1358,6 @@
         var firmwareRebootSawOffline = false;
         var firmwareRebootPingOk = false;
         var firmwareRebootSettled = false;
-        var firmwareRebootWaitActive = false;
 
         function setFirmwareUpdateStatus(message) {
             var dialogStatus = document.getElementById("firmwareUpdateStatus");
@@ -1056,7 +1511,6 @@
                 if (timerLabel) {
                     timerLabel.textContent = "0";
                 }
-                loadVersion();
             } else {
                 if (errorLine) {
                     errorLine.hidden = false;
@@ -1074,20 +1528,32 @@
             if (firmwareRebootSettled) {
                 return;
             }
-            fetch("/api/version", { cache: "no-store" }).then(function (response) {
+            fetch("/", { cache: "no-store" }).then(function (response) {
                 if (!response.ok) {
                     throw new Error("not ready");
                 }
-                return response.json();
-            }).then(function () {
+                return response.text();
+            }).then(function (html) {
                 if (firmwareRebootSettled) {
+                    return null;
+                }
+                if (html.indexOf("id=\"loginForm\"") < 0 && html.indexOf("id=\"loginOverlay\"") < 0) {
+                    throw new Error("not ready");
+                }
+                return nativeFetch("/api/auth/me", { cache: "no-store" });
+            }).then(function (response) {
+                if (!response || firmwareRebootSettled) {
                     return;
                 }
                 if (Date.now() < firmwareRebootAcceptPingAfterMs) {
                     return;
                 }
-                firmwareRebootPingOk = true;
-                settleFirmwareReboot(true, "Firmware update finished. Router is ready.");
+                if (response.status === 401 || response.ok) {
+                    firmwareRebootPingOk = true;
+                    settleFirmwareReboot(true, "Firmware update finished. Router is ready. Sign in again.");
+                    return;
+                }
+                throw new Error("not ready");
             }).catch(function () {
                 firmwareRebootSawOffline = true;
                 firmwareRebootPingOk = false;
@@ -1152,6 +1618,7 @@
             if (overlay) {
                 overlay.hidden = true;
             }
+            checkSession();
         }
 
         function startFirmwareStatusPoll() {
@@ -1323,6 +1790,7 @@
 
         var manualCommandIeee = "";
         var lastManualStatusKey = "";
+        var deviceActionsMenuIeee = "";
 
         function statusEntriesForDevice(device) {
             var entries = [];
@@ -1356,6 +1824,9 @@
         function coveringPositionText(state) {
             var text = String(state || "");
             if (!text) {
+                return "";
+            }
+            if (text.indexOf("cl=0x") >= 0 && text.indexOf("attr=") >= 0) {
                 return "";
             }
             if (!/^\d+$/.test(text)) {
@@ -1596,12 +2067,246 @@
             sendManualCommand();
         }
 
+        function deviceTypeActionPayloads(typeId) {
+            if (typeId == "onOff") {
+                return ["ON", "OFF", "TOGGLE"];
+            }
+            if (typeId == "windowCovering") {
+                return ["OPEN", "CLOSE", "STOP"];
+            }
+            return [];
+        }
+
+        function deviceActionChannels(device) {
+            var channels = device.channels;
+            if (channels === undefined || channels === null || channels === "") {
+                channels = 1;
+            }
+            if (channels >= 2) {
+                var numbered = [];
+                var channel;
+                for (channel = 1; channel <= channels; channel++) {
+                    numbered.push(channel);
+                }
+                return numbered;
+            }
+            if (channels == 0) {
+                var entries = statusEntriesForDevice(device);
+                var reported = [];
+                var entryIndex;
+                for (entryIndex = 0; entryIndex < entries.length; entryIndex++) {
+                    if (entries[entryIndex].ep) {
+                        reported.push(entries[entryIndex].ep);
+                    }
+                }
+                return reported.length ? reported : [1];
+            }
+            return [1];
+        }
+
+        function closeDeviceActionsMenu() {
+            deviceActionsMenuIeee = "";
+            var devicesSection = document.getElementById("section-devices");
+            if (devicesSection) {
+                devicesSection.classList.remove("device-actions-open");
+            }
+            var openMenus = document.querySelectorAll(".device-row-menu");
+            var menuIndex;
+            for (menuIndex = 0; menuIndex < openMenus.length; menuIndex++) {
+                openMenus[menuIndex].remove();
+            }
+            var openRows = document.querySelectorAll("tr.actions-open");
+            var rowIndex;
+            for (rowIndex = 0; rowIndex < openRows.length; rowIndex++) {
+                openRows[rowIndex].classList.remove("actions-open");
+            }
+        }
+
+        function sendDeviceRowAction(ieee, payload, channel) {
+            closeDeviceActionsMenu();
+            fetch("/api/devices/command", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ ieee: ieee, payload: payload, channel: channel })
+            }).catch(function () {});
+        }
+
+        function placeDeviceActionsMenu(menu, buttonRect) {
+            if (!buttonRect.width && !buttonRect.height) {
+                return;
+            }
+            var width = menu.offsetWidth;
+            menu.style.width = String(width) + "px";
+            var gap = 4;
+            var pad = 8;
+            var left = buttonRect.right - width;
+            var top = buttonRect.bottom + gap;
+            var overflowRight = left + width - (window.innerWidth - pad);
+            if (overflowRight > 0) {
+                left -= overflowRight;
+            }
+            var overflowBottom = top + menu.offsetHeight - (window.innerHeight - pad);
+            if (overflowBottom > 0) {
+                top -= overflowBottom;
+            }
+            menu.style.left = String(Math.round(left)) + "px";
+            menu.style.top = String(Math.round(top)) + "px";
+        }
+
+        function placeDeviceChannelSubmenu(submenu, item) {
+            submenu.style.left = "auto";
+            submenu.style.right = "100%";
+            var itemRect = item.getBoundingClientRect();
+            var pad = 8;
+            var height = submenu.offsetHeight;
+            var top = 0;
+            if (itemRect.top + height > window.innerHeight - pad) {
+                top -= (itemRect.top + height) - (window.innerHeight - pad);
+            }
+            if (itemRect.top + top < pad) {
+                top = pad - itemRect.top;
+            }
+            submenu.style.top = String(Math.round(top)) + "px";
+        }
+
+        function openDeviceRowSubmenu(menu, item) {
+            var openItems = menu.querySelectorAll(".has-submenu.is-open");
+            var openIndex;
+            for (openIndex = 0; openIndex < openItems.length; openIndex++) {
+                openItems[openIndex].classList.remove("is-open");
+            }
+            item.classList.add("is-open");
+            var submenu = item.querySelector(".device-row-submenu");
+            if (submenu) {
+                placeDeviceChannelSubmenu(submenu, item);
+            }
+        }
+
+        function openDeviceActionsMenu(event, device) {
+            event.stopPropagation();
+            event.preventDefault();
+            var alreadyOpen = deviceActionsMenuIeee == (device.ieee || "");
+            closeDeviceActionsMenu();
+            if (alreadyOpen) {
+                return;
+            }
+            var payloads = deviceTypeActionPayloads(device.type);
+            if (!payloads.length) {
+                return;
+            }
+            var host = event.currentTarget.parentNode;
+            var menu = document.createElement("ul");
+            menu.className = "device-row-menu";
+            menu.setAttribute("role", "menu");
+            menu.onmousedown = function (mouseEvent) {
+                mouseEvent.stopPropagation();
+            };
+            menu.onclick = function (clickEvent) {
+                clickEvent.stopPropagation();
+            };
+            var channelList = deviceActionChannels(device);
+            var showChannelSubmenu = channelList.length > 1;
+            var payloadIndex;
+            for (payloadIndex = 0; payloadIndex < payloads.length; payloadIndex++) {
+                var item = document.createElement("li");
+                var actionButton = document.createElement("button");
+                actionButton.type = "button";
+                actionButton.textContent = payloads[payloadIndex];
+                if (!showChannelSubmenu) {
+                    actionButton.onclick = (function (ieeeText, body, channelValue) {
+                        return function (clickEvent) {
+                            clickEvent.stopPropagation();
+                            sendDeviceRowAction(ieeeText, body, channelValue);
+                        };
+                    })(device.ieee, payloads[payloadIndex], channelList[0]);
+                    item.appendChild(actionButton);
+                    menu.appendChild(item);
+                    continue;
+                }
+                item.className = "device-row-menu-item has-submenu";
+                actionButton.setAttribute("aria-haspopup", "true");
+                actionButton.onclick = function (clickEvent) {
+                    clickEvent.stopPropagation();
+                    var parentItem = this.parentNode;
+                    if (parentItem.classList.contains("is-open")) {
+                        return;
+                    }
+                    openDeviceRowSubmenu(menu, parentItem);
+                };
+                actionButton.onmouseenter = function () {
+                    openDeviceRowSubmenu(menu, this.parentNode);
+                };
+                var submenu = document.createElement("ul");
+                submenu.className = "device-row-submenu";
+                var channelIndex;
+                for (channelIndex = 0; channelIndex < channelList.length; channelIndex++) {
+                    var channelItem = document.createElement("li");
+                    var channelButton = document.createElement("button");
+                    channelButton.type = "button";
+                    channelButton.textContent = String(channelList[channelIndex]);
+                    channelButton.onclick = (function (ieeeText, body, channelValue) {
+                        return function (clickEvent) {
+                            clickEvent.stopPropagation();
+                            sendDeviceRowAction(ieeeText, body, channelValue);
+                        };
+                    })(device.ieee, payloads[payloadIndex], channelList[channelIndex]);
+                    channelItem.appendChild(channelButton);
+                    submenu.appendChild(channelItem);
+                }
+                item.appendChild(actionButton);
+                item.appendChild(submenu);
+                menu.appendChild(item);
+            }
+            menu.style.visibility = "hidden";
+            document.body.appendChild(menu);
+            placeDeviceActionsMenu(menu, event.currentTarget.getBoundingClientRect());
+            menu.style.visibility = "visible";
+            var row = host.parentNode;
+            if (row) {
+                row.classList.add("actions-open");
+            }
+            var devicesSection = document.getElementById("section-devices");
+            if (devicesSection) {
+                devicesSection.classList.add("device-actions-open");
+            }
+            deviceActionsMenuIeee = device.ieee || "";
+        }
+
+        function attachDeviceRowActions(row, device, reopenIeee) {
+            var payloads = deviceTypeActionPayloads(device.type);
+            if (!payloads.length) {
+                return;
+            }
+            var holder = document.createElement("div");
+            holder.className = "device-row-actions";
+            var ellipsis = document.createElement("button");
+            ellipsis.type = "button";
+            ellipsis.className = "device-row-actions-btn";
+            ellipsis.setAttribute("aria-label", "Device actions");
+            ellipsis.textContent = "…";
+            ellipsis.onclick = function (clickEvent) {
+                openDeviceActionsMenu(clickEvent, device);
+            };
+            holder.appendChild(ellipsis);
+            row.appendChild(holder);
+            if (reopenIeee && reopenIeee == (device.ieee || "")) {
+                row.classList.add("actions-open");
+                deviceActionsMenuIeee = reopenIeee;
+                var devicesSection = document.getElementById("section-devices");
+                if (devicesSection) {
+                    devicesSection.classList.add("device-actions-open");
+                }
+            }
+        }
+
         function renderDeviceTable(rows) {
             var body = document.getElementById("deviceTableBody");
             if (!body) {
                 return;
             }
             registeredDeviceRows = rows;
+            var reopenActionsIeee = deviceActionsMenuIeee;
+            deviceActionsMenuIeee = "";
             body.innerHTML = "";
             var stillSelected = false;
             var index;
@@ -1613,9 +2318,20 @@
                     row.className = "selected";
                     stillSelected = true;
                 }
-                row.onclick = function () {
+                row.onclick = function (clickEvent) {
+                    if (clickEvent.target && clickEvent.target.closest
+                        && (clickEvent.target.closest(".device-row-actions")
+                            || clickEvent.target.closest(".device-row-menu"))) {
+                        return;
+                    }
+                    if (deviceActionsMenuIeee) {
+                        closeDeviceActionsMenu();
+                        return;
+                    }
                     selectRegisteredIeee(this.getAttribute("data-ieee") || "");
-                    openEditSelectedDevice();
+                    if (isAdminUser() || hasRole("editDevices")) {
+                        openEditSelectedDevice();
+                    }
                 };
                 var onlineCell = document.createElement("td");
                 onlineCell.className = "device-online-cell";
@@ -1646,6 +2362,7 @@
                 row.appendChild(statusCell);
                 row.appendChild(batteryCell);
                 row.appendChild(rssiCell);
+                attachDeviceRowActions(row, rows[index], reopenActionsIeee);
                 body.appendChild(row);
             }
             if (!stillSelected) {
@@ -1970,7 +2687,7 @@
             var deleteButton = document.getElementById("parameterDeleteBtn");
             var commandTabButton = document.getElementById("parameterCommandTabBtn");
             if (deleteButton) {
-                deleteButton.hidden = !parameterDialogIsEdit;
+                deleteButton.hidden = !parameterDialogIsEdit || !(isAdminUser() || hasRole("removeDevices"));
             }
             if (commandTabButton) {
                 if (parameterDialogIsEdit) {
@@ -2011,31 +2728,49 @@
             return !parameterDialogDraftEquals(parameterDialogBaseline, readParameterDialogDraft());
         }
 
-        function onParameterDialogOverlayClick(event) {
-            if (event.target.id !== "parameterDialog") {
-                return;
+        var pendingUnsavedDiscard = null;
+
+        function closeUnsavedChangesDialog() {
+            pendingUnsavedDiscard = null;
+            var dialog = document.getElementById("unsavedChangesDialog");
+            if (dialog) {
+                dialog.hidden = true;
             }
-            if (!parameterDialogHasUnsavedChanges()) {
-                closeParameterDialog();
-                return;
-            }
-            document.getElementById("parameterUnsavedDialog").hidden = false;
         }
 
-        function closeParameterUnsavedDialog() {
-            document.getElementById("parameterUnsavedDialog").hidden = true;
+        function openUnsavedChangesDialog(discardFn) {
+            pendingUnsavedDiscard = discardFn;
+            var dialog = document.getElementById("unsavedChangesDialog");
+            if (dialog) {
+                dialog.hidden = false;
+            }
         }
 
-        function onParameterUnsavedOverlayClick(event) {
-            if (event.target.id !== "parameterUnsavedDialog") {
+        function discardUnsavedChanges() {
+            var discardFn = pendingUnsavedDiscard;
+            pendingUnsavedDiscard = null;
+            var dialog = document.getElementById("unsavedChangesDialog");
+            if (dialog) {
+                dialog.hidden = true;
+            }
+            if (discardFn) {
+                discardFn();
+            }
+        }
+
+        function requestCloseParameterDialog() {
+            if (parameterDialogHasUnsavedChanges()) {
+                openUnsavedChangesDialog(closeParameterDialog);
                 return;
             }
-            closeParameterUnsavedDialog();
-        }
-
-        function discardParameterDialogChanges() {
-            closeParameterUnsavedDialog();
             closeParameterDialog();
+        }
+
+        function onDialogOverlayClick(event) {
+            if (event.target !== event.currentTarget) {
+                return;
+            }
+            dismissFrontOverlayDialog();
         }
 
         function openParameterDialog() {
@@ -2055,6 +2790,9 @@
         }
 
         function openEditSelectedDevice() {
+            if (!isAdminUser() && !hasRole("editDevices")) {
+                return;
+            }
             var device = findRegisteredDevice(selectedRegisteredIeee);
             if (!device || !device.ieee) {
                 return;
@@ -2119,7 +2857,7 @@
         }
 
         function closeParameterDialog() {
-            closeParameterUnsavedDialog();
+            closeUnsavedChangesDialog();
             parameterDialogBaseline = null;
             parameterDialogIsEdit = false;
             resetManualCommandPanel();
@@ -2197,12 +2935,20 @@
                 closeSearchDialog(true);
                 return true;
             }
-            if (dialogId === "parameterUnsavedDialog") {
-                closeParameterUnsavedDialog();
+            if (dialogId === "unsavedChangesDialog") {
+                closeUnsavedChangesDialog();
                 return true;
             }
             if (dialogId === "parameterDialog") {
-                closeParameterDialog();
+                requestCloseParameterDialog();
+                return true;
+            }
+            if (dialogId === "userDeleteConfirmDialog") {
+                closeUserDeleteConfirm();
+                return true;
+            }
+            if (dialogId === "userDialog") {
+                requestCloseUserDialog();
                 return true;
             }
             if (dialogId === "restoreSkippedDialog") {
@@ -2211,6 +2957,10 @@
             }
             if (dialogId === "deleteConfirmDialog") {
                 closeDeleteConfirmDialog();
+                return true;
+            }
+            if (dialogId === "signOutConfirmDialog") {
+                closeSignOutConfirm();
                 return true;
             }
             if (dialogId === "settingsRestoreConfirmDialog") {
@@ -2232,6 +2982,11 @@
             if (key !== "Escape" && key !== "Esc") {
                 return;
             }
+            if (deviceActionsMenuIeee) {
+                closeDeviceActionsMenu();
+                event.preventDefault();
+                return;
+            }
             if (dismissFrontOverlayDialog()) {
                 event.preventDefault();
             }
@@ -2242,23 +2997,56 @@
             setupPasswordToggle("mqttPassword", "mqttPasswordToggle");
             document.getElementById("wifiMode").onchange = updateApIpVisibility;
             document.addEventListener("keydown", onDocumentKeyDown);
+            document.addEventListener("click", function (clickEvent) {
+                if (clickEvent.target && clickEvent.target.closest
+                    && (clickEvent.target.closest(".device-row-menu")
+                        || clickEvent.target.closest(".device-row-actions"))) {
+                    return;
+                }
+                closeDeviceActionsMenu();
+            });
             var manualInput = document.getElementById("manualCommandInput");
             if (manualInput) {
                 manualInput.addEventListener("keydown", onManualCommandInputKeyDown);
             }
-            document.getElementById("parameterDialog").addEventListener("click", onParameterDialogOverlayClick);
-            document.getElementById("parameterUnsavedDialog").addEventListener("click", onParameterUnsavedOverlayClick);
-            loadWifi();
-            loadMqtt();
-            loadZigbee();
-            loadVersion();
-            refreshMqttBaseTopic();
-            startStatusPolling();
+            var overlays = document.querySelectorAll(".dialog-overlay");
+            var overlayIndex;
+            for (overlayIndex = 0; overlayIndex < overlays.length; overlayIndex++) {
+                overlays[overlayIndex].addEventListener("click", onDialogOverlayClick);
+            }
+            var loginForm = document.getElementById("loginForm");
+            if (loginForm) {
+                loginForm.addEventListener("submit", function (event) {
+                    event.preventDefault();
+                    submitLogin();
+                });
+            }
+            applyThemeToDocument("dark");
+            checkSession();
         };
     </script>
 </head>
 <body>
-<div class="app-shell">
+<div id="loginOverlay" class="login-overlay">
+    <form id="loginForm" class="login-panel" autocomplete="on">
+        <h1 class="section-title">Sign in</h1>
+        <p id="loginError" class="save-error" hidden></p>
+        <div class="field">
+            <label for="loginUserName">User name</label>
+            <input id="loginUserName" type="text" autocomplete="username">
+        </div>
+        <div class="field">
+            <label for="loginPassword">Password</label>
+            <input id="loginPassword" type="password" autocomplete="current-password">
+        </div>
+        <label class="field-check">
+            <input id="loginRememberMe" type="checkbox">
+            Remember me
+        </label>
+        <button type="submit" class="btn btn-primary">Sign in</button>
+    </form>
+</div>
+<div id="appShell" class="app-shell" hidden>
     <nav class="sidebar-nav" role="navigation" aria-label="Main sections">
         <h1 class="sidebar-title">Gateway</h1>
         <button type="button" class="sidebar-btn active" data-section="status" onclick="showMainSection('status')">Status</button>
@@ -2266,7 +3054,10 @@
         <button type="button" class="sidebar-btn" data-section="mqtt" onclick="showMainSection('mqtt')">MQTT</button>
         <button type="button" class="sidebar-btn" data-section="zigbee" onclick="showMainSection('zigbee')">ZigBee</button>
         <button type="button" class="sidebar-btn" data-section="devices" onclick="showMainSection('devices')">Devices</button>
+        <button type="button" class="sidebar-btn" data-section="appearance" onclick="showMainSection('appearance')">Appearance</button>
+        <button type="button" class="sidebar-btn" data-section="security" onclick="showMainSection('security')">Security</button>
         <button type="button" class="sidebar-btn" data-section="system" onclick="showMainSection('system')">System</button>
+        <button type="button" class="sidebar-btn sidebar-signout" onclick="openSignOutConfirm()">Sign out</button>
     </nav>
     <div class="main-panel">
         <section id="section-status" class="section-panel active" aria-label="Status">
@@ -2452,9 +3243,9 @@
             </div>
             <div class="page-footer">
                 <div class="page-footer-inner">
-                    <button type="button" class="btn btn-primary" onclick="openSearchDialog()">Add device</button>
-                    <button type="button" class="btn btn-secondary" onclick="exportDevicesStore()">Export</button>
-                    <button type="button" class="btn btn-secondary" onclick="openDevicesRestoreDialog()">Restore</button>
+                    <button type="button" id="addDeviceBtn" class="btn btn-primary" onclick="openSearchDialog()">Add device</button>
+                    <button type="button" id="exportDevicesBtn" class="btn btn-secondary" onclick="exportDevicesStore()">Export</button>
+                    <button type="button" id="restoreDevicesBtn" class="btn btn-secondary" onclick="openDevicesRestoreDialog()">Restore</button>
                 </div>
             </div>
         </section>
@@ -2563,19 +3354,19 @@
                 </div>
                 <div class="dialog-actions">
                     <button type="button" class="btn btn-primary" onclick="saveDeviceParameters()">Save</button>
-                    <button type="button" class="btn btn-secondary" onclick="closeParameterDialog()">Cancel</button>
+                    <button type="button" class="btn btn-secondary" onclick="requestCloseParameterDialog()">Cancel</button>
                     <button type="button" id="parameterDeleteBtn" class="btn btn-secondary" hidden onclick="openDeleteConfirmDialog()">Delete</button>
                 </div>
             </div>
         </div>
 
-        <div id="parameterUnsavedDialog" class="dialog-overlay dialog-overlay-front" hidden>
-            <div class="dialog-panel" role="dialog" aria-label="Unsaved device changes">
+        <div id="unsavedChangesDialog" class="dialog-overlay dialog-overlay-front" hidden>
+            <div class="dialog-panel" role="dialog" aria-label="Unsaved changes">
                 <h3 class="upload-title">Unsaved changes</h3>
-                <p class="field-hint">Cancel all changes or continue editing?</p>
+                <p class="field-hint">Close without saving, or continue editing?</p>
                 <div class="dialog-actions">
-                    <button type="button" class="btn btn-primary" onclick="discardParameterDialogChanges()">Cancel all changes</button>
-                    <button type="button" class="btn btn-secondary" onclick="closeParameterUnsavedDialog()">Continue editing</button>
+                    <button type="button" class="btn btn-primary" onclick="discardUnsavedChanges()">Close without saving</button>
+                    <button type="button" class="btn btn-secondary" onclick="closeUnsavedChangesDialog()">Continue editing</button>
                 </div>
             </div>
         </div>
@@ -2654,6 +3445,23 @@
             </div>
         </div>
 
+        <section id="section-appearance" class="section-panel" aria-label="Appearance">
+            <h2 class="section-title">Appearance</h2>
+            <div class="settings-scroll">
+                <p id="themeSaveError" class="save-error" hidden></p>
+                <div class="field">
+                    <label for="uiTheme">Theme</label>
+                    <div class="theme-control-row">
+                        <select id="uiTheme" onchange="onThemePickerChange()">
+                            <option value="light">Light</option>
+                            <option value="dark">Dark</option>
+                        </select>
+                        <button type="button" class="btn btn-primary" onclick="saveTheme()">Save</button>
+                    </div>
+                </div>
+            </div>
+        </section>
+
         <section id="section-system" class="section-panel" aria-label="System">
             <h2 class="section-title">System</h2>
             <nav class="tabs system-tabs" role="tablist" aria-label="System groups">
@@ -2718,7 +3526,7 @@
                     </div>
                 </div>
                 <div id="system-tab-maintenance" class="system-tab-panel tab-panel" role="tabpanel">
-                    <div class="upload-card">
+                    <div id="maintenanceSettingsCard" class="upload-card" hidden>
                         <h3 class="upload-title">Settings</h3>
                         <p class="field-hint">Export MQTT, Zigbee, hardware, and devices. Restore replaces those groups. Wi-Fi is never included.</p>
                         <p id="settingsRestoreError" class="save-error" hidden></p>
@@ -2729,9 +3537,101 @@
                         </div>
                     </div>
                 </div>
-
             </div>
         </section>
+
+        <section id="section-security" class="section-panel" aria-label="Security">
+            <h2 class="section-title">Security</h2>
+            <p id="usersSaveError" class="save-error" hidden></p>
+            <div class="settings-scroll">
+                <table class="data-table selectable">
+                    <thead>
+                        <tr>
+                            <th>User name</th>
+                            <th>Added</th>
+                            <th>Roles</th>
+                            <th>Blocked</th>
+                            <th>Theme</th>
+                        </tr>
+                    </thead>
+                    <tbody id="userTableBody"></tbody>
+                </table>
+            </div>
+            <div class="dialog-actions">
+                <button type="button" class="btn btn-primary" onclick="openUserDialog(null)">Add user</button>
+            </div>
+        </section>
+    </div>
+</div>
+<div id="userDialog" class="dialog-overlay" hidden>
+    <div class="dialog-panel" role="dialog" aria-label="User">
+        <h3 id="userDialogTitle" class="upload-title">Add user</h3>
+        <p id="userDialogError" class="save-error" hidden></p>
+        <div class="field">
+            <label for="userName">User name</label>
+            <input id="userName" type="text" autocomplete="off">
+        </div>
+        <div class="field">
+            <label for="userPassword">Password</label>
+            <input id="userPassword" type="password" autocomplete="new-password">
+            <p class="field-hint">Leave empty when editing to keep the current password. The stored hash is never shown.</p>
+        </div>
+        <label class="field-check">
+            <input id="userIsAdmin" type="checkbox">
+            Admin
+        </label>
+        <label class="field-check">
+            <input id="userEditDevices" type="checkbox">
+            Edit devices
+        </label>
+        <label class="field-check">
+            <input id="userAddDevices" type="checkbox">
+            Add devices
+        </label>
+        <label class="field-check">
+            <input id="userRemoveDevices" type="checkbox">
+            Delete devices
+        </label>
+        <label class="field-check">
+            <input id="userEditUsers" type="checkbox">
+            Edit users
+        </label>
+        <label class="field-check">
+            <input id="userIsBlocked" type="checkbox">
+            Blocked
+        </label>
+        <div class="field">
+            <label for="userTheme">Theme</label>
+            <select id="userTheme">
+                <option value="dark">Dark</option>
+                <option value="light">Light</option>
+            </select>
+        </div>
+        <div class="dialog-actions">
+            <button type="button" id="userSaveBtn" class="btn btn-primary" onclick="saveUserDialog()">Save</button>
+            <button type="button" id="userDeleteBtn" class="btn btn-secondary" hidden onclick="openUserDeleteConfirm()">Delete</button>
+            <button type="button" class="btn btn-secondary" onclick="requestCloseUserDialog()">Cancel</button>
+        </div>
+    </div>
+</div>
+<div id="userDeleteConfirmDialog" class="dialog-overlay dialog-overlay-front" hidden>
+    <div class="dialog-panel" role="dialog" aria-label="Delete user">
+        <h3 class="upload-title">Delete user</h3>
+        <p id="userDeleteConfirmDetail" class="field-hint"></p>
+        <div class="dialog-actions">
+            <button type="button" class="btn btn-primary" onclick="confirmDeleteUser()">Delete</button>
+            <button type="button" class="btn btn-secondary" onclick="closeUserDeleteConfirm()">Cancel</button>
+        </div>
+    </div>
+</div>
+<div id="signOutConfirmDialog" class="dialog-overlay dialog-overlay-front" hidden>
+    <div class="dialog-panel" role="dialog" aria-label="Sign out">
+        <h3 class="upload-title">Sign out</h3>
+        <p class="field-hint">Sign out of the console?</p>
+        <div class="dialog-actions">
+            <button type="button" class="btn btn-primary" onclick="signOut()">Sign out</button>
+            <button type="button" class="btn btn-secondary" onclick="closeSignOutConfirm()">Cancel</button>
+        </div>
     </div>
 </div>
 </body>

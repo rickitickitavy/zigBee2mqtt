@@ -1,0 +1,37 @@
+this is the feature. this is sequrity layer. you must ask for all new features what role may use it or a new role is needed. Add this to ADR
+
+back tasks:
+1) add users storage. Each user must have user name, password (hash only), when added, list of roles (isAdmin (means user has all rights), edit devices, add devices, remove devices, edit users), isBlocked, theme.  if user has no roles then he is simple user.
+2) when users table is empty then add user admin with password "admin" and role admin. check always when boot
+3) add authorization method
+
+Web UI tasks:
+1) add authorization (not basic ) form to the Web UI. This form user should see when opens URL first time. user name, password and checkbox "remember me". if user has admin role ignore this checkbox. Use the dark theme. detailed content I'll add later
+
+Roles and actions:
+simple user can see tabs STATUS, DEVICES, SYSTEM/LOG, SYSTEM/MAINTANANCE/Appearance. Can't add/remove/edit devices but can perform any actions.
+Any additional roles give to user additional abilities:
+1) edit devices - user can edit parameters of devices
+2) add devices - can add new devices but can't edit
+3) delete devices - can delete devices
+4) edit users - user can see tab Sequrity and edit users EXCEPT admin. This user cant create user with role admin. Only user with role admin can create user with ADMIN role.
+5) admin - can see all tabs and perform all operations and actions.
+
+1) move System/Sequrity to top level tab Sequrity
+2) Add to web UI skill NEVER don't dmake button width to full page. ALWAYS make mindful width.
+3) Add to Web UI skill: ALWAY close dialogs if user click outside the dialog
+4) add to web UI skill: ALWAYS check if user change data on dialog and ask him to close without saving
+5) apply new rules from Web UI skill
+6) if user session is timed out - redirect the user to login page
+7) after firmware update user is signed out so update dialog must check login window to detect that router came back
+8) you duplicate THEME label in APPEARANCE card. remove extra frames. also move the button SAVE immediatelly to the right from the combobox. inside the frame
+
+task: Lightweight MQTT server. this feature to optionally replace homeassist with this lightweight router.
+1) add lightweight MQTT server starts optionally.
+2) replace attribute ENABLED in MQTT settings with SERVER TYPE. New attribute is option of disable, remote, local. default disabled as it's now.
+3) local MQTT server must starts if SERVER TYPE is local. In this case on the web UI parameter SERVER must be hidden
+4) if local MQTT is chosen then requires authorization depends on whether user and password filled or not
+5) If local MQTT started turn ON the blue led on the master
+6) MQTT server must allow remote connections
+
+

@@ -140,6 +140,29 @@ void SettingsManager::setSpiSpeedHz(uint32_t speedHz) {
     memcpy(settings.reserved, &clamped, sizeof(clamped));
 }
 
+uint8_t SettingsManager::uiTheme() const {
+    const uint8_t themeId = settings.reserved[UI_THEME_RESERVED_OFFSET];
+    if (themeId != UI_THEME_DARK) {
+        return UI_THEME_LIGHT;
+    }
+    return UI_THEME_DARK;
+}
+
+void SettingsManager::setUiTheme(uint8_t themeId) {
+    settings.reserved[UI_THEME_RESERVED_OFFSET] = themeId == UI_THEME_DARK ? UI_THEME_DARK : UI_THEME_LIGHT;
+}
+
+const char *SettingsManager::uiThemeJsonId(uint8_t themeId) {
+    return themeId == UI_THEME_DARK ? "dark" : "light";
+}
+
+uint8_t SettingsManager::uiThemeFromJsonId(const char *themeId) {
+    if (themeId != nullptr && strcmp(themeId, "dark") == 0) {
+        return UI_THEME_DARK;
+    }
+    return UI_THEME_LIGHT;
+}
+
 void SettingsManager::clampZigbeeChannel(uint8_t &channel) {
     if (channel < 11 || channel > 26) {
         channel = DEFAULT_ZIGBEE_CHANNEL;

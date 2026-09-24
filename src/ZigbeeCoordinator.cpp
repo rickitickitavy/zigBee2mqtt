@@ -1038,7 +1038,6 @@ void ZigbeeCoordinator::handleAttributeReport(
         }
         return;
     }
-    lightStateHandler(eventName, ieee, srcEndpoint, shortAddr, rssiForShortAddr(shortAddr));
 }
 
 void ZigbeeCoordinator::handleLightStateWithSource(bool on, uint8_t endpoint, esp_zb_zcl_addr_t source) {

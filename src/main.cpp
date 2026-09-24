@@ -21,6 +21,7 @@
 #include "StatusRgb.h"
 #include "ZigbeeSpiProxy.h"
 #include "FoundDeviceList.h"
+#include "UserStore.h"
 #include "DeviceStore.h"
 #include "ZigbeeDeviceType.h"
 #include "ZigbeeCluster.h"
@@ -46,13 +47,38 @@ static MqttClient *mqttClient = nullptr;
 static ZigbeeCoordinator *zigbeeCoordinator = nullptr;
 static SerialCli *serialCli = nullptr;
 static WebConsole *webConsole = nullptr;
+static UserStore *userStore = nullptr;
 static FoundDeviceList *foundDevices = nullptr;
 static DeviceStore *deviceStore = nullptr;
 static bool ntpStarted = false;
 static bool slaveZigbeeStarted = false;
 static bool slaveZigbeeStarting = false;
 static bool persistHostDeviceList();
+static bool onUsersRestored(const char (*removedNames)[USER_NAME_MAX], int removedCount);
+static void persistSlaveUserStore();
+static void onHostUserChanged(UserChangeKind kind, const UserRecord *user);
+static void onSlaveUserSync(uint8_t flags, const UserRecord *user);
 static bool hostPreparationLatched = false;
+static volatile bool hostDeviceListPersistPending = false;
+static volatile bool hostMqttCommandResubscribePending = false;
+static void requestHostDeviceListPersist() {
+    hostDeviceListPersistPending = true;
+}
+static void requestHostMqttCommandResubscribe() {
+    hostMqttCommandResubscribePending = true;
+}
+static void pumpHostDeferredStoreWork() {
+    if (hostDeviceListPersistPending) {
+        hostDeviceListPersistPending = false;
+        persistHostDeviceList();
+    }
+    if (hostMqttCommandResubscribePending) {
+        hostMqttCommandResubscribePending = false;
+        if (mqttClient != nullptr && topicMap != nullptr) {
+            mqttClient->subscribeDeviceCommands();
+        }
+    }
+}
 static void applyRegisteredDeviceCommand(
     DeviceTopicEntry *entry,
     const char *payload,
@@ -270,7 +296,7 @@ static void onHostSpiEvent(const SpiFrame &frame) {
     ZIGBEE_SPI_PROXY.onSpiEvent(frame);
     if (frame.cmd == SpiEvtDeviceJoin && foundDevices != nullptr && topicMap != nullptr) {
         if (foundDevices->noteJoin(frame, topicMap)) {
-            persistHostDeviceList();
+            requestHostDeviceListPersist();
         }
     }
     if (frame.cmd == SpiEvtAttrReport && frame.length >= SPI_ATTR_REPORT_MESSAGE_OFFSET + 1
@@ -292,6 +318,7 @@ static void onHostSpiEvent(const SpiFrame &frame) {
     }
     if (frame.cmd == SpiEvtSettingsOk && topicMap != nullptr) {
         ZIGBEE_SPI_PROXY.requestRegistryPull(topicMap);
+        ZIGBEE_SPI_PROXY.requestUsersPull(userStore);
     }
 }
 
@@ -384,6 +411,53 @@ static bool onDevicesRestored(const uint8_t (*removedIeees)[8], int removedCount
     persistHostDeviceList();
     ZIGBEE_SPI_PROXY.queueDeletedIeeesAndPushAll(removedIeees, removedCount);
     return true;
+}
+
+static bool onUsersRestored(const char (*removedNames)[USER_NAME_MAX], int removedCount) {
+    ZIGBEE_SPI_PROXY.queueDeletedUserNamesAndPushAll(removedNames, removedCount);
+    return true;
+}
+
+static void onHostUserChanged(UserChangeKind kind, const UserRecord *user) {
+    if (user == nullptr) {
+        return;
+    }
+    if (kind == UserChangeDelete) {
+        ZIGBEE_SPI_PROXY.enqueueUserDelete(user->userName);
+        return;
+    }
+    ZIGBEE_SPI_PROXY.enqueueUserUpsert(user);
+}
+
+static void persistSlaveUserStore() {
+    if (userStore == nullptr) {
+        return;
+    }
+    userStore->requestPersist();
+    userStore->persistIfDue();
+}
+
+static void onSlaveUserSync(uint8_t flags, const UserRecord *user) {
+    if ((flags & SPI_USER_SYNC_RESET) != 0) {
+        LOGGER.warning("Host cannot replace the full user store");
+        return;
+    }
+    if (userStore == nullptr) {
+        return;
+    }
+    if ((flags & SPI_USER_SYNC_DELETE) != 0 && user != nullptr) {
+        if (userStore->userCount() <= 1) {
+            LOGGER.warning("Refusing to delete the last slave user");
+            return;
+        }
+        userStore->removeByName(user->userName, true);
+        persistSlaveUserStore();
+        return;
+    }
+    if ((flags & SPI_USER_SYNC_ENTRY) != 0 && user != nullptr) {
+        userStore->upsertFromRecord(user, true);
+        persistSlaveUserStore();
+    }
 }
 
 static void runDeviceRegistryFixtures() {
@@ -985,7 +1059,7 @@ static void setupHost() {
         DeviceTopicMap::ZclWriteFields clOnlyWrite;
         DeviceTopicMap::parseFullControlBody("cl=0x0102,cmd=0x02", 1, &clOnlyWrite);
         if (!parsedOpen || !openFields.parsed || openFields.clusterId != 0x0102
-            || openFields.commandId != 0x00 || parsedOn && onFields.parsed || clOnlyWrite.hasWrite) {
+            || openFields.commandId != 0x01 || parsedOn && onFields.parsed || clOnlyWrite.hasWrite) {
             LOGGER.error("ZCL command parse fixture failed");
         } else {
             LOGGER.info("ZCL command parse fixture ok");
@@ -1040,12 +1114,15 @@ static void setupHost() {
 
     settingsManager = new SettingsManager();
     settingsManager->loadDeviceFile();
+    userStore = new UserStore();
+    userStore->begin(false);
+    userStore->setChangedHandler(onHostUserChanged);
     topicMap = settingsManager->deviceMap();
     foundDevices = new FoundDeviceList();
     wifiController = new WiFiController(settingsManager, forceAp);
     mqttClient = new MqttClient(settingsManager, topicMap);
     serialCli = new SerialCli(settingsManager);
-    webConsole = new WebConsole(settingsManager);
+    webConsole = new WebConsole(settingsManager, userStore);
     webConsole->setDeviceServices(
         foundDevices,
         startDeviceSearch,
@@ -1063,6 +1140,7 @@ static void setupHost() {
     });
     webConsole->setDeviceCommandHandler(applyManualDeviceCommand);
     webConsole->setDevicesRestoredHandler(onDevicesRestored);
+    webConsole->setUsersRestoredHandler(onUsersRestored);
     webConsole->setGatewayStatusHandler(hostGatewayStatusJson);
     webConsole->setDevicesFileHandler([]() {
         ZIGBEE_SPI_PROXY.requestDevicesFile();
@@ -1080,10 +1158,8 @@ static void setupHost() {
     ZIGBEE_SPI_PROXY.begin();
     ZIGBEE_SPI_PROXY.setLightStateHandler(onLightState);
     ZIGBEE_SPI_PROXY.setRegistryPullDoneHandler([]() {
-        persistHostDeviceList();
-        if (mqttClient != nullptr && topicMap != nullptr) {
-            mqttClient->subscribeDeviceCommands();
-        }
+        requestHostDeviceListPersist();
+        requestHostMqttCommandResubscribe();
     });
 
     GlobalSettings *settings = settingsManager->getSettings();
@@ -1108,8 +1184,12 @@ static void setupSlave() {
     INTER_CHIP_SLAVE.setReadAttrHandler(onSlaveReadAttr);
     INTER_CHIP_SLAVE.setZclCommandHandler(onSlaveZclCommand);
     INTER_CHIP_SLAVE.setDeviceSyncHandler(onSlaveDeviceSync);
+    INTER_CHIP_SLAVE.setUserSyncHandler(onSlaveUserSync);
     deviceStore = new DeviceStore();
     deviceStore->begin();
+    userStore = new UserStore();
+    userStore->begin(true);
+    INTER_CHIP_SLAVE.setUserMapSource(userStore);
     createSlaveCoordinator();
     if (zigbeeCoordinator != nullptr) {
         zigbeeCoordinator->setRegisteredMap(deviceStore->deviceMap());
@@ -1126,7 +1206,7 @@ static void setupSlave() {
     LOGGER.info("role=slave");
     LOGGER.info("z2m-gateway " FIRMWARE_VERSION " slave");
     LOGGER.info("Reset " + String((int)esp_reset_reason()));
-    LOGGER.info("Device store on slave LittleFS; no Wi-Fi on slave");
+    LOGGER.info("Device and user stores on slave LittleFS; no Wi-Fi on slave");
 }
 
 void setup() {
@@ -1159,6 +1239,7 @@ void loop() {
         mqttClient->dispatch(wifiController->isStaConnected());
         serialCli->dispatch();
         ZIGBEE_SPI_PROXY.pumpRegistrySync();
+        pumpHostDeferredStoreWork();
         if (!hostPreparationLatched && wifiController->hasUsableInterface() && INTER_CHIP_HOST.isNormal()) {
             hostPreparationLatched = true;
             STATUS_RGB.setBootHeld(false);
@@ -1188,8 +1269,12 @@ void loop() {
     INTER_CHIP_SLAVE.applyDeferredSettings();
     INTER_CHIP_SLAVE.applyDeferredRadioCommands();
     INTER_CHIP_SLAVE.pumpDeviceDump();
+    INTER_CHIP_SLAVE.pumpUserDump();
     if (deviceStore != nullptr) {
         deviceStore->persistIfDue();
+    }
+    if (userStore != nullptr) {
+        userStore->persistIfDue();
     }
     INTER_CHIP_SLAVE.pumpDevicesFileDump();
     if (FIRMWARE_OTA.consumeFirmwareRestart()) {

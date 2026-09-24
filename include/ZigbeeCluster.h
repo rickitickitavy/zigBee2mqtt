@@ -37,8 +37,8 @@ constexpr uint8_t kZigbeeWindowCoveringPositionMax = 0x64;
 constexpr uint8_t kZigbeeWindowCoveringMoveDown = 0x00;
 constexpr uint8_t kZigbeeWindowCoveringMoveStopped = 0x01;
 constexpr uint8_t kZigbeeWindowCoveringMoveUp = 0x02;
-constexpr uint8_t kZigbeeWindowCoveringCmdOpen = 0x00;
-constexpr uint8_t kZigbeeWindowCoveringCmdClose = 0x01;
+constexpr uint8_t kZigbeeWindowCoveringCmdClose = 0x00;
+constexpr uint8_t kZigbeeWindowCoveringCmdOpen = 0x01;
 constexpr uint8_t kZigbeeWindowCoveringCmdStop = 0x02;
 constexpr uint8_t kZigbeeBatteryPercentageRemainingMax = 200;
 

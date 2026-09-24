@@ -29,7 +29,9 @@ enum SpiCommand : uint8_t {
     SpiCmdFirmwareOta = 0x0E,
     SpiCmdZclReadAttr = 0x0F,
     SpiCmdReadEvent = 0x10,
-    SpiCmdZclCommand = 0x11
+    SpiCmdZclCommand = 0x11,
+    SpiCmdSetUser = 0x12,
+    SpiCmdGetUsers = 0x13
 };
 
 constexpr uint8_t SPI_DEVICE_SYNC_RESET = 0x01;
@@ -37,6 +39,21 @@ constexpr uint8_t SPI_DEVICE_SYNC_LAST = 0x02;
 constexpr uint8_t SPI_DEVICE_SYNC_ENTRY = 0x04;
 constexpr uint8_t SPI_DEVICE_SYNC_ALLOW_EMPTY = 0x08;
 constexpr uint8_t SPI_DEVICE_SYNC_DELETE = 0x10;
+constexpr uint8_t SPI_USER_SYNC_RESET = 0x01;
+constexpr uint8_t SPI_USER_SYNC_LAST = 0x02;
+constexpr uint8_t SPI_USER_SYNC_ENTRY = 0x04;
+constexpr uint8_t SPI_USER_SYNC_DELETE = 0x10;
+constexpr uint8_t SPI_USER_FLAG_ADMIN = 0x01;
+constexpr uint8_t SPI_USER_FLAG_EDIT_DEVICES = 0x02;
+constexpr uint8_t SPI_USER_FLAG_ADD_DEVICES = 0x04;
+constexpr uint8_t SPI_USER_FLAG_REMOVE_DEVICES = 0x08;
+constexpr uint8_t SPI_USER_FLAG_EDIT_USERS = 0x10;
+constexpr uint8_t SPI_USER_FLAG_BLOCKED = 0x20;
+constexpr size_t SPI_USER_SYNC_NAME_LEN = 32;
+constexpr size_t SPI_USER_SYNC_SALT_LEN = 16;
+constexpr size_t SPI_USER_SYNC_HASH_LEN = 32;
+constexpr size_t SPI_USER_SYNC_ENTRY_LEN =
+    1 + SPI_USER_SYNC_NAME_LEN + SPI_USER_SYNC_SALT_LEN + SPI_USER_SYNC_HASH_LEN + 4 + 1 + 1;
 constexpr size_t SPI_DEVICE_SYNC_NAME_LEN = 24;
 constexpr size_t SPI_DEVICE_SYNC_TOPIC_LEN = 64;
 constexpr size_t SPI_DEVICE_SYNC_ENTRY_LEN_NO_CHANNELS =
@@ -69,6 +86,7 @@ constexpr size_t SPI_DEVICE_JOIN_TYPE_OFFSET = 75;
 constexpr size_t SPI_DEVICE_JOIN_MIN_LEN = 75;
 constexpr size_t SPI_DEVICE_JOIN_LEN = 76;
 static_assert(SPI_DEVICE_SYNC_ENTRY_LEN <= SPI_MAX_PAYLOAD, "device sync frame must fit SPI payload");
+static_assert(SPI_USER_SYNC_ENTRY_LEN <= SPI_MAX_PAYLOAD, "user sync frame must fit SPI payload");
 static_assert(SPI_DEVICE_JOIN_LEN <= SPI_MAX_PAYLOAD, "device join frame must fit SPI payload");
 
 inline bool spiPackDeviceJoin(
@@ -120,7 +138,8 @@ enum SpiEvent : uint8_t {
     SpiEvtDevicesFile = 0x8B,
     SpiEvtJoinClosed = 0x8C,
     SpiEvtErr = 0x8E,
-    SpiEvtTimeout = 0x8F
+    SpiEvtTimeout = 0x8F,
+    SpiEvtUserMap = 0x90
 };
 
 enum HostBringupState : uint8_t {
