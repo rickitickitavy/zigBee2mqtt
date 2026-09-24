@@ -52,6 +52,11 @@ void StatusRgb::setMqttConnected(bool enabled) {
     apply();
 }
 
+void StatusRgb::setMqttBrokerListening(bool enabled) {
+    mqttBrokerListening = enabled;
+    apply();
+}
+
 void StatusRgb::setReadyGreen(bool enabled) {
     readyGreen = enabled;
     apply();
@@ -116,17 +121,17 @@ void StatusRgb::apply() {
     for (int ledIndex = 0; ledIndex < kLedCount; ledIndex++) {
         levelOn[ledIndex] = pulseActive[ledIndex];
     }
+    if (mqttBrokerListening) {
+        levelOn[3] = true;
+    }
     writeLevels(levelOn);
 
     if (pairingHeld) {
         writeRgb(0, 0, pairingPhaseOn ? kRgbBrightness : 0);
         return;
     }
-    if (mqttConnected || readyGreen) {
-        writeRgb(0, kRgbBrightness, 0);
-        return;
-    }
-    writeRgb(0, 0, 0);
+    const uint8_t greenLevel = (mqttConnected || readyGreen) ? kRgbBrightness : 0;
+    writeRgb(0, greenLevel, 0);
 }
 
 void StatusRgb::writeLevels(const bool levelOn[kLedCount]) {

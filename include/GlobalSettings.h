@@ -3,6 +3,7 @@
 #include "Defines.h"
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 #define GLOBAL_CURRENT_SETTINGS_VERSION 5
 #define GLOBAL_SETTINGS_MARKER_0 0x5A
@@ -14,6 +15,50 @@ enum WifiSettingsMode : uint8_t {
     WifiSettingsModeAp = 0,
     WifiSettingsModeSta = 1
 };
+
+enum MqttServerType : uint8_t {
+    MqttServerTypeDisable = 0,
+    MqttServerTypeRemote = 1,
+    MqttServerTypeLocal = 2
+};
+
+inline MqttServerType clampMqttServerType(uint8_t rawType) {
+    if (rawType == MqttServerTypeDisable
+        || rawType == MqttServerTypeRemote
+        || rawType == MqttServerTypeLocal) {
+        return (MqttServerType)rawType;
+    }
+    return MqttServerTypeDisable;
+}
+
+inline const char *mqttServerTypeName(MqttServerType serverType) {
+    if (serverType == MqttServerTypeRemote) {
+        return "remote";
+    }
+    if (serverType == MqttServerTypeLocal) {
+        return "local";
+    }
+    return "disable";
+}
+
+inline bool parseMqttServerType(const char *text, MqttServerType &serverType) {
+    if (text == nullptr) {
+        return false;
+    }
+    if (strcmp(text, "disable") == 0) {
+        serverType = MqttServerTypeDisable;
+        return true;
+    }
+    if (strcmp(text, "remote") == 0) {
+        serverType = MqttServerTypeRemote;
+        return true;
+    }
+    if (strcmp(text, "local") == 0) {
+        serverType = MqttServerTypeLocal;
+        return true;
+    }
+    return false;
+}
 
 struct WifiSettings {
     char bssid[64];
@@ -29,7 +74,7 @@ struct MqttSettings {
     int port;
     long reconnectIntervalMs;
     int clientTimeoutMs;
-    bool enabled;
+    MqttServerType serverType;
     char username[32];
     char password[64];
     char clientId[32];

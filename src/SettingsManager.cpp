@@ -57,10 +57,8 @@ SettingsManager::SettingsManager() : topicMap(deviceSlots) {
     }
     {
         uint8_t rawMqtt = 0;
-        memcpy(&rawMqtt, &settings.mqtt.enabled, sizeof(rawMqtt));
-        if (rawMqtt > 1) {
-            settings.mqtt.enabled = true;
-        }
+        memcpy(&rawMqtt, &settings.mqtt.serverType, sizeof(rawMqtt));
+        settings.mqtt.serverType = clampMqttServerType(rawMqtt);
     }
     memcpy(&committedMain, &settings, sizeof(settings));
     logSettings();
@@ -81,7 +79,7 @@ void SettingsManager::applyDefaults() {
     settings.mqtt.port = DEFAULT_MQTT_PORT;
     settings.mqtt.reconnectIntervalMs = DEFAULT_MQTT_RECONNECT_MS;
     settings.mqtt.clientTimeoutMs = DEFAULT_MQTT_CLIENT_TIMEOUT_MS;
-    settings.mqtt.enabled = true;
+    settings.mqtt.serverType = MqttServerTypeDisable;
     strncpy(settings.mqtt.clientId, DEFAULT_MQTT_CLIENT_ID, sizeof(settings.mqtt.clientId) - 1);
     strncpy(settings.mqtt.baseTopic, DEFAULT_MQTT_BASE_TOPIC, sizeof(settings.mqtt.baseTopic) - 1);
 
@@ -287,7 +285,7 @@ void SettingsManager::logSettings() {
     );
     LOGGER.info("  OTG_ENABLED: " + String(settings.wifi.otgEnabled ? "true" : "false"));
     LOGGER.info("  AP IP: " + String(settings.wifi.apIp));
-    LOGGER.info("  mqtt enabled: " + String(settings.mqtt.enabled ? "true" : "false"));
+    LOGGER.info("  mqtt serverType: " + String(mqttServerTypeName(settings.mqtt.serverType)));
     LOGGER.info("  mqtt server: " + String(settings.mqtt.server) + ":" + String(settings.mqtt.port));
     LOGGER.info("  mqtt base: " + String(settings.mqtt.baseTopic));
     LOGGER.info("  zigbee channel: " + String(settings.zigbee.channel));

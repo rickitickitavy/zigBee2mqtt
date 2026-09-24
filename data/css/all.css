@@ -349,6 +349,10 @@ html, body {
     padding: 0.75rem 0.85rem;
 }
 
+.field[hidden] {
+    display: none;
+}
+
 .field label {
     font-size: 0.875rem;
     font-weight: 600;

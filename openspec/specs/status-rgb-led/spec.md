@@ -2,18 +2,18 @@
 
 ## Purpose
 
-Gives each board an onboard RGB (GPIO8) and four external red LEDs (GPIO18–21) that work together. RGB is red for boot/critical (green off). Host RGB is green while MQTT is connected. Slave RGB is green when the chip is ready and has no critical fault. Slave pairing blinks blue.
+Gives each board an onboard RGB (GPIO8) and four external red LEDs (GPIO18–21) that work together. RGB is red for boot/critical (green off). Host RGB is green while MQTT is connected (local or remote). Host LED4 is on while the local MQTT broker is listening. Slave RGB is green when the chip is ready and has no critical fault. Slave pairing blinks blue.
 
 ## Requirements
 
 ### Requirement: RGB and LED1–LED4 work together
 
-Each chip SHALL drive LED1 on GPIO18, LED2 on GPIO19, LED3 on GPIO20, LED4 on GPIO21, and the onboard WS2812 on GPIO8. Host LED3 and LED4 SHALL stay off. RGB green SHALL mean host MQTT connected, or slave ready with no fault. A HIGH GPIO level SHALL light each external LED.
+Each chip SHALL drive LED1 on GPIO18, LED2 on GPIO19, LED3 on GPIO20, LED4 on GPIO21, and the onboard WS2812 on GPIO8. Host LED3 SHALL stay off. Host LED4 SHALL stay on while the local MQTT broker is listening. RGB green SHALL mean host MQTT connected, or slave ready with no fault. A HIGH GPIO level SHALL light each external LED.
 
 #### Scenario: Pins
 
 - **WHEN** status indication is shown
-- **THEN** host uses LED1, LED2, and RGB only; slave uses LED1–LED4 and RGB
+- **THEN** host uses LED1, LED2, LED4, and RGB; slave uses LED1–LED4 and RGB
 
 ### Requirement: RGB red while that chip is booting or in a critical error
 
@@ -56,17 +56,33 @@ Each chip SHALL turn the onboard RGB **red** as soon as firmware starts, before 
 
 ### Requirement: Host RGB green while MQTT is connected
 
-After host boot red is cleared, the host onboard RGB SHALL stay **green** while the MQTT client is connected to the broker. It SHALL not be green while MQTT is disabled, STA is down, or the broker is disconnected. Host LED3 SHALL stay off.
+After host boot red is cleared, the host onboard RGB SHALL stay **green** while MQTT is connected, whether SERVER TYPE is `remote` or `local`. It SHALL not be green while SERVER TYPE is `disable`, or while MQTT is not connected. Host LED3 SHALL stay off.
 
-#### Scenario: Broker connected
+#### Scenario: Remote broker connected
 
-- **WHEN** the host is ready and MQTT is connected
+- **WHEN** the host is ready, SERVER TYPE is `remote`, and MQTT is connected
 - **THEN** the host onboard RGB is green and host LED3 stays off
+
+#### Scenario: Local broker connected
+
+- **WHEN** the host is ready, SERVER TYPE is `local`, the local MQTT broker is listening, and MQTT is connected
+- **THEN** the host onboard RGB is green and host LED4 is on
 
 #### Scenario: Broker disconnected
 
-- **WHEN** the host is ready and MQTT is not connected
+- **WHEN** the host is ready and MQTT is not connected and the local broker is not listening
 - **THEN** the host onboard RGB is not held green
+
+### Requirement: Host LED4 on while the local MQTT broker is listening
+After host boot red is cleared, and while no critical error is present, host LED4 SHALL stay **on** while the onboard MQTT broker is listening. Host RGB SHALL NOT use blue for the local broker. Host LED3 SHALL stay off.
+
+#### Scenario: Local broker listening
+- **WHEN** the host is ready and the local MQTT broker is listening
+- **THEN** host LED4 is on and host RGB is not held blue
+
+#### Scenario: Local broker down
+- **WHEN** the host is ready and the local MQTT broker is not listening
+- **THEN** host LED4 is not held on for the broker
 
 ### Requirement: Slave RGB green when ready
 
@@ -84,7 +100,7 @@ After slave boot red is cleared, and while no critical error is present, the sla
 
 ### Requirement: Host pulses LED1 and LED2 for MQTT device traffic
 
-After host boot red is cleared, the host SHALL pulse LED1 for 0.1 seconds when it receives a device command from MQTT, and SHALL pulse LED2 for 0.1 seconds when it successfully publishes a device state message. Host LED3 and LED4 SHALL NOT light. RGB SHALL NOT flash green or red for those MQTT events.
+After host boot red is cleared, the host SHALL pulse LED1 for 0.1 seconds when it receives a device command from MQTT, and SHALL pulse LED2 for 0.1 seconds when it successfully publishes a device state message. Host LED3 SHALL NOT light. Host LED4 SHALL stay on while the local MQTT broker is listening and SHALL NOT pulse for MQTT traffic. RGB SHALL NOT flash green or red for those MQTT events.
 
 #### Scenario: MQTT device command received
 

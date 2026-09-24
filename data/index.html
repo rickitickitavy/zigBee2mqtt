@@ -1134,7 +1134,7 @@
                 if (saveError) {
                     saveError.hidden = true;
                 }
-                document.getElementById("mqttEnabled").checked = !!mqttSettings.enabled;
+                document.getElementById("mqttServerType").value = mqttSettings.serverType || "disable";
                 document.getElementById("mqttServer").value = mqttSettings.server || "";
                 document.getElementById("mqttPort").value = mqttSettings.port || 1883;
                 document.getElementById("mqttUsername").value = mqttSettings.username || "";
@@ -1143,6 +1143,7 @@
                 document.getElementById("mqttBaseTopic").value = mqttSettings.baseTopic || "";
                 document.getElementById("mqttReconnectIntervalMs").value = mqttSettings.reconnectIntervalMs || 3000;
                 document.getElementById("mqttClientTimeoutMs").value = mqttSettings.clientTimeoutMs || 200;
+                updateMqttServerVisibility();
             }).catch(function (error) {
                 if (saveError) {
                     saveError.hidden = false;
@@ -1214,7 +1215,7 @@
             saveError.hidden = true;
             saveSuccess.hidden = true;
             var body = {
-                enabled: document.getElementById("mqttEnabled").checked,
+                serverType: document.getElementById("mqttServerType").value,
                 server: document.getElementById("mqttServer").value,
                 port: parseInt(document.getElementById("mqttPort").value, 10),
                 username: document.getElementById("mqttUsername").value,
@@ -2910,6 +2911,12 @@
             });
         }
 
+        function updateMqttServerVisibility() {
+            var typeSelect = document.getElementById("mqttServerType");
+            var isLocal = typeSelect && typeSelect.value === "local";
+            setHidden(document.getElementById("mqttServerField"), isLocal);
+        }
+
         function updateApIpVisibility() {
             var apIpField = document.getElementById("wifiApIpField");
             if (!apIpField) {
@@ -2996,6 +3003,7 @@
             setupPasswordToggle("wifiPassword", "wifiPasswordToggle");
             setupPasswordToggle("mqttPassword", "mqttPasswordToggle");
             document.getElementById("wifiMode").onchange = updateApIpVisibility;
+            document.getElementById("mqttServerType").onchange = updateMqttServerVisibility;
             document.addEventListener("keydown", onDocumentKeyDown);
             document.addEventListener("click", function (clickEvent) {
                 if (clickEvent.target && clickEvent.target.closest
@@ -3146,11 +3154,15 @@
             <p id="mqttSaveError" class="save-error" hidden></p>
             <p id="mqttSaveSuccess" class="save-success" hidden></p>
             <div class="settings-scroll">
-            <div class="field field-check">
-                <input id="mqttEnabled" type="checkbox">
-                <label for="mqttEnabled">ENABLED</label>
-            </div>
             <div class="field">
+                <label for="mqttServerType">SERVER TYPE</label>
+                <select id="mqttServerType" onchange="updateMqttServerVisibility()">
+                    <option value="disable">disable</option>
+                    <option value="remote">remote</option>
+                    <option value="local">local</option>
+                </select>
+            </div>
+            <div class="field" id="mqttServerField">
                 <label for="mqttServer">SERVER</label>
                 <input id="mqttServer" type="text" autocomplete="off">
                 <p class="field-hint">Broker host or IPv4. Must be reachable from the STA LAN.</p>

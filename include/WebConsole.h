@@ -96,6 +96,7 @@ private:
     void handleUsersDelete(AsyncWebServerRequest *request);
     void fillUserFromJson(const char *json, UserRecord *user);
     void sendUserWriteResult(AsyncWebServerRequest *request, UserWriteResult result);
+    void appendMqttSettingsJson(String &json);
     bool applyMqttJson(const char *json, String *errorText);
     bool applyZigbeeJson(const char *json, String *errorText);
     bool applyHardwareJson(const char *json, String *errorText);

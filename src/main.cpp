@@ -12,6 +12,7 @@
 #include "DeviceTopicMap.h"
 #include "WiFiController.h"
 #include "MqttClient.h"
+#include "MqttBroker.h"
 #include "ZigbeeCoordinator.h"
 #include "SerialCli.h"
 #include "WebConsole.h"
@@ -44,6 +45,7 @@ static SettingsManager *settingsManager = nullptr;
 static DeviceTopicMap *topicMap = nullptr;
 static WiFiController *wifiController = nullptr;
 static MqttClient *mqttClient = nullptr;
+static MqttBroker *mqttBroker = nullptr;
 static ZigbeeCoordinator *zigbeeCoordinator = nullptr;
 static SerialCli *serialCli = nullptr;
 static WebConsole *webConsole = nullptr;
@@ -1121,6 +1123,7 @@ static void setupHost() {
     foundDevices = new FoundDeviceList();
     wifiController = new WiFiController(settingsManager, forceAp);
     mqttClient = new MqttClient(settingsManager, topicMap);
+    mqttBroker = new MqttBroker(settingsManager);
     serialCli = new SerialCli(settingsManager);
     webConsole = new WebConsole(settingsManager, userStore);
     webConsole->setDeviceServices(
@@ -1153,6 +1156,14 @@ static void setupHost() {
         }
     });
 
+    mqttClient->setLocalBroker(mqttBroker);
+    mqttBroker->setLocalMessageHandler([](const char *topic, const char *payload) {
+        if (mqttClient == nullptr || topic == nullptr) {
+            return;
+        }
+        const char *body = payload != nullptr ? payload : "";
+        mqttClient->onMessage(const_cast<char *>(topic), (byte *)body, (unsigned int)strlen(body));
+    });
     mqttClient->setMessageHandler(onMqttLogicalMessage);
     mqttClient->begin(onMqttRawMessage);
     ZIGBEE_SPI_PROXY.begin();
@@ -1236,6 +1247,7 @@ void loop() {
         }
         wifiController->update();
         maybeStartNtp();
+        mqttBroker->dispatch(wifiController->hasUsableInterface());
         mqttClient->dispatch(wifiController->isStaConnected());
         serialCli->dispatch();
         ZIGBEE_SPI_PROXY.pumpRegistrySync();

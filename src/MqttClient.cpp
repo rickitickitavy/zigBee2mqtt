@@ -1,4 +1,5 @@
 #include "MqttClient.h"
+#include "MqttBroker.h"
 #include "Logger.h"
 #include "StatusRgb.h"
 
@@ -18,6 +19,15 @@ void MqttClient::setMessageHandler(MessageFn handler) {
     messageHandler = handler;
 }
 
+void MqttClient::setLocalBroker(MqttBroker *broker) {
+    localBroker = broker;
+}
+
+bool MqttClient::usesLocalBroker() const {
+    GlobalSettings *settings = settingsManager->getSettings();
+    return settings->mqtt.serverType == MqttServerTypeLocal;
+}
+
 void MqttClient::rebuildTopics() {
     GlobalSettings *settings = settingsManager->getSettings();
     const String base = String(settings->mqtt.baseTopic);
@@ -27,10 +37,15 @@ void MqttClient::rebuildTopics() {
     topicConfigDevice = base + "/bridge/config/device";
 }
 
+void MqttClient::applyRemoteBrokerTarget() {
+    GlobalSettings *settings = settingsManager->getSettings();
+    client->setServer(settings->mqtt.server, settings->mqtt.port);
+}
+
 void MqttClient::begin(void (*rawCallback)(char *topic, byte *payload, unsigned int length)) {
     GlobalSettings *settings = settingsManager->getSettings();
     rebuildTopics();
-    client->setServer(settings->mqtt.server, settings->mqtt.port);
+    applyRemoteBrokerTarget();
     client->setCallback(rawCallback);
     client->setBufferSize(1024);
     client->setSocketTimeout(settings->mqtt.clientTimeoutMs / 1000 > 0 ? settings->mqtt.clientTimeoutMs / 1000 : 1);
@@ -53,6 +68,9 @@ void MqttClient::onMessage(char *topic, byte *payload, unsigned int length) {
 }
 
 bool MqttClient::isConnected() const {
+    if (usesLocalBroker()) {
+        return localAttached && localBroker != nullptr && localBroker->isListening();
+    }
     return client != nullptr && client->connected();
 }
 
@@ -88,6 +106,9 @@ int MqttClient::nextFreeCommandSubscription() const {
 }
 
 void MqttClient::subscribeDeviceCommands() {
+    if (usesLocalBroker()) {
+        return;
+    }
     if (!isConnected() || topicMap == nullptr) {
         return;
     }
@@ -146,9 +167,18 @@ void MqttClient::subscribeDeviceCommands() {
     }
 }
 
+void MqttClient::attachLocalBroker() {
+    rebuildTopics();
+    lastDevicesJson = "";
+    localAttached = true;
+    LOGGER.info("MQTT connected to local broker");
+    publishStatus("online");
+}
+
 void MqttClient::reconnect() {
     GlobalSettings *settings = settingsManager->getSettings();
-    LOGGER.info("MQTT connecting to " + String(settings->mqtt.server));
+    applyRemoteBrokerTarget();
+    LOGGER.info("MQTT connecting to " + String(settings->mqtt.server) + ":" + String(settings->mqtt.port));
 
     const char *user = settings->mqtt.username[0] != '\0' ? settings->mqtt.username : nullptr;
     const char *password = user != nullptr ? settings->mqtt.password : nullptr;
@@ -169,7 +199,22 @@ void MqttClient::reconnect() {
 
 void MqttClient::dispatch(bool staConnected) {
     GlobalSettings *settings = settingsManager->getSettings();
-    if (!settings->mqtt.enabled || !staConnected) {
+    if (settings->mqtt.serverType == MqttServerTypeLocal) {
+        const bool brokerUp = localBroker != nullptr && localBroker->isListening();
+        if (!brokerUp) {
+            localAttached = false;
+            STATUS_RGB.setMqttConnected(false);
+            return;
+        }
+        if (!localAttached) {
+            attachLocalBroker();
+        }
+        STATUS_RGB.setMqttConnected(true);
+        return;
+    }
+
+    localAttached = false;
+    if (settings->mqtt.serverType != MqttServerTypeRemote || !staConnected) {
         STATUS_RGB.setMqttConnected(false);
         return;
     }
@@ -196,7 +241,9 @@ bool MqttClient::publishMessage(const char *topic, const char *payload, bool ret
         return false;
     }
     const char *data = payload != nullptr ? payload : "";
-    const bool sent = client->publish(topic, data, retained);
+    const bool sent = usesLocalBroker()
+        ? localBroker->publishFromHost(topic, data, retained)
+        : client->publish(topic, data, retained);
     if (sent) {
         LOGGER.info(String("MQTT send topic=") + topic + " data=" + data);
     } else {

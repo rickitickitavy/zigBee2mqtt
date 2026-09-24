@@ -8,7 +8,7 @@ Wi-Fi and Zigbee on one ESP32-C6 starve each other. The product uses two C6 boar
 
 One firmware `.bin` implements both roles. GPIO15 sampled at boot selects the role: LOW = host, HIGH = slave. Role does not change until reset.
 
-Host runs Wi-Fi, MQTT, settings, web console, USB CLI, and SPI master. It does not start the Zigbee radio.
+Host runs Wi-Fi, MQTT client, an optional local MQTT broker when SERVER TYPE is `local`, settings, web console, USB CLI, and SPI master. It does not start the Zigbee radio. The broker is host-only.
 
 Slave runs the Zigbee coordinator and SPI slave only. It does not start Wi-Fi, the web console, or MQTT. It has no product business rules.
 
