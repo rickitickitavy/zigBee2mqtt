@@ -34,6 +34,7 @@ void SerialCli::printHelp() {
     LOGGER.info("  mqttuser <username> <password>");
     LOGGER.info("  mqttid <clientId>");
     LOGGER.info("  mqttbase <baseTopic>");
+    LOGGER.info("  mqtttype disable|remote|local");
     LOGGER.info("  mqtten on|off");
     LOGGER.info("  save");
     LOGGER.info("  log");
@@ -168,12 +169,27 @@ void SerialCli::handleLine(const String &line) {
         return;
     }
 
+    if (trimmed.startsWith("mqtttype ")) {
+        String typeText = trimmed.substring(9);
+        typeText.trim();
+        typeText.toLowerCase();
+        MqttServerType serverType = MqttServerTypeDisable;
+        if (!parseMqttServerType(typeText.c_str(), serverType)) {
+            LOGGER.error("mqtttype disable|remote|local");
+            return;
+        }
+        settings->mqtt.serverType = serverType;
+        LOGGER.info(String("MQTT serverType ") + mqttServerTypeName(serverType) + " (save to apply)");
+        return;
+    }
+
     if (trimmed.startsWith("mqtten ")) {
         String flag = trimmed.substring(7);
         flag.trim();
         flag.toLowerCase();
-        settings->mqtt.enabled = (flag == "on" || flag == "1" || flag == "true");
-        LOGGER.info(String("MQTT enabled ") + (settings->mqtt.enabled ? "true" : "false") + " (save to apply)");
+        const bool turnOn = (flag == "on" || flag == "1" || flag == "true");
+        settings->mqtt.serverType = turnOn ? MqttServerTypeRemote : MqttServerTypeDisable;
+        LOGGER.info(String("MQTT serverType ") + mqttServerTypeName(settings->mqtt.serverType) + " (save to apply)");
         return;
     }
 

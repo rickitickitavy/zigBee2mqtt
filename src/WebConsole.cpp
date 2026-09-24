@@ -608,26 +608,8 @@ void WebConsole::handleMqttGet(AsyncWebServerRequest *request) {
     if (!requireAdmin(request, nullptr)) {
         return;
     }
-    GlobalSettings *settings = settingsManager->getSettings();
     String json = "{";
-    json += "\"enabled\":";
-    json += settings->mqtt.enabled ? "true" : "false";
-    json += ",\"server\":\"";
-    appendJsonEscaped(json, settings->mqtt.server, sizeof(settings->mqtt.server));
-    json += "\",\"port\":";
-    json += String(settings->mqtt.port);
-    json += ",\"username\":\"";
-    appendJsonEscaped(json, settings->mqtt.username, sizeof(settings->mqtt.username));
-    json += "\",\"password\":\"";
-    appendJsonEscaped(json, settings->mqtt.password, sizeof(settings->mqtt.password));
-    json += "\",\"clientId\":\"";
-    appendJsonEscaped(json, settings->mqtt.clientId, sizeof(settings->mqtt.clientId));
-    json += "\",\"baseTopic\":\"";
-    appendJsonEscaped(json, settings->mqtt.baseTopic, sizeof(settings->mqtt.baseTopic));
-    json += "\",\"reconnectIntervalMs\":";
-    json += String((long)settings->mqtt.reconnectIntervalMs);
-    json += ",\"clientTimeoutMs\":";
-    json += String(settings->mqtt.clientTimeoutMs);
+    appendMqttSettingsJson(json);
     json += "}";
     AsyncWebServerResponse *response = request->beginResponse(200, "application/json", json);
     response->addHeader("Cache-Control", "no-store");
@@ -638,63 +620,11 @@ void WebConsole::handleMqttPost(AsyncWebServerRequest *request) {
     if (!requireAdmin(request, nullptr)) {
         return;
     }
-    String server;
-    String username;
-    String password;
-    String clientId;
-    String baseTopic;
-    int port = DEFAULT_MQTT_PORT;
-    int reconnectIntervalMs = DEFAULT_MQTT_RECONNECT_MS;
-    int clientTimeoutMs = DEFAULT_MQTT_CLIENT_TIMEOUT_MS;
-    bool enabled = true;
-
-    const bool haveServer = extractJsonString(requestBody.c_str(), "server", server);
-    const bool haveClientId = extractJsonString(requestBody.c_str(), "clientId", clientId);
-    const bool haveBaseTopic = extractJsonString(requestBody.c_str(), "baseTopic", baseTopic);
-    extractJsonString(requestBody.c_str(), "username", username);
-    extractJsonString(requestBody.c_str(), "password", password);
-    extractJsonBool(requestBody.c_str(), "enabled", enabled);
-    extractJsonInt(requestBody.c_str(), "port", port);
-    extractJsonInt(requestBody.c_str(), "reconnectIntervalMs", reconnectIntervalMs);
-    extractJsonInt(requestBody.c_str(), "clientTimeoutMs", clientTimeoutMs);
-
-    if (!haveServer || !haveClientId || !haveBaseTopic) {
-        request->send(400, "text/plain", "Need server, clientId, baseTopic");
+    String errorText;
+    if (!applyMqttJson(requestBody.c_str(), &errorText)) {
+        request->send(400, "text/plain", errorText.length() > 0 ? errorText : "Need mqtt settings");
         return;
     }
-    if (server.length() == 0) {
-        server = DEFAULT_MQTT_SERVER;
-    }
-    if (clientId.length() == 0) {
-        clientId = DEFAULT_MQTT_CLIENT_ID;
-    }
-    if (baseTopic.length() == 0) {
-        baseTopic = DEFAULT_MQTT_BASE_TOPIC;
-    }
-    if (port < 1 || port > 65535) {
-        request->send(400, "text/plain", "port must be 1-65535");
-        return;
-    }
-    if (reconnectIntervalMs < 500) {
-        reconnectIntervalMs = DEFAULT_MQTT_RECONNECT_MS;
-    }
-    SettingsManager::clampMqttClientTimeout(clientTimeoutMs);
-
-    GlobalSettings *settings = settingsManager->getSettings();
-    strncpy(settings->mqtt.server, server.c_str(), sizeof(settings->mqtt.server) - 1);
-    settings->mqtt.server[sizeof(settings->mqtt.server) - 1] = '\0';
-    settings->mqtt.port = port;
-    settings->mqtt.reconnectIntervalMs = reconnectIntervalMs;
-    settings->mqtt.clientTimeoutMs = clientTimeoutMs;
-    settings->mqtt.enabled = enabled;
-    strncpy(settings->mqtt.username, username.c_str(), sizeof(settings->mqtt.username) - 1);
-    settings->mqtt.username[sizeof(settings->mqtt.username) - 1] = '\0';
-    strncpy(settings->mqtt.password, password.c_str(), sizeof(settings->mqtt.password) - 1);
-    settings->mqtt.password[sizeof(settings->mqtt.password) - 1] = '\0';
-    strncpy(settings->mqtt.clientId, clientId.c_str(), sizeof(settings->mqtt.clientId) - 1);
-    settings->mqtt.clientId[sizeof(settings->mqtt.clientId) - 1] = '\0';
-    strncpy(settings->mqtt.baseTopic, baseTopic.c_str(), sizeof(settings->mqtt.baseTopic) - 1);
-    settings->mqtt.baseTopic[sizeof(settings->mqtt.baseTopic) - 1] = '\0';
     settingsManager->saveMain(true);
     request->send(200, "text/plain", "Saved. Device will restart to apply MQTT.");
 }
@@ -820,30 +750,79 @@ void WebConsole::handleHardwarePost(AsyncWebServerRequest *request) {
     request->send(200, "text/plain", "Saved. SPI speed is active now.");
 }
 
+void WebConsole::appendMqttSettingsJson(String &json) {
+    GlobalSettings *settings = settingsManager->getSettings();
+    json += "\"serverType\":\"";
+    json += mqttServerTypeName(settings->mqtt.serverType);
+    json += "\",\"server\":\"";
+    appendJsonEscaped(json, settings->mqtt.server, sizeof(settings->mqtt.server));
+    json += "\",\"port\":";
+    json += String(settings->mqtt.port);
+    json += ",\"username\":\"";
+    appendJsonEscaped(json, settings->mqtt.username, sizeof(settings->mqtt.username));
+    json += "\",\"password\":\"";
+    appendJsonEscaped(json, settings->mqtt.password, sizeof(settings->mqtt.password));
+    json += "\",\"clientId\":\"";
+    appendJsonEscaped(json, settings->mqtt.clientId, sizeof(settings->mqtt.clientId));
+    json += "\",\"baseTopic\":\"";
+    appendJsonEscaped(json, settings->mqtt.baseTopic, sizeof(settings->mqtt.baseTopic));
+    json += "\",\"reconnectIntervalMs\":";
+    json += String((long)settings->mqtt.reconnectIntervalMs);
+    json += ",\"clientTimeoutMs\":";
+    json += String(settings->mqtt.clientTimeoutMs);
+}
+
 bool WebConsole::applyMqttJson(const char *json, String *errorText) {
     String server;
     String username;
     String password;
     String clientId;
     String baseTopic;
+    String serverTypeText;
     int port = DEFAULT_MQTT_PORT;
     int reconnectIntervalMs = DEFAULT_MQTT_RECONNECT_MS;
     int clientTimeoutMs = DEFAULT_MQTT_CLIENT_TIMEOUT_MS;
-    bool enabled = true;
+    bool enabledLegacy = false;
+    MqttServerType serverType = MqttServerTypeDisable;
+    const bool haveServerType = extractJsonString(json, "serverType", serverTypeText);
+    const bool haveEnabled = extractJsonBool(json, "enabled", enabledLegacy);
     const bool haveServer = extractJsonString(json, "server", server);
     const bool haveClientId = extractJsonString(json, "clientId", clientId);
     const bool haveBaseTopic = extractJsonString(json, "baseTopic", baseTopic);
     extractJsonString(json, "username", username);
     extractJsonString(json, "password", password);
-    extractJsonBool(json, "enabled", enabled);
     extractJsonInt(json, "port", port);
     extractJsonInt(json, "reconnectIntervalMs", reconnectIntervalMs);
     extractJsonInt(json, "clientTimeoutMs", clientTimeoutMs);
-    if (!haveServer || !haveClientId || !haveBaseTopic) {
+    if (haveServerType) {
+        if (!parseMqttServerType(serverTypeText.c_str(), serverType)) {
+            if (errorText != nullptr) {
+                *errorText = "serverType must be disable, remote, or local";
+            }
+            return false;
+        }
+    } else if (haveEnabled) {
+        serverType = enabledLegacy ? MqttServerTypeRemote : MqttServerTypeDisable;
+    } else {
+        if (errorText != nullptr) {
+            *errorText = "Need mqtt serverType";
+        }
+        return false;
+    }
+    if (!haveClientId || !haveBaseTopic) {
+        if (errorText != nullptr) {
+            *errorText = "Need mqtt clientId, baseTopic";
+        }
+        return false;
+    }
+    if (serverType != MqttServerTypeLocal && !haveServer) {
         if (errorText != nullptr) {
             *errorText = "Need mqtt server, clientId, baseTopic";
         }
         return false;
+    }
+    if (!haveServer) {
+        server = String(settingsManager->getSettings()->mqtt.server);
     }
     if (server.length() == 0) {
         server = DEFAULT_MQTT_SERVER;
@@ -870,7 +849,7 @@ bool WebConsole::applyMqttJson(const char *json, String *errorText) {
     settings->mqtt.port = port;
     settings->mqtt.reconnectIntervalMs = reconnectIntervalMs;
     settings->mqtt.clientTimeoutMs = clientTimeoutMs;
-    settings->mqtt.enabled = enabled;
+    settings->mqtt.serverType = serverType;
     strncpy(settings->mqtt.username, username.c_str(), sizeof(settings->mqtt.username) - 1);
     settings->mqtt.username[sizeof(settings->mqtt.username) - 1] = '\0';
     strncpy(settings->mqtt.password, password.c_str(), sizeof(settings->mqtt.password) - 1);
@@ -942,24 +921,7 @@ void WebConsole::handleSettingsExportGet(AsyncWebServerRequest *request) {
     json += "\"version\":\"";
     json += FIRMWARE_VERSION;
     json += "\",\"mqtt\":{";
-    json += "\"enabled\":";
-    json += settings->mqtt.enabled ? "true" : "false";
-    json += ",\"server\":\"";
-    appendJsonEscaped(json, settings->mqtt.server, sizeof(settings->mqtt.server));
-    json += "\",\"port\":";
-    json += String(settings->mqtt.port);
-    json += ",\"username\":\"";
-    appendJsonEscaped(json, settings->mqtt.username, sizeof(settings->mqtt.username));
-    json += "\",\"password\":\"";
-    appendJsonEscaped(json, settings->mqtt.password, sizeof(settings->mqtt.password));
-    json += "\",\"clientId\":\"";
-    appendJsonEscaped(json, settings->mqtt.clientId, sizeof(settings->mqtt.clientId));
-    json += "\",\"baseTopic\":\"";
-    appendJsonEscaped(json, settings->mqtt.baseTopic, sizeof(settings->mqtt.baseTopic));
-    json += "\",\"reconnectIntervalMs\":";
-    json += String((long)settings->mqtt.reconnectIntervalMs);
-    json += ",\"clientTimeoutMs\":";
-    json += String(settings->mqtt.clientTimeoutMs);
+    appendMqttSettingsJson(json);
     json += "},\"zigbee\":{";
     json += "\"channel\":";
     json += String(settings->zigbee.channel);

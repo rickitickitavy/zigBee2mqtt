@@ -9,6 +9,7 @@ public:
     void setBootHeld(bool enabled);
     void setPairingHeld(bool enabled);
     void setMqttConnected(bool enabled);
+    void setMqttBrokerListening(bool enabled);
     void setReadyGreen(bool enabled);
     void pulseMqttCommandReceived();
     void pulseMqttPublished();
@@ -32,6 +33,7 @@ private:
     volatile bool pairingHeld = false;
     volatile bool pairingPhaseOn = false;
     volatile bool mqttConnected = false;
+    volatile bool mqttBrokerListening = false;
     volatile bool readyGreen = false;
     volatile bool pulseActive[kLedCount] = {false, false, false, false};
     volatile unsigned long pulseUntilMs[kLedCount] = {0, 0, 0, 0};

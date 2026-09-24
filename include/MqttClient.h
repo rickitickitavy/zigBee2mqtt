@@ -5,6 +5,8 @@
 #include "SettingsManager.h"
 #include "DeviceTopicMap.h"
 
+class MqttBroker;
+
 class MqttClient {
 public:
     using MessageFn = void (*)(const char *topic, const char *payload);
@@ -13,6 +15,7 @@ public:
     ~MqttClient();
 
     void setMessageHandler(MessageFn handler);
+    void setLocalBroker(MqttBroker *broker);
     void begin(void (*rawCallback)(char *topic, byte *payload, unsigned int length));
     void onMessage(char *topic, byte *payload, unsigned int length);
     void dispatch(bool staConnected);
@@ -27,6 +30,8 @@ public:
 private:
     SettingsManager *settingsManager;
     DeviceTopicMap *topicMap;
+    MqttBroker *localBroker = nullptr;
+    bool localAttached = false;
     WiFiClient wifiClient;
     PubSubClient *client;
     MessageFn messageHandler = nullptr;
@@ -42,6 +47,9 @@ private:
     char subscribedCommandTopics[kMaxCommandSubscriptions][64];
 
     void rebuildTopics();
+    bool usesLocalBroker() const;
+    void attachLocalBroker();
+    void applyRemoteBrokerTarget();
     void reconnect();
     void subscribeBridge();
     void clearCommandSubscriptions();
