@@ -57,6 +57,7 @@ public:
     int slotIndex(const DeviceTopicEntry *entry) const;
     DeviceTopicEntry *slotAt(int index);
     int usedCount() const;
+    int uniqueMqttTopicCount() const;
     int nextUsedIndex(int startIndex) const;
 
     String formatIeee(const uint8_t ieee[8]);

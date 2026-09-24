@@ -16,4 +16,4 @@ Enforce the same rule in the UI (hide) and on the host (401/403). `isAdmin` has 
 
 ## Consequences
 
-Propose and apply update this ADR when a role is added. Specs list the chosen role.
+Propose and apply update this ADR when a role is added. Specs list the chosen role. At least one unlocked `isAdmin` must remain after every users-table write; see `0010`.

@@ -368,6 +368,36 @@ static String hostGatewayStatusJson() {
             slotIndex = topicMap->nextUsedIndex(slotIndex + 1);
         }
     }
+    const GlobalSettings *globalSettings = settingsManager != nullptr ? settingsManager->getSettings() : nullptr;
+    const char *mqttLocalStatus = "unused";
+    int mqttTopicCount = topicMap != nullptr ? topicMap->uniqueMqttTopicCount() : 0;
+    int mqttConnectionCount = 0;
+    if (globalSettings != nullptr && globalSettings->mqtt.serverType == MqttServerTypeLocal) {
+        if (mqttBroker != nullptr && mqttBroker->isListening()) {
+            mqttLocalStatus = "listening";
+            mqttConnectionCount = mqttBroker->connectionCount();
+            if (mqttClient != nullptr && mqttClient->isConnected()) {
+                mqttConnectionCount++;
+            }
+        } else {
+            mqttLocalStatus = "down";
+        }
+    } else if (mqttClient != nullptr && mqttClient->isConnected()) {
+        mqttConnectionCount = 1;
+    }
+
+    const char *wifiModeText = "AP";
+    wifi_mode_t radioMode = WiFi.getMode();
+    if (radioMode == WIFI_AP_STA) {
+        wifiModeText = "AP+STA";
+    } else if (radioMode == WIFI_STA) {
+        wifiModeText = "STA";
+    } else if (radioMode == WIFI_AP) {
+        wifiModeText = "AP";
+    }
+    const char *wifiBssid = globalSettings != nullptr ? globalSettings->wifi.bssid : "";
+    const bool staHasRssi = wifiController != nullptr && wifiController->isStaConnected();
+
     String json = "{\"devices\":";
     json += String(registeredCount);
     json += ",\"online\":";
@@ -386,6 +416,22 @@ static String hostGatewayStatusJson() {
     json += ZIGBEE_SPI_PROXY.pairingActive() ? "true" : "false";
     json += ",\"onlineSec\":";
     json += String((unsigned long)(millis() / 1000UL));
+    json += ",\"mqttLocalStatus\":\"";
+    json += mqttLocalStatus;
+    json += "\",\"mqttTopicCount\":";
+    json += String(mqttTopicCount);
+    json += ",\"mqttConnectionCount\":";
+    json += String(mqttConnectionCount);
+    json += ",\"wifiMode\":\"";
+    json += wifiModeText;
+    json += "\",\"wifiBssid\":\"";
+    appendJsonEscaped(json, wifiBssid, 64);
+    json += "\",\"wifiRssiDbm\":";
+    if (staHasRssi) {
+        json += String((int)WiFi.RSSI());
+    } else {
+        json += "null";
+    }
     json += "}";
     return json;
 }

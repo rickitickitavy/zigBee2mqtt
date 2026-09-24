@@ -27,7 +27,8 @@ enum UserWriteResult {
     UserWriteDuplicate,
     UserWriteFull,
     UserWriteBadName,
-    UserWriteNeedPassword
+    UserWriteNeedPassword,
+    UserWriteLastAdmin
 };
 
 enum UserChangeKind {
@@ -117,6 +118,7 @@ private:
     void afterMutation(UserChangeKind kind, const UserRecord *user);
     bool parseUsersJson(const String &json, bool requireHashes);
     int adminCount() const;
+    int unlockedAdminCount() const;
     static void bytesToHex(const uint8_t *bytes, size_t length, char *hex);
     static bool hexToBytes(const char *hex, uint8_t *bytes, size_t length);
     static void hashPassword(const uint8_t *salt, const char *password, uint8_t *hashOut);
