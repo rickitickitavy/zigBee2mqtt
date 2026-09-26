@@ -8,22 +8,21 @@ This is not a port of the Node.js Zigbee2MQTT converter database.
 
 - Use the **native USB-C** port on the DevKit (USB Serial/JTAG CDC).
 - ESP32-C6 does **not** implement S2/S3-style USB OTG host/HID. CDC is for flash, monitor, and the USB CLI.
-- Hold **BOOT (GPIO9)** LOW at reset on the **host** to force AP for that boot (does not change stored MODE). GPIO8 is the onboard RGB and works **together** with LED1–LED4 (not as a replacement).
+- Hold **BOOT (GPIO9)** LOW at reset on the **host** to force AP for that boot (does not change stored MODE). GPIO8 onboard RGB is unused for status.
 - **GPIO15** is a C6 strapping pin: hold host to **GND** and slave to **3.3 V** through reset.
 
-### Status LEDs (RGB + four reds, together)
+### Status LEDs (six reds)
 
-Onboard WS2812 is GPIO8. External red LEDs (GPIO HIGH = on): LED1 GPIO18, LED2 GPIO19, LED3 GPIO20, LED4 GPIO21. RGB and the discrete LEDs run together. Host **LED3 and LED4 are unused.**
+External red LEDs (GPIO HIGH = on): LED1 GPIO18, LED2 GPIO19, LED3 GPIO20, LED4 GPIO21, LED5 GPIO2, LED6 GPIO3. Host **LED3** and **LED6** stay off.
 
 | Indicator | Host | Slave |
 |-----------|------|--------|
 | LED1 | 0.1 s: MQTT device command received | 0.1 s: packet from an **unknown** device |
 | LED2 | 0.1 s: MQTT device state published | 0.1 s: packet from a **known** device |
 | LED3 | Unused | 0.1 s: radio ACK that our command was delivered |
-| LED4 | Unused | 0.1 s: **only** command actually sent on the radio |
-| RGB red | Boot, and lost/unhealthy slave SPI link | Boot and critical error |
-| RGB green | On while MQTT is connected | On when the chip is ready (off while boot/critical red) |
-| RGB blue | — | Blinks while pairing/join is open |
+| LED4 | On while the local MQTT broker is listening | 0.1 s: **only** command actually sent on the radio |
+| LED5 | Solid while MQTT is connected; blinks (0.25 s) for boot or lost slave | Solid when ready; blinks (0.25 s) for boot/critical |
+| LED6 | Unused | Blinks while pairing/join is open |
 
 ### Two-board wiring (3.3 V, common GND)
 

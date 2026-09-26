@@ -1,19 +1,4 @@
-# status-rgb-led Specification
-
-## Purpose
-
-Gives each board six external red LEDs (GPIO18–21, GPIO2, GPIO3). The onboard WS2812 is unused. Host LED5 is solid while MQTT is connected and blinks (0.25 s) for boot/critical. Host LED4 is on while the local MQTT broker is listening. Slave LED5 is solid when ready and blinks (0.25 s) for boot/critical. Slave pairing blinks LED6. Host LED6 stays off.
-
-## Requirements
-
-### Requirement: RGB and LED1–LED4 work together
-
-Each chip SHALL drive LED1 on GPIO18, LED2 on GPIO19, LED3 on GPIO20, LED4 on GPIO21, LED5 on GPIO2, and LED6 on GPIO3. Host LED3 and host LED6 SHALL stay off. Host LED4 SHALL stay on while the local MQTT broker is listening. Host LED5 SHALL mean MQTT connected (solid) or boot/critical (blink). Slave LED5 SHALL mean ready with no fault (solid) or boot/critical (blink). A HIGH GPIO level SHALL light each external LED. The onboard WS2812 SHALL NOT be used.
-
-#### Scenario: Pins
-
-- **WHEN** status indication is shown
-- **THEN** host uses LED1, LED2, LED4, and LED5; slave uses LED1–LED6
+## ADDED Requirements
 
 ### Requirement: Onboard RGB is unused
 
@@ -23,6 +8,17 @@ Each chip SHALL NOT drive the onboard WS2812 for status. Status SHALL use only L
 
 - **WHEN** the chip is booting, ready, pairing, connected to MQTT, or in a critical error
 - **THEN** the onboard RGB LED is not used for that indication
+
+## MODIFIED Requirements
+
+### Requirement: RGB and LED1–LED4 work together
+
+Each chip SHALL drive LED1 on GPIO18, LED2 on GPIO19, LED3 on GPIO20, LED4 on GPIO21, LED5 on GPIO2, and LED6 on GPIO3. Host LED3 and host LED6 SHALL stay off. Host LED4 SHALL stay on while the local MQTT broker is listening. Host LED5 SHALL mean MQTT connected (solid) or boot/critical (blink). Slave LED5 SHALL mean ready with no fault (solid) or boot/critical (blink). A HIGH GPIO level SHALL light each external LED. The onboard WS2812 SHALL NOT be used.
+
+#### Scenario: Pins
+
+- **WHEN** status indication is shown
+- **THEN** host uses LED1, LED2, LED4, and LED5; slave uses LED1–LED6
 
 ### Requirement: RGB red while that chip is booting or in a critical error
 
