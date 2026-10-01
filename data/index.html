@@ -1670,36 +1670,6 @@
             }, 500);
         }
 
-        function uploadFilesystem() {
-            var fileInput = document.getElementById("updateDataFile");
-            var progressBar = document.getElementById("updateDataProgress");
-            var statusLine = document.getElementById("updateDataStatus");
-            if (!fileInput.files || fileInput.files.length == 0) {
-                statusLine.textContent = "Choose a LittleFS image first (pio run -t buildfs).";
-                return;
-            }
-            var formData = new FormData();
-            formData.append("filesystem", fileInput.files[0], fileInput.files[0].name);
-            var xhr = new XMLHttpRequest();
-            xhr.open("POST", "/update/data", true);
-            progressBar.hidden = false;
-            progressBar.value = 0;
-            xhr.upload.onprogress = function (event) {
-                if (event.lengthComputable) {
-                    progressBar.value = (event.loaded / event.total) * 100;
-                }
-            };
-            xhr.onload = function () {
-                statusLine.textContent = xhr.status === 200
-                    ? (xhr.responseText || "Filesystem written. Device will restart.")
-                    : (xhr.responseText || ("Filesystem update failed (HTTP " + xhr.status + ")"));
-            };
-            xhr.onerror = function () {
-                statusLine.textContent = "Filesystem update failed (network error)";
-            };
-            xhr.send(formData);
-        }
-
         var foundPollTimer = null;
         var devicesPollTimer = null;
         var pairingPollTimer = null;
@@ -3554,18 +3524,10 @@
                     <div class="upload-card">
                         <h3 class="upload-title">Code (firmware)</h3>
                         <p class="field-hint">Running version: <span id="firmwareVersion">—</span></p>
-                        <p class="field-hint">PlatformIO: <code>.pio/build/esp32-c6-devkitc-1/firmware.bin</code></p>
+                        <p class="field-hint">Web console HTML/CSS ships inside this firmware image. PlatformIO: <code>.pio/build/esp32-c6-devkitc-1/firmware.bin</code></p>
                         <input id="updateCodeFile" type="file" accept=".bin,application/octet-stream">
                         <p id="updateCodeStatus" class="upload-status"></p>
                         <button type="button" class="btn btn-primary btn-inline" onclick="uploadFirmware()">Upload firmware</button>
-                    </div>
-                    <div class="upload-card">
-                        <h3 class="upload-title">Filesystem (LittleFS)</h3>
-                        <p class="field-hint">Web UI files. PlatformIO: <code>pio run -t buildfs</code> then upload <code>.pio/build/esp32-c6-devkitc-1/littlefs.bin</code></p>
-                        <input id="updateDataFile" type="file" accept=".bin,application/octet-stream">
-                        <progress id="updateDataProgress" class="progress-bar" max="100" value="0" hidden></progress>
-                        <p id="updateDataStatus" class="upload-status"></p>
-                        <button type="button" class="btn btn-primary btn-inline" onclick="uploadFilesystem()">Upload filesystem</button>
                     </div>
                 </div>
                 <div id="system-tab-hardware" class="system-tab-panel tab-panel" role="tabpanel">
