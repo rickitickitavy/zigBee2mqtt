@@ -42,7 +42,9 @@ Host→slave uses CS + SCK + MOSI (no IRQ). Slave→host (Zigbee events and logs
 
 1. Install the PlatformIO plugin.
 2. Open this folder. `pio project init --ide clion` generates CMake files if they are missing.
-3. Build: `pio run`. Upload: `pio run -t upload`. Filesystem (web UI): `pio run -t uploadfs`. Monitor: `pio device monitor` (115200).
+3. Build: `pio run`. Upload: `pio run -t upload`. Monitor: `pio device monitor` (115200).
+
+A pre-build script gzips `data/index.html` and `data/css/all.css` into the firmware image, so a separate filesystem flash is not required for the web console.
 
 First Zigbee flash: erase recommended so `zb_storage` is clean:
 
@@ -65,9 +67,9 @@ save
 
 ## Web console
 
-With AP or STA up, open `http://192.168.0.1/` (AP) or `http://<sta-ip>/`. There is **no HTTP password**. Firmware upload on **System → Update** is unauthenticated; recover with USB flash if needed.
+With AP or STA up, open `http://192.168.0.1/` (AP) or `http://<sta-ip>/`. Sign in with a console user (default seed `admin` / `admin` when the user store is empty). Firmware upload on **System → Update** requires an admin session; recover with USB flash if needed.
 
-Flash `data/` after firmware so `/index.html` and `/css/all.css` exist (`pio run -t uploadfs`). Firmware-only flash still serves a short “filesystem missing” page.
+Firmware-only flash is enough for the console: HTML/CSS are embedded in `firmware.bin`. LittleFS remains for OTA staging and other non-UI data — do not use `uploadfs` to refresh the web UI.
 
 Wi-Fi group (also the **WiFi** sidebar form):
 

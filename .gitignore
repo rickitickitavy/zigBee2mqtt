@@ -1,5 +1,6 @@
 .pio
 .idea/
+include/generated/EmbeddedWebAssets.h
 cmake-build-*/
 .clangd
 compile_commands.json

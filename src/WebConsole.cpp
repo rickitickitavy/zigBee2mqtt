@@ -5,15 +5,11 @@
 #include "ZigbeeDeviceType.h"
 #include "FirmwareOta.h"
 #include "UserStore.h"
+#include "generated/EmbeddedWebAssets.h"
 
-#include <LittleFS.h>
 #include <Update.h>
 #include <IPAddress.h>
 #include <string.h>
-
-static const char kMissingFsPage[] PROGMEM =
-    "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>z2m-gateway</title></head>"
-    "<body><p>LittleFS web files are missing. Flash the filesystem: <code>pio run -t uploadfs</code></p></body></html>";
 
 WebConsole::WebConsole(SettingsManager *settingsManager, UserStore *userStore)
     : settingsManager(settingsManager), userStore(userStore), server(80) {}
@@ -21,7 +17,19 @@ WebConsole::WebConsole(SettingsManager *settingsManager, UserStore *userStore)
 void WebConsole::begin() {
     server.on("/", HTTP_GET, [this](AsyncWebServerRequest *request) { handleRoot(request); });
     server.on("/index.html", HTTP_GET, [this](AsyncWebServerRequest *request) { handleRoot(request); });
-    server.serveStatic("/css", LittleFS, "/css");
+    server.on("/css/all.css", HTTP_GET, [this](AsyncWebServerRequest *request) {
+        AsyncWebServerResponse *response = request->beginResponse(
+            200,
+            kEmbeddedAllCssGzMime,
+            kEmbeddedAllCssGz,
+            kEmbeddedAllCssGzLen
+        );
+        if (kEmbeddedWebAssetsGzip) {
+            response->addHeader("Content-Encoding", "gzip");
+        }
+        response->addHeader("Cache-Control", "no-store");
+        request->send(response);
+    });
 
     server.on(
         "/api/auth/login",
@@ -246,27 +254,6 @@ void WebConsole::begin() {
         ) { handleOtaUpload(request, filename, index, data, len, final, U_FLASH); }
     );
 
-    server.on(
-        "/update/data",
-        HTTP_POST,
-        [this](AsyncWebServerRequest *request) { handleOtaDone(request); },
-        [this](
-            AsyncWebServerRequest *request,
-            const String &filename,
-            size_t index,
-            uint8_t *data,
-            size_t len,
-            bool final
-        ) {
-#ifdef U_FS
-            const int filesystemCommand = U_FS;
-#else
-            const int filesystemCommand = U_SPIFFS;
-#endif
-            handleOtaUpload(request, filename, index, data, len, final, filesystemCommand);
-        }
-    );
-
     server.begin();
     LOGGER.info("Web console on port 80");
 }
@@ -280,13 +267,17 @@ void WebConsole::rebind() {
 }
 
 void WebConsole::handleRoot(AsyncWebServerRequest *request) {
-    if (LittleFS.exists("/index.html")) {
-        AsyncWebServerResponse *response = request->beginResponse(LittleFS, "/index.html", "text/html");
-        response->addHeader("Cache-Control", "no-store");
-        request->send(response);
-        return;
+    AsyncWebServerResponse *response = request->beginResponse(
+        200,
+        kEmbeddedIndexHtmlGzMime,
+        kEmbeddedIndexHtmlGz,
+        kEmbeddedIndexHtmlGzLen
+    );
+    if (kEmbeddedWebAssetsGzip) {
+        response->addHeader("Content-Encoding", "gzip");
     }
-    request->send(200, "text/html", kMissingFsPage);
+    response->addHeader("Cache-Control", "no-store");
+    request->send(response);
 }
 
 const UserRecord *WebConsole::authenticatedUser(AsyncWebServerRequest *request) {
@@ -1384,6 +1375,7 @@ void WebConsole::handleOtaUpload(
     int command
 ) {
     (void)filename;
+    (void)command;
     if (index == 0) {
         const UserRecord *user = authenticatedUser(request);
         if (user == nullptr || !user->isAdmin) {
@@ -1392,16 +1384,10 @@ void WebConsole::handleOtaUpload(
         }
         otaStarted = true;
         otaFailed = false;
-        otaCommand = command;
-        LOGGER.info(command == U_FLASH ? "HTTP OTA firmware start" : "HTTP OTA filesystem start");
-        if (command == U_FLASH) {
-            const size_t contentLength = request != nullptr ? request->contentLength() : 0;
-            if (!FIRMWARE_OTA.beginStaging(contentLength)) {
-                otaFailed = true;
-                return;
-            }
-        } else if (!Update.begin(UPDATE_SIZE_UNKNOWN, command)) {
-            LOGGER.error("HTTP OTA begin failed");
+        otaCommand = U_FLASH;
+        LOGGER.info("HTTP OTA firmware start");
+        const size_t contentLength = request != nullptr ? request->contentLength() : 0;
+        if (!FIRMWARE_OTA.beginStaging(contentLength)) {
             otaFailed = true;
             return;
         }
@@ -1409,25 +1395,11 @@ void WebConsole::handleOtaUpload(
     if (otaFailed) {
         return;
     }
-    if (otaCommand == U_FLASH) {
-        if (!FIRMWARE_OTA.writeStaging(data, len)) {
-            otaFailed = true;
-        }
-        if (final && !otaFailed && !FIRMWARE_OTA.finishStaging()) {
-            otaFailed = true;
-        }
-        return;
-    }
-    if (len > 0 && Update.write(data, len) != len) {
-        LOGGER.error("HTTP OTA write failed");
+    if (!FIRMWARE_OTA.writeStaging(data, len)) {
         otaFailed = true;
-        return;
     }
-    if (final) {
-        if (!Update.end(true)) {
-            LOGGER.error("HTTP OTA end failed");
-            otaFailed = true;
-        }
+    if (final && !otaFailed && !FIRMWARE_OTA.finishStaging()) {
+        otaFailed = true;
     }
 }
 
@@ -1435,34 +1407,18 @@ void WebConsole::handleOtaDone(AsyncWebServerRequest *request) {
     if (!requireAdmin(request, nullptr)) {
         return;
     }
-    if (otaCommand == U_FLASH) {
-        if (!otaStarted || otaFailed || FIRMWARE_OTA.phase() != FirmwareOta::Phase::Slave) {
-            String errorMessage = "Upload failed";
-            if (FIRMWARE_OTA.phase() == FirmwareOta::Phase::Failed) {
-                errorMessage = FIRMWARE_OTA.statusJson();
-            }
-            LOGGER.error("HTTP firmware staging failed");
-            FIRMWARE_OTA.abortStaging();
-            otaStarted = false;
-            otaFailed = false;
-            request->send(500, "text/plain", errorMessage);
-            return;
+    if (!otaStarted || otaFailed || FIRMWARE_OTA.phase() != FirmwareOta::Phase::Slave) {
+        String errorMessage = "Upload failed";
+        if (FIRMWARE_OTA.phase() == FirmwareOta::Phase::Failed) {
+            errorMessage = FIRMWARE_OTA.statusJson();
         }
-        otaStarted = false;
-        request->send(200, "text/plain", "Firmware stored. Updating slave, then host.");
-        return;
-    }
-    if (!otaStarted || otaFailed || Update.hasError()) {
-        String errorMessage = Update.hasError() ? String(Update.errorString()) : String("Upload failed");
-        LOGGER.error("HTTP OTA failed: " + errorMessage);
-        Update.abort();
+        LOGGER.error("HTTP firmware staging failed");
+        FIRMWARE_OTA.abortStaging();
         otaStarted = false;
         otaFailed = false;
         request->send(500, "text/plain", errorMessage);
         return;
     }
-    LOGGER.info("HTTP OTA filesystem finished");
     otaStarted = false;
-    request->send(200, "text/plain", "Filesystem written. Device will restart.");
-    settingsManager->requestRestart();
+    request->send(200, "text/plain", "Firmware stored. Updating slave, then host.");
 }
