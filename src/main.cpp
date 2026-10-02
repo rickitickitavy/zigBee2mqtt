@@ -1286,8 +1286,10 @@ void loop() {
         if (FIRMWARE_OTA.consumeHostRestart()) {
             settingsManager->requestRestart();
         }
+        STATUS_RGB.setUpdateHeld(FIRMWARE_OTA.busy());
         if (FIRMWARE_OTA.isUpdatingSlave()) {
             wifiController->update();
+            STATUS_RGB.service();
             delay(0);
             return;
         }
