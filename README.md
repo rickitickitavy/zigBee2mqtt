@@ -13,7 +13,7 @@ This is not a port of the Node.js Zigbee2MQTT converter database.
 
 ### Status LEDs (six reds)
 
-External red LEDs (GPIO HIGH = on): LED1 GPIO18, LED2 GPIO19, LED3 GPIO20, LED4 GPIO21, LED5 GPIO2, LED6 GPIO3. Host **LED3** and **LED6** stay off.
+External red LEDs (GPIO HIGH = on): LED1 GPIO18, LED2 GPIO19, LED3 GPIO20, LED4 GPIO21, LED5 GPIO2, LED6 GPIO3. Host **LED3** stays off.
 
 | Indicator | Host | Slave |
 |-----------|------|--------|
@@ -21,8 +21,8 @@ External red LEDs (GPIO HIGH = on): LED1 GPIO18, LED2 GPIO19, LED3 GPIO20, LED4 
 | LED2 | 0.1 s: MQTT device state published | 0.1 s: packet from a **known** device |
 | LED3 | Unused | 0.1 s: radio ACK that our command was delivered |
 | LED4 | On while the local MQTT broker is listening | 0.1 s: **only** command actually sent on the radio |
-| LED5 | Solid while MQTT is connected; blinks (0.25 s) for boot or lost slave | Solid when ready; blinks (0.25 s) for boot/critical |
-| LED6 | Unused | Blinks while pairing/join is open |
+| LED5 | Solid while MQTT is connected; blinks (0.25 s) for boot only (not errors) | Solid when ready; blinks (0.25 s) for boot/critical |
+| LED6 | Solid for critical (e.g. lost slave); 10 Hz blink while firmware update is busy | Blinks while pairing/join is open |
 
 ### Two-board wiring (3.3 V, common GND)
 

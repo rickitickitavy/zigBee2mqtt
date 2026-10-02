@@ -110,7 +110,7 @@ bool InterChipHost::isNormal() const {
 }
 
 bool InterChipHost::isLinkHealthy() const {
-    return state == HostBringupNormal && pingTimeouts == 0;
+    return state == HostBringupNormal && pingTimeouts < 3;
 }
 
 HostBringupState InterChipHost::bringupState() const {
@@ -241,6 +241,9 @@ bool InterChipHost::enqueueInternal(
 void InterChipHost::enterReset() {
     if (FIRMWARE_OTA.isUpdatingSlave()) {
         LOGGER.warning("Skipping slave reset during firmware OTA");
+        return;
+    }
+    if (state == HostBringupReset && resetAsserting) {
         return;
     }
     state = HostBringupReset;

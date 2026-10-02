@@ -7,6 +7,7 @@ public:
     void begin();
     void setCritical(bool enabled);
     void setBootHeld(bool enabled);
+    void setUpdateHeld(bool enabled);
     void setPairingHeld(bool enabled);
     void setMqttConnected(bool enabled);
     void setMqttBrokerListening(bool enabled);
@@ -26,6 +27,7 @@ private:
     static constexpr int kPulseLedCount = 4;
     static constexpr unsigned long kPulseMs = 100UL;
     static constexpr unsigned long kFaultBlinkHalfMs = 125UL;
+    static constexpr unsigned long kUpdateBlinkHalfMs = 50UL;
     static constexpr uint8_t kLedOnLevel = HIGH;
     static constexpr uint8_t kLedOffLevel = LOW;
     static constexpr int kLed5Index = 4;
@@ -33,6 +35,7 @@ private:
 
     volatile bool criticalHeld = false;
     volatile bool bootHeld = false;
+    volatile bool updateHeld = false;
     volatile bool pairingHeld = false;
     volatile bool pairingPhaseOn = false;
     volatile bool mqttConnected = false;
@@ -45,9 +48,12 @@ private:
     bool hostRole = true;
     bool faultBlinkOn = true;
     unsigned long faultBlinkToggleMs = 0;
+    bool updateBlinkOn = true;
+    unsigned long updateBlinkToggleMs = 0;
 
     bool allowsActivityPulse() const;
-    bool faultHeld() const;
+    bool slaveFaultBlinkHeld() const;
+    bool hostBootBlinkHeld() const;
     void startLedPulse(int ledIndex);
     void apply();
     void writeLevels(const bool levelOn[kLedCount]);

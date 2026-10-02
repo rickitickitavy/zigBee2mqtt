@@ -10,7 +10,7 @@ SERVER TYPE `local` starts a lightweight MQTT 3.1.1 broker on the **host only**.
 
 CONNECT requires the stored USERNAME and PASSWORD only when **both** are non-empty. If either is empty, the broker accepts anonymous CONNECT. An open LAN can then publish device commands; that is accepted until the operator fills both fields.
 
-While the broker is listening, host **LED4** stays on (boot/critical still wins). Remote or local MQTT connected keeps host **LED5** on.
+While the broker is listening, host **LED4** stays on after boot (critical error uses host **LED6** solid and does not clear LED4). Remote or local MQTT connected keeps host **LED5** on (boot blink only; errors do not use LED5).
 
 `disable` starts neither broker nor client. `remote` is client-only to the stored SERVER.
 

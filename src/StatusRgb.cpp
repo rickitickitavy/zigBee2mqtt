@@ -10,11 +10,15 @@ bool StatusRgb::allowsPairingBlink() const {
 }
 
 bool StatusRgb::allowsActivityPulse() const {
-    return !criticalHeld && !bootHeld;
+    return !criticalHeld && !bootHeld && !updateHeld;
 }
 
-bool StatusRgb::faultHeld() const {
-    return criticalHeld || bootHeld;
+bool StatusRgb::slaveFaultBlinkHeld() const {
+    return !hostRole && (criticalHeld || bootHeld);
+}
+
+bool StatusRgb::hostBootBlinkHeld() const {
+    return hostRole && bootHeld;
 }
 
 void StatusRgb::configureLedPin(int gpioNumber) {
@@ -34,6 +38,8 @@ void StatusRgb::begin() {
     pinsReady = true;
     faultBlinkOn = true;
     faultBlinkToggleMs = millis();
+    updateBlinkOn = true;
+    updateBlinkToggleMs = millis();
     rgbLedWrite(PIN_STATUS_RGB, 0, 0, 0);
     apply();
 }
@@ -41,10 +47,19 @@ void StatusRgb::begin() {
 void StatusRgb::setCritical(bool enabled) {
     criticalHeld = enabled;
     apply();
+    if (enabled && !hostRole) {
+        delay(200);
+        ESP.restart();
+    }
 }
 
 void StatusRgb::setBootHeld(bool enabled) {
     bootHeld = enabled;
+    apply();
+}
+
+void StatusRgb::setUpdateHeld(bool enabled) {
+    updateHeld = enabled;
     apply();
 }
 
@@ -116,7 +131,7 @@ void StatusRgb::service() {
             pulseActive[ledIndex] = false;
         }
     }
-    if (faultHeld()) {
+    if (hostBootBlinkHeld() || slaveFaultBlinkHeld()) {
         if ((long)(nowMs - faultBlinkToggleMs) >= (long)kFaultBlinkHalfMs) {
             faultBlinkToggleMs = nowMs;
             faultBlinkOn = !faultBlinkOn;
@@ -125,13 +140,44 @@ void StatusRgb::service() {
         faultBlinkOn = true;
         faultBlinkToggleMs = nowMs;
     }
+    if (hostRole && updateHeld && !criticalHeld) {
+        if ((long)(nowMs - updateBlinkToggleMs) >= (long)kUpdateBlinkHalfMs) {
+            updateBlinkToggleMs = nowMs;
+            updateBlinkOn = !updateBlinkOn;
+        }
+    } else {
+        updateBlinkOn = true;
+        updateBlinkToggleMs = nowMs;
+    }
     apply();
 }
 
 void StatusRgb::apply() {
     bool levelOn[kLedCount] = {false, false, false, false, false, false};
-    if (faultHeld()) {
+
+    if (slaveFaultBlinkHeld()) {
         levelOn[kLed5Index] = faultBlinkOn;
+        writeLevels(levelOn);
+        return;
+    }
+
+    if (hostRole) {
+        if (hostBootBlinkHeld()) {
+            levelOn[kLed5Index] = faultBlinkOn;
+        } else {
+            for (int ledIndex = 0; ledIndex < kPulseLedCount; ledIndex++) {
+                levelOn[ledIndex] = pulseActive[ledIndex];
+            }
+            if (mqttBrokerListening) {
+                levelOn[3] = true;
+            }
+            levelOn[kLed5Index] = mqttConnected;
+        }
+        if (criticalHeld) {
+            levelOn[kLed6Index] = true;
+        } else if (updateHeld) {
+            levelOn[kLed6Index] = updateBlinkOn;
+        }
         writeLevels(levelOn);
         return;
     }
@@ -139,16 +185,9 @@ void StatusRgb::apply() {
     for (int ledIndex = 0; ledIndex < kPulseLedCount; ledIndex++) {
         levelOn[ledIndex] = pulseActive[ledIndex];
     }
-    if (mqttBrokerListening) {
-        levelOn[3] = true;
-    }
-    if (hostRole) {
-        levelOn[kLed5Index] = mqttConnected;
-    } else {
-        levelOn[kLed5Index] = readyGreen;
-        if (pairingHeld) {
-            levelOn[kLed6Index] = pairingPhaseOn;
-        }
+    levelOn[kLed5Index] = readyGreen;
+    if (pairingHeld) {
+        levelOn[kLed6Index] = pairingPhaseOn;
     }
     writeLevels(levelOn);
 }

@@ -2,18 +2,18 @@
 
 ## Purpose
 
-Gives each board six external red LEDs (GPIO18–21, GPIO2, GPIO3). The onboard WS2812 is unused. Host LED5 is solid while MQTT is connected and blinks (0.25 s) for boot/critical. Host LED4 is on while the local MQTT broker is listening. Slave LED5 is solid when ready and blinks (0.25 s) for boot/critical. Slave pairing blinks LED6. Host LED6 stays off.
+Gives each board six external red LEDs (GPIO18–21, GPIO2, GPIO3). The onboard WS2812 is unused. Host LED5 is solid while MQTT is connected and blinks (0.25 s) for boot only (not errors). Host LED6 is solid for critical error and blinks at 10 Hz during firmware update. Host LED4 is on while the local MQTT broker is listening. Slave LED5 is solid when ready and blinks (0.25 s) for boot/critical. Slave pairing blinks LED6.
 
 ## Requirements
 
 ### Requirement: RGB and LED1–LED4 work together
 
-Each chip SHALL drive LED1 on GPIO18, LED2 on GPIO19, LED3 on GPIO20, LED4 on GPIO21, LED5 on GPIO2, and LED6 on GPIO3. Host LED3 and host LED6 SHALL stay off. Host LED4 SHALL stay on while the local MQTT broker is listening. Host LED5 SHALL mean MQTT connected (solid) or boot/critical (blink). Slave LED5 SHALL mean ready with no fault (solid) or boot/critical (blink). A HIGH GPIO level SHALL light each external LED. The onboard WS2812 SHALL NOT be used.
+Each chip SHALL drive LED1 on GPIO18, LED2 on GPIO19, LED3 on GPIO20, LED4 on GPIO21, LED5 on GPIO2, and LED6 on GPIO3. Host LED3 SHALL stay off. Host LED4 SHALL stay on while the local MQTT broker is listening (after boot). Host LED5 SHALL mean MQTT connected (solid) or boot (blink) and SHALL NOT mean any error. Host LED6 SHALL mean critical error (solid) or firmware update cycle (10 Hz blink). Slave LED5 SHALL mean ready with no fault (solid) or boot/critical (blink). Slave LED6 SHALL mean pairing blink. A HIGH GPIO level SHALL light each external LED. The onboard WS2812 SHALL NOT be used.
 
 #### Scenario: Pins
 
 - **WHEN** status indication is shown
-- **THEN** host uses LED1, LED2, LED4, and LED5; slave uses LED1–LED6
+- **THEN** host uses LED1, LED2, LED4, LED5, and LED6; slave uses LED1–LED6
 
 ### Requirement: Onboard RGB is unused
 
@@ -26,12 +26,12 @@ Each chip SHALL NOT drive the onboard WS2812 for status. Status SHALL use only L
 
 ### Requirement: RGB red while that chip is booting or in a critical error
 
-Each chip SHALL show its former RGB-red meaning as soon as firmware starts, before Serial, Wi-Fi, SPI, or Zigbee init, and SHALL keep that indication until that chip is ready, and while a critical error is present. The **host** and the **slave** SHALL blink **LED5** with period 0.25 seconds (125 ms on, 125 ms off) for boot and critical error. LED1–LED4 SHALL NOT be held on for boot or critical error. Host LED6 SHALL stay off. MQTT connection SHALL NOT be required to clear host boot indication. Critical-error indication SHALL outrank pairing blink and activity pulses.
+Each chip SHALL show boot indication as soon as firmware starts, before Serial, Wi-Fi, SPI, or Zigbee init, and SHALL keep that indication until that chip is ready. The **host** and the **slave** SHALL blink **LED5** with period 0.25 seconds (125 ms on, 125 ms off) for **boot**. The **host** SHALL NOT use LED5 for any error: while a critical error is present the host SHALL hold **LED6** solid on (outranking host firmware-update blink). After boot is cleared, host LED5 MAY stay on for MQTT connected and host LED4 MAY stay on for the local broker while critical is held. The **slave** SHALL blink **LED5** with period 0.25 seconds for critical error. LED1–LED4 SHALL NOT be held on for boot. MQTT connection SHALL NOT be required to clear host boot indication. Critical-error indication SHALL outrank pairing blink and activity pulses.
 
 #### Scenario: Host still preparing
 
 - **WHEN** the host has started but Wi-Fi has no address yet or the slave is not yet in normal work
-- **THEN** host LED5 blinks with period 0.25 seconds and host LED1–LED4 and LED6 stay off except later activity pulses after boot
+- **THEN** host LED5 blinks with period 0.25 seconds and host LED1–LED4 stay off except later activity pulses after boot
 
 #### Scenario: Host preparation finished
 
@@ -41,12 +41,12 @@ Each chip SHALL show its former RGB-red meaning as soon as firmware starts, befo
 #### Scenario: Host lost the slave after boot
 
 - **WHEN** the host had finished boot and the slave SPI link is no longer healthy (not in normal work, or ping replies have timed out)
-- **THEN** host LED5 blinks with period 0.25 seconds until that link is healthy again
+- **THEN** host LED6 is solid on and host LED5 does not blink for that error
 
 #### Scenario: Host slave link restored
 
-- **WHEN** the host was holding critical LED5 blink for a lost slave and the slave link is healthy again
-- **THEN** host LED5 is no longer blinking for that error
+- **WHEN** the host was holding critical LED6 for a lost slave and the slave link is healthy again
+- **THEN** host LED6 is no longer held on for that error
 
 #### Scenario: Slave still preparing
 
@@ -61,7 +61,31 @@ Each chip SHALL show its former RGB-red meaning as soon as firmware starts, befo
 #### Scenario: Critical error appears
 
 - **WHEN** a chip enters a critical error
-- **THEN** that chip blinks LED5 with period 0.25 seconds and does not hold LED5 solid, until that error is cleared
+- **THEN** the host holds LED6 solid (LED5 does not blink for that error, and may stay on for MQTT after boot) and the slave blinks LED5 with period 0.25 seconds until that error is cleared
+
+#### Scenario: Critical while MQTT connected
+
+- **WHEN** the host has finished boot, MQTT is connected, and a critical error is present
+- **THEN** host LED6 is solid on and host LED5 stays on for MQTT connected
+
+### Requirement: Host LED6 blinks during firmware update cycle
+
+While the host firmware update cycle is active (HTTP receive, slave SPI OTA, host apply, or reboot-armed after a successful update) and no critical error is present, the host SHALL blink **LED6** at 10 Hz (50 ms on, 50 ms off). When a critical error is present, LED6 SHALL stay solid for critical and SHALL NOT show the update blink. Host LED5 SHALL NOT indicate update progress.
+
+#### Scenario: Update cycle running
+
+- **WHEN** the host is applying a firmware update cycle and no critical error is present
+- **THEN** host LED6 blinks at 10 Hz
+
+#### Scenario: Update cycle with critical
+
+- **WHEN** a critical error is present during a firmware update cycle
+- **THEN** host LED6 stays solid for critical and does not blink for update
+
+#### Scenario: Update cycle finished
+
+- **WHEN** the firmware update cycle is no longer active and no critical error is present
+- **THEN** host LED6 is off
 
 ### Requirement: Host RGB green while MQTT is connected
 
@@ -84,12 +108,17 @@ After host boot indication is cleared, the host SHALL hold **LED5** on while MQT
 
 ### Requirement: Host LED4 on while the local MQTT broker is listening
 
-After host boot indication is cleared, and while no critical error is present, host LED4 SHALL stay **on** while the onboard MQTT broker is listening. Host LED3 SHALL stay off. The onboard RGB SHALL NOT be used for the local broker.
+After host boot indication is cleared, host LED4 SHALL stay **on** while the onboard MQTT broker is listening, including while a critical error is indicated on LED6. Host LED3 SHALL stay off. The onboard RGB SHALL NOT be used for the local broker.
 
 #### Scenario: Local broker listening
 
 - **WHEN** the host is ready and the local MQTT broker is listening
 - **THEN** host LED4 is on and the onboard RGB is not used
+
+#### Scenario: Local broker listening during critical
+
+- **WHEN** the host is ready, the local MQTT broker is listening, and a critical error is present
+- **THEN** host LED4 stays on and host LED6 is solid on
 
 #### Scenario: Local broker down
 
