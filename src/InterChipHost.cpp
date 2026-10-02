@@ -110,11 +110,25 @@ bool InterChipHost::isNormal() const {
 }
 
 bool InterChipHost::isLinkHealthy() const {
-    return state == HostBringupNormal && pingTimeouts < 3;
+    return state == HostBringupNormal && pingTimeouts == 0;
 }
 
 HostBringupState InterChipHost::bringupState() const {
     return state;
+}
+
+bool InterChipHost::isKeepaliveCommand(uint8_t cmd) {
+    return cmd == SpiCmdPing || cmd == SpiCmdGetStatus || cmd == SpiCmdTimeSync;
+}
+
+bool InterChipHost::isSpiEventCommand(uint8_t cmd) {
+    return cmd >= 0x80;
+}
+
+void InterChipHost::noteKeepaliveSuccess() {
+    pingTimeouts = 0;
+    lastKeepaliveOkMs = millis();
+    lastPongMs = lastKeepaliveOkMs;
 }
 
 bool InterChipHost::tryEnqueue(uint8_t cmd, const uint8_t *payload, uint16_t length) {
@@ -153,7 +167,7 @@ void InterChipHost::requestTimeSync() {
 void InterChipHost::noteKeepaliveQuiet() {
     lastPingMs = millis();
     lastTimeSyncMs = millis();
-    pingTimeouts = 0;
+    noteKeepaliveSuccess();
 }
 
 void InterChipHost::holdForFirmwareOta() {
@@ -255,6 +269,22 @@ void InterChipHost::enterReset() {
     pulseResetStart();
 }
 
+void InterChipHost::noteBringupFailureAndReset() {
+    bringupFailStreak++;
+    if (bringupFailStreak >= kBringupFailBeforeFallbackClock && spiClockHz != SPI_SPEED_HZ_4M) {
+        LOGGER.warning("Slave silent at boot 3 times; SPI clock -> 4 MHz before reset");
+        setClockHz(SPI_SPEED_HZ_4M);
+    }
+    enterReset();
+}
+
+void InterChipHost::noteLinkLostAndReset() {
+    LOGGER.warning("SPI link lost, resetting slave");
+    pingTimeouts = 0;
+    lastKeepaliveOkMs = 0;
+    enterReset();
+}
+
 void InterChipHost::pulseResetStart() {
     digitalWrite(PIN_SLAVE_RST, LOW);
     resetStartedMs = millis();
@@ -299,9 +329,13 @@ void InterChipHost::maybePushSettings() {
 
 void InterChipHost::handleInbound(const SpiFrame &frame) {
     lastPongMs = millis();
-    pingTimeouts = 0;
-    if (hasPending && frame.seq == pendingSeq) {
+    // Only SPI events complete a pending command. Echo of our own TX (same cmd+seq
+    // on MISO) must not clear pending or the keepalive fail streak.
+    if (hasPending && frame.seq == pendingSeq && isSpiEventCommand(frame.cmd)) {
         hasPending = false;
+        if (isKeepaliveCommand(pendingCmd) || pendingCmd == SpiCmdSetSettings) {
+            noteKeepaliveSuccess();
+        }
     }
     if (frame.cmd == SpiEvtSlaveReady) {
         LOGGER.info("SLAVE_READY");
@@ -318,7 +352,8 @@ void InterChipHost::handleInbound(const SpiFrame &frame) {
     }
     if (frame.cmd == SpiEvtSettingsOk) {
         state = HostBringupNormal;
-        lastPongMs = millis();
+        bringupFailStreak = 0;
+        noteKeepaliveSuccess();
         lastPingMs = millis();
         lastSettingsOkMs = millis();
         lastStatusMs = 0;
@@ -346,14 +381,15 @@ void InterChipHost::handleInbound(const SpiFrame &frame) {
 }
 
 void InterChipHost::emitLocalTimeout() {
+    const uint8_t timedOutCmd = pendingCmd;
     hasPending = false;
     SpiFrame timeoutFrame;
     timeoutFrame.cmd = SpiEvtTimeout;
     timeoutFrame.seq = pendingSeq;
     timeoutFrame.length = 1;
-    timeoutFrame.payload[0] = pendingCmd;
-    LOGGER.warning("SPI slave reply timeout cmd=" + String(pendingCmd));
-    if (FIRMWARE_OTA.isUpdatingSlave() && pendingCmd != SpiCmdFirmwareOta) {
+    timeoutFrame.payload[0] = timedOutCmd;
+    LOGGER.warning("SPI slave reply timeout cmd=" + String(timedOutCmd));
+    if (FIRMWARE_OTA.isUpdatingSlave() && timedOutCmd != SpiCmdFirmwareOta) {
         return;
     }
     if (eventHandler != nullptr) {
@@ -367,22 +403,21 @@ void InterChipHost::emitLocalTimeout() {
             maybePushSettings();
             return;
         }
-        enterReset();
+        noteBringupFailureAndReset();
         return;
     }
     if (state == HostBringupWaitReady) {
-        enterReset();
+        noteBringupFailureAndReset();
         return;
     }
-    if (state == HostBringupNormal && pendingCmd == SpiCmdPing) {
+    if (state == HostBringupNormal && isKeepaliveCommand(timedOutCmd)) {
         if (FIRMWARE_OTA.isUpdatingSlave()) {
             return;
         }
         pingTimeouts++;
-        if (pingTimeouts >= 3) {
-            LOGGER.warning("SPI ping lost, resetting slave");
-            pingTimeouts = 0;
-            enterReset();
+        LOGGER.warning("SPI keepalive fail streak=" + String(pingTimeouts));
+        if (pingTimeouts >= kLinkLostTimeouts) {
+            noteLinkLostAndReset();
         }
     }
 }
@@ -426,7 +461,7 @@ void InterChipHost::pump() {
     if (state == HostBringupWaitReady && !resetAsserting) {
         if ((millis() - waitStartedMs) >= kReadyTimeoutMs) {
             LOGGER.warning("Slave ready timeout, resetting again");
-            enterReset();
+            noteBringupFailureAndReset();
         }
     }
 
@@ -435,17 +470,22 @@ void InterChipHost::pump() {
     }
 
     if (state == HostBringupNormal && !FIRMWARE_OTA.isUpdatingSlave()) {
-        if ((millis() - lastPingMs) >= kPingPeriodMs) {
-            lastPingMs = millis();
-            enqueueInternal(SpiCmdPing, nullptr, 0, true, 0);
-        }
-        if ((millis() - lastTimeSyncMs) >= kTimeSyncMs) {
-            lastTimeSyncMs = millis();
-            requestTimeSync();
-        }
-        if (lastStatusMs == 0 || (millis() - lastStatusMs) >= kStatusPeriodMs) {
-            lastStatusMs = millis();
-            enqueueInternal(SpiCmdGetStatus, nullptr, 0, true, 0);
+        if (lastKeepaliveOkMs != 0 && (millis() - lastKeepaliveOkMs) >= kLinkDeadMs) {
+            LOGGER.warning("SPI keepalive silent too long, resetting slave");
+            noteLinkLostAndReset();
+        } else {
+            if ((millis() - lastPingMs) >= kPingPeriodMs) {
+                lastPingMs = millis();
+                enqueueInternal(SpiCmdPing, nullptr, 0, true, 0);
+            }
+            if ((millis() - lastTimeSyncMs) >= kTimeSyncMs) {
+                lastTimeSyncMs = millis();
+                requestTimeSync();
+            }
+            if (lastStatusMs == 0 || (millis() - lastStatusMs) >= kStatusPeriodMs) {
+                lastStatusMs = millis();
+                enqueueInternal(SpiCmdGetStatus, nullptr, 0, true, 0);
+            }
         }
     }
 

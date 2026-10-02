@@ -39,6 +39,9 @@ private:
     static constexpr unsigned long kTimeSyncMs = 30000UL;
     static constexpr unsigned long kMinTransferGapUs = 2000UL;
     static constexpr unsigned long kRstPulseMs = 15UL;
+    static constexpr unsigned long kLinkDeadMs = 35000UL;
+    static constexpr uint8_t kLinkLostTimeouts = 3;
+    static constexpr uint8_t kBringupFailBeforeFallbackClock = 3;
 
     struct QueuedFrame {
         bool used = false;
@@ -64,6 +67,7 @@ private:
     char slaveVersionText[SPI_STATUS_VERSION_MAX + 1]{};
     unsigned long lastTimeSyncMs = 0;
     unsigned long lastSettingsOkMs = 0;
+    unsigned long lastKeepaliveOkMs = 0;
     bool resetAsserting = false;
     bool settingsQueued = false;
     uint8_t settingsRetries = 0;
@@ -71,7 +75,8 @@ private:
     uint8_t pendingCmd = 0;
     unsigned long pendingDeadlineMs = 0;
     bool hasPending = false;
-    uint8_t pingTimeouts = 0;
+    volatile uint8_t pingTimeouts = 0;
+    uint8_t bringupFailStreak = 0;
     bool bootResetCompleted = false;
 
     void pulseResetStart();
@@ -82,7 +87,12 @@ private:
     void handleInbound(const SpiFrame &frame);
     void emitLocalTimeout();
     void enterReset();
+    void noteBringupFailureAndReset();
+    void noteLinkLostAndReset();
+    void noteKeepaliveSuccess();
     void maybePushSettings();
+    static bool isKeepaliveCommand(uint8_t cmd);
+    static bool isSpiEventCommand(uint8_t cmd);
 };
 
 extern InterChipHost INTER_CHIP_HOST;
