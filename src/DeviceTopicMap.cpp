@@ -134,6 +134,16 @@ String DeviceTopicMap::statePublishTopic(const DeviceTopicEntry *entry, uint8_t 
     return String(entry->stateTopic);
 }
 
+String DeviceTopicMap::commandPublishTopic(const DeviceTopicEntry *entry, uint8_t endpoint) {
+    if (entry == nullptr || entry->commandTopic[0] == '\0') {
+        return "";
+    }
+    if (usesTopicSuffix(entry->channelCount) && isUsableEndpoint(endpoint)) {
+        return String(entry->commandTopic) + "/" + String(endpoint);
+    }
+    return String(entry->commandTopic);
+}
+
 String DeviceTopicMap::statePublishPayload(const DeviceTopicEntry *entry, uint8_t endpoint, const char *message) {
     const char *body = message != nullptr ? message : "";
     if (entry != nullptr && usesPayloadParse(entry->channelCount) && isUsableEndpoint(endpoint)) {
@@ -390,11 +400,32 @@ bool DeviceTopicMap::parseZclCommandBody(const char *body, uint8_t mappedEndpoin
     return true;
 }
 
-DeviceTopicEntry *DeviceTopicMap::findByCommandTopic(const char *topic) {
-    return findByCommandTopic(topic, nullptr);
+static bool mappedTopicEquals(const char *mappedTopic, const char *topic) {
+    while (*mappedTopic == ' ' || *mappedTopic == '\t') {
+        mappedTopic++;
+    }
+    while (*topic == ' ' || *topic == '\t') {
+        topic++;
+    }
+    while (*mappedTopic != '\0' && *topic != '\0' && *mappedTopic == *topic) {
+        mappedTopic++;
+        topic++;
+    }
+    while (*mappedTopic == ' ' || *mappedTopic == '\t') {
+        mappedTopic++;
+    }
+    while (*topic == ' ' || *topic == '\t' || *topic == '\r' || *topic == '\n') {
+        topic++;
+    }
+    return *mappedTopic == '\0' && *topic == '\0';
 }
 
-DeviceTopicEntry *DeviceTopicMap::findByCommandTopic(const char *topic, uint8_t *topicEndpoint) {
+static DeviceTopicEntry *findByMappedTopic(
+    DeviceTopicEntry *slots,
+    const char *topic,
+    uint8_t *topicEndpoint,
+    bool useStateTopic
+) {
     if (slots == nullptr || topic == nullptr || topic[0] == '\0') {
         return nullptr;
     }
@@ -403,21 +434,25 @@ DeviceTopicEntry *DeviceTopicMap::findByCommandTopic(const char *topic, uint8_t 
     }
     for (int i = 0; i < DEVICE_MAP_SLOTS; i++) {
         DeviceTopicEntry *entry = &slots[i];
-        if (!entry->used || entry->commandTopic[0] == '\0') {
+        if (!entry->used) {
             continue;
         }
-        if (strcmp(entry->commandTopic, topic) == 0) {
+        const char *mappedTopic = useStateTopic ? entry->stateTopic : entry->commandTopic;
+        if (mappedTopic[0] == '\0') {
+            continue;
+        }
+        if (mappedTopicEquals(mappedTopic, topic)) {
             return entry;
         }
-        if (!usesTopicSuffix(entry->channelCount)) {
+        if (!DeviceTopicMap::usesTopicSuffix(entry->channelCount)) {
             continue;
         }
-        const size_t prefixLength = strlen(entry->commandTopic);
-        if (strncmp(topic, entry->commandTopic, prefixLength) != 0 || topic[prefixLength] != '/') {
+        const size_t prefixLength = strlen(mappedTopic);
+        if (strncmp(topic, mappedTopic, prefixLength) != 0 || topic[prefixLength] != '/') {
             continue;
         }
         const int parsed = atoi(topic + prefixLength + 1);
-        if (!isUsableEndpoint((uint8_t)parsed)) {
+        if (!DeviceTopicMap::isUsableEndpoint((uint8_t)parsed)) {
             continue;
         }
         if (topicEndpoint != nullptr) {
@@ -426,6 +461,22 @@ DeviceTopicEntry *DeviceTopicMap::findByCommandTopic(const char *topic, uint8_t 
         return entry;
     }
     return nullptr;
+}
+
+DeviceTopicEntry *DeviceTopicMap::findByCommandTopic(const char *topic) {
+    return findByCommandTopic(topic, nullptr);
+}
+
+DeviceTopicEntry *DeviceTopicMap::findByCommandTopic(const char *topic, uint8_t *topicEndpoint) {
+    return findByMappedTopic(slots, topic, topicEndpoint, false);
+}
+
+DeviceTopicEntry *DeviceTopicMap::findByStateTopic(const char *topic) {
+    return findByStateTopic(topic, nullptr);
+}
+
+DeviceTopicEntry *DeviceTopicMap::findByStateTopic(const char *topic, uint8_t *topicEndpoint) {
+    return findByMappedTopic(slots, topic, topicEndpoint, true);
 }
 
 DeviceTopicEntry *DeviceTopicMap::upsert(
@@ -442,9 +493,11 @@ DeviceTopicEntry *DeviceTopicMap::upsert(
     DeviceTopicEntry *entry = findByIeee(ieee);
     uint8_t preservedFullControl = 0;
     uint8_t preservedZigbeeType = ZigbeeDeviceTypeUnknown;
+    uint8_t preservedTransport = DeviceTransportZigbee;
     if (entry != nullptr && entry->used) {
         preservedFullControl = entry->fullControl;
         preservedZigbeeType = entry->zigbeeType;
+        preservedTransport = clampDeviceTransport(entry->transport);
     }
     if (entry == nullptr) {
         for (int i = 0; i < DEVICE_MAP_SLOTS; i++) {
@@ -476,6 +529,7 @@ DeviceTopicEntry *DeviceTopicMap::upsert(
     entry->channelCount = normalizeChannelCount(channelCount);
     entry->fullControl = preservedFullControl;
     entry->zigbeeType = preservedZigbeeType;
+    entry->transport = preservedTransport;
     return entry;
 }
 
@@ -500,6 +554,7 @@ DeviceTopicEntry *DeviceTopicMap::upsertFromEntry(const DeviceTopicEntry *source
     if (source->zigbeeType != ZigbeeDeviceTypeUnknown) {
         entry->zigbeeType = source->zigbeeType;
     }
+    entry->transport = clampDeviceTransport(source->transport);
     return entry;
 }
 
@@ -560,6 +615,20 @@ void DeviceTopicMap::copyZigbeeTypeFrom(const DeviceTopicMap *source) {
             continue;
         }
         entry->zigbeeType = mergeZigbeeDeviceType(entry->zigbeeType, previous->zigbeeType);
+    }
+}
+
+void DeviceTopicMap::keepTransportEntriesFrom(const DeviceTopicMap *source, uint8_t transport) {
+    if (slots == nullptr || source == nullptr || source->slots == nullptr) {
+        return;
+    }
+    const uint8_t wantedTransport = clampDeviceTransport(transport);
+    for (int i = 0; i < DEVICE_MAP_SLOTS; i++) {
+        const DeviceTopicEntry *entry = &source->slots[i];
+        if (!entry->used || clampDeviceTransport(entry->transport) != wantedTransport) {
+            continue;
+        }
+        upsertFromEntry(entry, false);
     }
 }
 
@@ -624,6 +693,14 @@ void DeviceTopicMap::replaceFromJson(const String &json) {
                 String typeText;
                 if (extractJsonString(typeKey, "type", typeText)) {
                     entry->zigbeeType = zigbeeDeviceTypeFromJsonId(typeText.c_str());
+                }
+            }
+            if (entry != nullptr) {
+                String transportText;
+                if (extractJsonString(object.c_str(), "transport", transportText)) {
+                    entry->transport = deviceTransportFromJsonId(transportText.c_str());
+                } else {
+                    entry->transport = DeviceTransportZigbee;
                 }
             }
         }
@@ -728,6 +805,7 @@ bool DeviceTopicMap::unpackSyncPayload(
     if (length >= SPI_DEVICE_SYNC_ENTRY_LEN) {
         entry->zigbeeType = in[SPI_DEVICE_SYNC_ENTRY_LEN_WITH_FULL_CONTROL];
     }
+    entry->transport = DeviceTransportZigbee;
     entry->used = 1;
     return true;
 }
@@ -841,6 +919,8 @@ String DeviceTopicMap::listJson(OnlineFn isOnline, LastRssiFn lastRssi, ListTele
         json += entry->fullControl ? "true" : "false";
         json += ",\"type\":\"";
         json += zigbeeDeviceTypeJsonId(entry->zigbeeType);
+        json += "\",\"transport\":\"";
+        json += deviceTransportJsonId(entry->transport);
         json += "\"";
         if (isOnline != nullptr) {
             json += ",\"online\":";

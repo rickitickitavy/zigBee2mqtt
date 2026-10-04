@@ -93,7 +93,17 @@ ZigbeeSpiProxy::CachedDevice *ZigbeeSpiProxy::allocSlot(const uint8_t ieee[8]) {
             return &devices[i];
         }
     }
-    return nullptr;
+    int oldestIndex = 0;
+    for (int i = 1; i < kMaxDevices; i++) {
+        if ((long)(devices[i].lastSeenMs - devices[oldestIndex].lastSeenMs) < 0) {
+            oldestIndex = i;
+        }
+    }
+    memset(&devices[oldestIndex], 0, sizeof(devices[oldestIndex]));
+    memcpy(devices[oldestIndex].ieee, ieee, 8);
+    devices[oldestIndex].occupied = true;
+    devices[oldestIndex].lastSeenMs = millis();
+    return &devices[oldestIndex];
 }
 
 bool ZigbeeSpiProxy::permitJoin(uint8_t seconds) {
@@ -277,6 +287,24 @@ void ZigbeeSpiProxy::requestRegistryPull(DeviceTopicMap *topicMap) {
     }
 }
 
+void ZigbeeSpiProxy::publishHostStores(DeviceTopicMap *topicMap, UserStore *store) {
+    registryMap = topicMap;
+    userMap = store;
+    registryPullRequested = false;
+    registryPullActive = false;
+    pullCollecting = false;
+    userPullRequested = false;
+    userPullActive = false;
+    userCollecting = false;
+    registryPullStartedMs = 0;
+    userPullStartedMs = 0;
+    registryReady = true;
+    userReady = true;
+    queueDeletedIeeesAndPushAll(nullptr, 0);
+    queueDeletedUserNamesAndPushAll(nullptr, 0);
+    LOGGER.info("Publishing host device and user stores to slave");
+}
+
 void ZigbeeSpiProxy::requestUsersPull(UserStore *store) {
     if (store == nullptr) {
         return;
@@ -312,6 +340,9 @@ bool ZigbeeSpiProxy::queueDeviceChange(uint8_t flags, const DeviceTopicEntry *en
 bool ZigbeeSpiProxy::enqueueDeviceUpsert(const DeviceTopicEntry *entry) {
     if (entry == nullptr || !entry->used) {
         return false;
+    }
+    if (entry->transport == DeviceTransportWifi) {
+        return true;
     }
     return queueDeviceChange(SPI_DEVICE_SYNC_ENTRY, entry);
 }
@@ -383,6 +414,10 @@ void ZigbeeSpiProxy::pumpPendingChanges() {
         return;
     }
     DeviceTopicEntry *entry = registryMap->slotAt(nextIndex);
+    if (entry != nullptr && entry->transport == DeviceTransportWifi) {
+        pendingUpsertWalk = nextIndex + 1;
+        return;
+    }
     if (entry != nullptr && enqueueRegistryFrame(SPI_DEVICE_SYNC_ENTRY, entry)) {
         pendingUpsertWalk = nextIndex + 1;
     }
@@ -585,11 +620,7 @@ void ZigbeeSpiProxy::finishUsersPull() {
         return;
     }
     if (userCollecting) {
-        if (receivedCount == 0 && userMap != nullptr && userMap->userCount() > 0) {
-            LOGGER.warning("Ignoring empty user dump; keeping current list");
-        } else if (userMap != nullptr) {
-            userMap->replaceFrom(&pullUsers);
-        }
+        LOGGER.info("Ignoring slave user dump; host store is authoritative");
     }
     userCollecting = false;
     userPullActive = false;
@@ -654,12 +685,7 @@ void ZigbeeSpiProxy::finishRegistryPull() {
         return;
     }
     if (pullCollecting) {
-        if (receivedCount == 0 && registryMap != nullptr && registryMap->usedCount() > 0) {
-            LOGGER.warning("Ignoring empty device dump; keeping current list");
-        } else if (registryMap != nullptr) {
-            pullMap.copyZigbeeTypeFrom(registryMap);
-            registryMap->replaceFrom(&pullMap);
-        }
+        LOGGER.info("Ignoring slave device dump; host store is authoritative");
     }
     pullCollecting = false;
     registryPullActive = false;
@@ -669,61 +695,15 @@ void ZigbeeSpiProxy::finishRegistryPull() {
     pullExpectedCount = -1;
     replayPendingChanges();
     registryReady = true;
-    LOGGER.info("Pulled " + String(registryMap != nullptr ? registryMap->usedCount() : 0) + " device(s) from slave");
-    filePullRequested = true;
     if (registryPullDone != nullptr) {
         registryPullDone();
     }
 }
 
 void ZigbeeSpiProxy::pumpRegistrySync() {
-    if (filePullInFlight && filePullStartedMs != 0
-        && (long)(millis() - filePullStartedMs) >= 15000L) {
-        LOGGER.warning("Slave devices.json not received; continuing");
-        filePullInFlight = false;
-        filePullCollecting = false;
-        filePullStartedMs = 0;
-    }
-    if (filePullRequested && commandsAllowed() && !registryPullRequested && !pullCollecting) {
-        if (INTER_CHIP_HOST.tryEnqueue(SpiCmdGetDevicesFile, nullptr, 0)) {
-            filePullRequested = false;
-            filePullInFlight = true;
-            filePullStartedMs = millis();
-            LOGGER.info("Requesting slave devices.json");
-        }
-        return;
-    }
-    if (registryPullRequested && commandsAllowed()) {
-        if (INTER_CHIP_HOST.tryEnqueue(SpiCmdGetDevices, nullptr, 0)) {
-            registryPullRequested = false;
-            registryPullActive = true;
-            registryPullStartedMs = millis();
-            LOGGER.info("Requesting device registry from slave");
-        }
-        return;
-    }
-    if (!registryReady && !pullCollecting && !registryPullActive && !registryPullRequested
-        && registryMap != nullptr && commandsAllowed() && registryPullStartedMs != 0
-        && (long)(millis() - registryPullStartedMs) >= 15000L) {
-        registryPullRequested = true;
-        LOGGER.warning("Slave device list not received; requesting it");
-    }
-    if (userPullRequested && commandsAllowed() && !registryPullRequested && !registryPullActive
-        && !pullCollecting && !filePullRequested && !filePullCollecting && !filePullInFlight) {
-        if (INTER_CHIP_HOST.tryEnqueue(SpiCmdGetUsers, nullptr, 0)) {
-            userPullRequested = false;
-            userPullActive = true;
-            userPullStartedMs = millis();
-            LOGGER.info("Requesting user store from slave");
-        }
-        return;
-    }
-    if (!userReady && !userCollecting && !userPullActive && !userPullRequested
-        && userMap != nullptr && commandsAllowed() && userPullStartedMs != 0
-        && (long)(millis() - userPullStartedMs) >= 15000L) {
-        userPullRequested = true;
-        LOGGER.warning("Slave user list not received; requesting it");
-    }
+    filePullRequested = false;
+    registryPullRequested = false;
+    userPullRequested = false;
     pumpPendingChanges();
     pumpPendingUserChanges();
 }
@@ -828,6 +808,14 @@ bool ZigbeeSpiProxy::lastRssiDbm(const uint8_t ieee[8], int8_t *rssiDbm) const {
     return false;
 }
 
+void ZigbeeSpiProxy::noteMqttState(const uint8_t ieee[8], uint8_t endpoint, const char *message) {
+    CachedDevice *slot = allocSlot(ieee);
+    if (slot == nullptr) {
+        return;
+    }
+    noteReportTelemetry(slot, endpoint, message);
+}
+
 void ZigbeeSpiProxy::appendListTelemetry(const uint8_t ieee[8], String &json) const {
     const CachedDevice *slot = findByIeee(ieee);
     if (slot == nullptr) {
@@ -881,6 +869,14 @@ void ZigbeeSpiProxy::appendListTelemetry(const uint8_t ieee[8], String &json) co
         json += "\"}";
     }
     json += "]";
+}
+
+void ZigbeeSpiProxy::notePacketReceived() {
+    packetsRx++;
+}
+
+void ZigbeeSpiProxy::notePacketSent() {
+    packetsTx++;
 }
 
 uint32_t ZigbeeSpiProxy::packetsReceived() const {

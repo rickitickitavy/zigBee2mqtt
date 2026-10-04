@@ -10,7 +10,7 @@ public:
     using SearchStartFn = bool (*)();
     using SearchStopFn = void (*)();
     using DeviceUpsertedFn = bool (*)(const DeviceTopicEntry *entry);
-    using DeviceRemovedFn = bool (*)(const uint8_t ieee[8]);
+    using DeviceRemovedFn = bool (*)(const uint8_t ieee[8], uint8_t transport);
     using HardwareApplyFn = void (*)(uint32_t spiSpeedHz);
     using DeviceOnlineFn = bool (*)(const uint8_t ieee[8]);
     using DeviceRssiFn = bool (*)(const uint8_t ieee[8], int8_t *rssiDbm);
@@ -101,6 +101,7 @@ private:
     bool applyZigbeeJson(const char *json, String *errorText);
     bool applyHardwareJson(const char *json, String *errorText);
     void handleDevicesGet(AsyncWebServerRequest *request);
+    void handleDeviceTypesGet(AsyncWebServerRequest *request);
     void handleDevicesPost(AsyncWebServerRequest *request);
     void handleDevicesDelete(AsyncWebServerRequest *request);
     void handleDevicesFoundGet(AsyncWebServerRequest *request);

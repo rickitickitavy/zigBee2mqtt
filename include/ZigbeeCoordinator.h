@@ -203,6 +203,8 @@ private:
     void storeBoundDevice(zb_device_params_t *device);
     void emitDeviceJoin(BoundZigbeeDevice *slot);
     void mergeBoundDeviceType(BoundZigbeeDevice *slot, uint8_t incomingType);
+    uint8_t registeredZigbeeType(const uint8_t ieee[8]) const;
+    bool applySavedDeviceClass(BoundZigbeeDevice *slot);
     void startDescriptorProbe(BoundZigbeeDevice *slot);
     void requestActiveEndpoints(uint16_t shortAddr);
     void requestSimpleDescriptor(uint16_t shortAddr, uint8_t endpoint);

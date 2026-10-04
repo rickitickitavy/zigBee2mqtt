@@ -6,6 +6,7 @@
 
 #include <nwk/esp_zigbee_nwk.h>
 #include <zdo/esp_zigbee_zdo_command.h>
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -34,6 +35,74 @@ static String formatIeeeText(const uint8_t ieee[8]) {
         ieee[0]
     );
     return String(buffer);
+}
+
+static bool formatScaledMeasurement(char *out, size_t outSize, int32_t scaled, int divisor, int fracDigits) {
+    if (out == nullptr || outSize == 0 || divisor <= 0 || fracDigits < 0 || fracDigits > 2) {
+        return false;
+    }
+    int32_t whole = scaled / divisor;
+    int32_t fraction = scaled % divisor;
+    if (fraction < 0) {
+        fraction = -fraction;
+    }
+    if (fracDigits == 0) {
+        snprintf(out, outSize, "%ld", (long)whole);
+        return true;
+    }
+    if (scaled < 0 && whole == 0) {
+        snprintf(out, outSize, fracDigits == 1 ? "-0.%01ld" : "-0.%02ld", (long)fraction);
+        return true;
+    }
+    snprintf(out, outSize, fracDigits == 1 ? "%ld.%01ld" : "%ld.%02ld", (long)whole, (long)fraction);
+    return true;
+}
+
+static bool formatMeasurementText(
+    uint16_t clusterId,
+    uint16_t attributeId,
+    uint32_t raw,
+    char *out,
+    size_t outSize
+) {
+    if (out == nullptr || outSize == 0 || attributeId != 0x0000) {
+        return false;
+    }
+    out[0] = '\0';
+    const uint16_t word = (uint16_t)(raw & 0xFFFF);
+    if (clusterId == kZigbeeClusterTemperature) {
+        if (word == 0x8000) {
+            return false;
+        }
+        return formatScaledMeasurement(out, outSize, (int16_t)word, 100, 2);
+    }
+    if (clusterId == kZigbeeClusterHumidity) {
+        if (word == 0xFFFF) {
+            return false;
+        }
+        return formatScaledMeasurement(out, outSize, (int32_t)word, 100, 2);
+    }
+    if (clusterId == kZigbeeClusterPressure) {
+        if (word == 0x8000) {
+            return false;
+        }
+        return formatScaledMeasurement(out, outSize, (int16_t)word, 10, 1);
+    }
+    if (clusterId == 0x0404) {
+        if (word == 0xFFFF) {
+            return false;
+        }
+        return formatScaledMeasurement(out, outSize, (int32_t)word, 10, 1);
+    }
+    if (clusterId == kZigbeeClusterIlluminance) {
+        if (word == 0 || word == 0xFFFF) {
+            return false;
+        }
+        const int lux = (int)(pow(10.0, ((int)word - 1) / 10000.0) + 0.5);
+        snprintf(out, outSize, "%d", lux);
+        return true;
+    }
+    return false;
 }
 
 static void formatAttrEventName(
@@ -394,8 +463,9 @@ void ZigbeeCoordinator::storeBoundDevice(zb_device_params_t *device) {
     if (isNewDevice || wasIncomplete) {
         logDeviceEvent("join", slot->ieee, slot->shortAddr, slot->endpoint, registeredName(slot->ieee));
     }
-    if (slot->lastEmittedType == kZigbeeDeviceTypeNeverEmitted
-        || slot->zigbeeType == ZigbeeDeviceTypeUnknown) {
+    if (!applySavedDeviceClass(slot)
+        && (slot->lastEmittedType == kZigbeeDeviceTypeNeverEmitted
+            || slot->zigbeeType == ZigbeeDeviceTypeUnknown)) {
         startDescriptorProbe(slot);
     }
 }
@@ -423,8 +493,39 @@ void ZigbeeCoordinator::emitDeviceJoin(BoundZigbeeDevice *slot) {
     logDeviceEvent(pairingEvent, slot->ieee, slot->shortAddr, slot->endpoint, registeredName(slot->ieee));
 }
 
+uint8_t ZigbeeCoordinator::registeredZigbeeType(const uint8_t ieee[8]) const {
+    if (registeredMap == nullptr || ieee == nullptr) {
+        return ZigbeeDeviceTypeUnknown;
+    }
+    const DeviceTopicEntry *entry = registeredMap->findByIeee(ieee);
+    if (entry == nullptr || !entry->used) {
+        return ZigbeeDeviceTypeUnknown;
+    }
+    return entry->zigbeeType;
+}
+
+bool ZigbeeCoordinator::applySavedDeviceClass(BoundZigbeeDevice *slot) {
+    if (slot == nullptr) {
+        return false;
+    }
+    const uint8_t savedType = registeredZigbeeType(slot->ieee);
+    if (savedType == ZigbeeDeviceTypeUnknown) {
+        return false;
+    }
+    slot->typeProbeDeadlineMs = 0;
+    if (slot->zigbeeType == savedType && slot->lastEmittedType == savedType) {
+        return true;
+    }
+    slot->zigbeeType = savedType;
+    emitDeviceJoin(slot);
+    return true;
+}
+
 void ZigbeeCoordinator::mergeBoundDeviceType(BoundZigbeeDevice *slot, uint8_t incomingType) {
     if (slot == nullptr) {
+        return;
+    }
+    if (applySavedDeviceClass(slot)) {
         return;
     }
     const uint8_t merged = mergeZigbeeDeviceType(slot->zigbeeType, incomingType);
@@ -552,10 +653,14 @@ void ZigbeeCoordinator::onSimpleDescriptor(
     if (slot == nullptr) {
         return;
     }
-    const uint8_t classified = classifyZigbeeDeviceTypeFromClusterList(
+    uint8_t classified = classifyZigbeeDeviceTypeFromClusterList(
         simpleDesc->app_cluster_list,
         simpleDesc->app_input_cluster_count,
         simpleDesc->app_output_cluster_count
+    );
+    classified = mergeZigbeeDeviceType(
+        classified,
+        zigbeeDeviceTypeFromHaDeviceId(simpleDesc->app_device_id)
     );
     coordinator->mergeBoundDeviceType(slot, classified);
     coordinator->addKnownEndpoint(slot, simpleDesc->endpoint);
@@ -795,8 +900,9 @@ void ZigbeeCoordinator::offerPairingIfNeeded(const uint8_t ieee[8]) {
     if (!usableIdentity) {
         return;
     }
-    if (slot->lastEmittedType == kZigbeeDeviceTypeNeverEmitted
-        || slot->zigbeeType == ZigbeeDeviceTypeUnknown) {
+    if (!applySavedDeviceClass(slot)
+        && (slot->lastEmittedType == kZigbeeDeviceTypeNeverEmitted
+            || slot->zigbeeType == ZigbeeDeviceTypeUnknown)) {
         startDescriptorProbe(slot);
     }
 }
@@ -828,7 +934,9 @@ void ZigbeeCoordinator::upsertRegisteredDevice(const DeviceTopicEntry *entry) {
     }
     if (registeredMap->upsertFromEntry(entry, false) == nullptr) {
         LOGGER.warning("Registered device table full");
+        return;
     }
+    applySavedDeviceClass(findByIeee(entry->ieee));
 }
 
 void ZigbeeCoordinator::removeRegisteredDevice(const uint8_t ieee[8]) {
@@ -1037,6 +1145,11 @@ void ZigbeeCoordinator::handleAttributeReport(
             lightStateHandler(coveringMessage, ieee, srcEndpoint, shortAddr, rssiForShortAddr(shortAddr));
         }
         return;
+    }
+    char measurementText[32];
+    if (lightStateHandler != nullptr
+        && formatMeasurementText(clusterId, attribute->id, value, measurementText, sizeof(measurementText))) {
+        lightStateHandler(measurementText, ieee, srcEndpoint, shortAddr, rssiForShortAddr(shortAddr));
     }
 }
 
@@ -1380,7 +1493,7 @@ void ZigbeeCoordinator::enqueueRegisteredStatusReads() {
     while (slotIndex >= 0) {
         DeviceTopicEntry *entry = registeredMap->slotAt(slotIndex);
         slotIndex = registeredMap->nextUsedIndex(slotIndex + 1);
-        if (entry == nullptr || !entry->used) {
+        if (entry == nullptr || !entry->used || entry->transport == DeviceTransportWifi) {
             continue;
         }
         BoundZigbeeDevice *bound = findByIeee(entry->ieee);

@@ -36,6 +36,9 @@ SettingsManager::SettingsManager() : topicMap(deviceSlots) {
     if (storedVersion == 4) {
         upgradeLegacyMainFromEeprom();
         saveMain(false);
+    } else if (storedVersion == 5) {
+        upgradeMainFromVersion5();
+        saveMain(false);
     } else if (storedVersion == GLOBAL_CURRENT_SETTINGS_VERSION) {
         readSettings();
     } else {
@@ -44,6 +47,10 @@ SettingsManager::SettingsManager() : topicMap(deviceSlots) {
     }
 
     clampMqttClientTimeout(settings.mqtt.clientTimeoutMs);
+    if (settings.mqtt.bornIntervalMin < MQTT_BORN_INTERVAL_MIN
+        || settings.mqtt.bornIntervalMin > MQTT_BORN_INTERVAL_MAX) {
+        settings.mqtt.bornIntervalMin = DEFAULT_MQTT_BORN_INTERVAL_MIN;
+    }
     clampZigbeeChannel(settings.zigbee.channel);
     if (settings.wifi.mode != WifiSettingsModeAp && settings.wifi.mode != WifiSettingsModeSta) {
         settings.wifi.mode = WifiSettingsModeAp;
@@ -82,6 +89,8 @@ void SettingsManager::applyDefaults() {
     settings.mqtt.serverType = MqttServerTypeDisable;
     strncpy(settings.mqtt.clientId, DEFAULT_MQTT_CLIENT_ID, sizeof(settings.mqtt.clientId) - 1);
     strncpy(settings.mqtt.baseTopic, DEFAULT_MQTT_BASE_TOPIC, sizeof(settings.mqtt.baseTopic) - 1);
+    settings.mqtt.serverBornTopic[0] = '\0';
+    settings.mqtt.bornIntervalMin = DEFAULT_MQTT_BORN_INTERVAL_MIN;
 
     settings.zigbee.channel = DEFAULT_ZIGBEE_CHANNEL;
     settings.zigbee.permitJoinOnBootSec = DEFAULT_PERMIT_JOIN_SEC;
@@ -95,10 +104,72 @@ void SettingsManager::upgradeLegacyMainFromEeprom() {
         mainBytes[i] = EEPROM.read(i);
     }
     settings.version = GLOBAL_CURRENT_SETTINGS_VERSION;
+    settings.mqtt.serverBornTopic[0] = '\0';
+    settings.mqtt.bornIntervalMin = DEFAULT_MQTT_BORN_INTERVAL_MIN;
     memset(settings.alignPad, 0, sizeof(settings.alignPad));
     memset(settings.reserved, 0, sizeof(settings.reserved));
     memset(deviceSlots, 0, sizeof(deviceSlots));
     LOGGER.info("Legacy EEPROM main upgraded; devices stay on the slave");
+}
+
+void SettingsManager::upgradeMainFromVersion5() {
+    struct MqttSettingsV5 {
+        char server[64];
+        int port;
+        long reconnectIntervalMs;
+        int clientTimeoutMs;
+        MqttServerType serverType;
+        char username[32];
+        char password[64];
+        char clientId[32];
+        char baseTopic[32];
+    };
+    struct SettingsMainCoreV5 {
+        char initMarker[4];
+        unsigned char version;
+        WifiSettings wifi;
+        MqttSettingsV5 mqtt;
+        ZigbeeSettings zigbee;
+    };
+    constexpr size_t kSettingsMainUsedV5 =
+        offsetof(SettingsMainCoreV5, zigbee) + sizeof(ZigbeeSettings);
+    constexpr size_t kSettingsAlignPadV5 = (128u - (kSettingsMainUsedV5 % 128u)) % 128u;
+    struct GlobalSettingsV5 {
+        char initMarker[4];
+        unsigned char version;
+        WifiSettings wifi;
+        MqttSettingsV5 mqtt;
+        ZigbeeSettings zigbee;
+        uint8_t alignPad[kSettingsAlignPadV5];
+        uint8_t reserved[256];
+    };
+
+    GlobalSettingsV5 legacySettings;
+    memset(&legacySettings, 0, sizeof(legacySettings));
+    uint8_t *legacyBytes = (uint8_t *)&legacySettings;
+    for (size_t i = 0; i < sizeof(GlobalSettingsV5); i++) {
+        legacyBytes[i] = EEPROM.read(i);
+    }
+
+    memset(&settings, 0, sizeof(settings));
+    memcpy(settings.initMarker, legacySettings.initMarker, sizeof(settings.initMarker));
+    settings.version = GLOBAL_CURRENT_SETTINGS_VERSION;
+    settings.wifi = legacySettings.wifi;
+    strncpy(settings.mqtt.server, legacySettings.mqtt.server, sizeof(settings.mqtt.server) - 1);
+    settings.mqtt.port = legacySettings.mqtt.port;
+    settings.mqtt.reconnectIntervalMs = legacySettings.mqtt.reconnectIntervalMs;
+    settings.mqtt.clientTimeoutMs = legacySettings.mqtt.clientTimeoutMs;
+    settings.mqtt.serverType = legacySettings.mqtt.serverType;
+    strncpy(settings.mqtt.username, legacySettings.mqtt.username, sizeof(settings.mqtt.username) - 1);
+    strncpy(settings.mqtt.password, legacySettings.mqtt.password, sizeof(settings.mqtt.password) - 1);
+    strncpy(settings.mqtt.clientId, legacySettings.mqtt.clientId, sizeof(settings.mqtt.clientId) - 1);
+    strncpy(settings.mqtt.baseTopic, legacySettings.mqtt.baseTopic, sizeof(settings.mqtt.baseTopic) - 1);
+    settings.mqtt.serverBornTopic[0] = '\0';
+    settings.mqtt.bornIntervalMin = DEFAULT_MQTT_BORN_INTERVAL_MIN;
+    settings.zigbee = legacySettings.zigbee;
+    memset(settings.alignPad, 0, sizeof(settings.alignPad));
+    memcpy(settings.reserved, legacySettings.reserved, sizeof(settings.reserved));
+    LOGGER.info("Settings upgraded from version 5; born topic defaults applied");
 }
 
 bool SettingsManager::mainEqualsCommitted() const {
@@ -288,6 +359,8 @@ void SettingsManager::logSettings() {
     LOGGER.info("  mqtt serverType: " + String(mqttServerTypeName(settings.mqtt.serverType)));
     LOGGER.info("  mqtt server: " + String(settings.mqtt.server) + ":" + String(settings.mqtt.port));
     LOGGER.info("  mqtt base: " + String(settings.mqtt.baseTopic));
+    LOGGER.info("  mqtt born topic: " + String(settings.mqtt.serverBornTopic));
+    LOGGER.info("  mqtt born interval min: " + String(settings.mqtt.bornIntervalMin));
     LOGGER.info("  zigbee channel: " + String(settings.zigbee.channel));
     LOGGER.info("  zigbee permitJoinOnBootSec: " + String(settings.zigbee.permitJoinOnBootSec));
     LOGGER.info("  devices used: " + String(topicMap.usedCount()) + "/" + String(DEVICE_MAP_SLOTS));

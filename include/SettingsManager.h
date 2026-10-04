@@ -47,4 +47,5 @@ private:
     void createEmptyDeviceFile();
     void parseDevicesJson(const String &json);
     void upgradeLegacyMainFromEeprom();
+    void upgradeMainFromVersion5();
 };

@@ -91,9 +91,7 @@ void InterChipSlave::resumeAfterRadioPause() {
     hardwareQueued = 0;
     fillSlot = 0;
     pumpPaused = false;
-    requestDeviceDump();
-    const int storedCount = deviceMapSource != nullptr ? deviceMapSource->usedCount() : 0;
-    LOGGER.info("SPI slave pump resumed after radio start; sending " + String(storedCount) + " stored device(s)");
+    LOGGER.info("SPI slave pump resumed after radio start");
 }
 
 void InterChipSlave::begin() {
@@ -754,12 +752,7 @@ void InterChipSlave::handleHostFrame(const SpiFrame &frame) {
         deviceSyncHandler(flags, &entry);
         return;
     }
-    if (frame.cmd == SpiCmdGetDevices) {
-        requestDeviceDump();
-        return;
-    }
-    if (frame.cmd == SpiCmdGetDevicesFile) {
-        requestDevicesFileDump();
+    if (frame.cmd == SpiCmdGetDevices || frame.cmd == SpiCmdGetDevicesFile) {
         return;
     }
     if (frame.cmd == SpiCmdSetUser && frame.length >= 1 && userSyncHandler != nullptr) {
@@ -772,7 +765,6 @@ void InterChipSlave::handleHostFrame(const SpiFrame &frame) {
         return;
     }
     if (frame.cmd == SpiCmdGetUsers) {
-        requestUserDump();
         return;
     }
 }

@@ -295,12 +295,12 @@ bool UserStore::begin(bool persistToLittleFs) {
         return true;
     }
     if (loadFromFile()) {
-        LOGGER.info("Loaded " + String(storedCount) + " console user(s) from slave store");
+        LOGGER.info("Loaded " + String(storedCount) + " console user(s)");
         return true;
     }
     seedAdmin();
     if (!persistNow()) {
-        LOGGER.error("Slave user seed persist failed");
+        LOGGER.error("User seed persist failed");
         return false;
     }
     return storedCount > 0;
@@ -311,15 +311,15 @@ bool UserStore::persistNow() {
         return true;
     }
     if (storedCount == 0) {
-        LOGGER.warning("Refusing to erase slave user store with an empty list");
+        LOGGER.warning("Refusing to erase the user store with an empty list");
         loadFromFile();
         return false;
     }
     if (!saveToFile()) {
-        LOGGER.error("Slave user store write failed");
+        LOGGER.error("User store write failed");
         return false;
     }
-    LOGGER.info("Slave user store saved " + String(storedCount) + " user(s)");
+    LOGGER.info("User store saved " + String(storedCount) + " user(s)");
     return true;
 }
 
@@ -331,24 +331,27 @@ void UserStore::persistIfDue() {
     if (!persistPending) {
         return;
     }
+    if (!persistEnabled) {
+        persistPending = false;
+        return;
+    }
     persistPending = false;
     if (storedCount == 0) {
-        LOGGER.warning("Refusing to erase slave user store with an empty list");
+        LOGGER.warning("Refusing to erase the user store with an empty list");
         loadFromFile();
         return;
     }
     if (!saveToFile()) {
-        LOGGER.error("Slave user store write failed");
+        LOGGER.error("User store write failed");
         persistPending = true;
         return;
     }
-    LOGGER.info("Slave user store saved " + String(storedCount) + " user(s)");
+    LOGGER.info("User store saved " + String(storedCount) + " user(s)");
 }
 
 void UserStore::afterMutation(UserChangeKind kind, const UserRecord *user) {
     if (persistEnabled) {
         requestPersist();
-        return;
     }
     if (changedHandler != nullptr && user != nullptr) {
         changedHandler(kind, user);

@@ -13,6 +13,8 @@ public:
     const DeviceTopicEntry *findByIeee(const uint8_t ieee[8]) const;
     DeviceTopicEntry *findByCommandTopic(const char *topic);
     DeviceTopicEntry *findByCommandTopic(const char *topic, uint8_t *topicEndpoint);
+    DeviceTopicEntry *findByStateTopic(const char *topic);
+    DeviceTopicEntry *findByStateTopic(const char *topic, uint8_t *topicEndpoint);
     DeviceTopicEntry *upsert(
         const uint8_t ieee[8],
         const char *friendlyName,
@@ -27,6 +29,7 @@ public:
     static bool usesTopicSuffix(uint8_t channelCount);
     static bool isUsableEndpoint(uint8_t endpoint);
     static String statePublishTopic(const DeviceTopicEntry *entry, uint8_t endpoint);
+    static String commandPublishTopic(const DeviceTopicEntry *entry, uint8_t endpoint);
     static String statePublishPayload(const DeviceTopicEntry *entry, uint8_t endpoint, const char *message);
     static bool parseChannelPayload(const char *payload, uint8_t *endpoint, String *action);
 
@@ -54,6 +57,7 @@ public:
     void replaceFrom(const DeviceTopicMap *source);
     void copyFullControlFrom(const DeviceTopicMap *source);
     void copyZigbeeTypeFrom(const DeviceTopicMap *source);
+    void keepTransportEntriesFrom(const DeviceTopicMap *source, uint8_t transport);
     int slotIndex(const DeviceTopicEntry *entry) const;
     DeviceTopicEntry *slotAt(int index);
     int usedCount() const;

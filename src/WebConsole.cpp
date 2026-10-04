@@ -208,6 +208,9 @@ void WebConsole::begin() {
         }
     );
     server.on("/api/devices", HTTP_GET, [this](AsyncWebServerRequest *request) { handleDevicesGet(request); });
+    server.on("/api/device-types", HTTP_GET, [this](AsyncWebServerRequest *request) {
+        handleDeviceTypesGet(request);
+    });
     server.on(
         "/api/devices",
         HTTP_POST,
@@ -765,6 +768,10 @@ void WebConsole::appendMqttSettingsJson(String &json) {
     json += String((long)settings->mqtt.reconnectIntervalMs);
     json += ",\"clientTimeoutMs\":";
     json += String(settings->mqtt.clientTimeoutMs);
+    json += ",\"serverBornTopic\":\"";
+    appendJsonEscaped(json, settings->mqtt.serverBornTopic, sizeof(settings->mqtt.serverBornTopic));
+    json += "\",\"bornIntervalMin\":";
+    json += String(settings->mqtt.bornIntervalMin);
 }
 
 bool WebConsole::applyMqttJson(const char *json, String *errorText) {
@@ -773,10 +780,12 @@ bool WebConsole::applyMqttJson(const char *json, String *errorText) {
     String password;
     String clientId;
     String baseTopic;
+    String serverBornTopic;
     String serverTypeText;
     int port = DEFAULT_MQTT_PORT;
     int reconnectIntervalMs = DEFAULT_MQTT_RECONNECT_MS;
     int clientTimeoutMs = DEFAULT_MQTT_CLIENT_TIMEOUT_MS;
+    int bornIntervalMin = DEFAULT_MQTT_BORN_INTERVAL_MIN;
     bool enabledLegacy = false;
     MqttServerType serverType = MqttServerTypeDisable;
     const bool haveServerType = extractJsonString(json, "serverType", serverTypeText);
@@ -786,9 +795,13 @@ bool WebConsole::applyMqttJson(const char *json, String *errorText) {
     const bool haveBaseTopic = extractJsonString(json, "baseTopic", baseTopic);
     extractJsonString(json, "username", username);
     extractJsonString(json, "password", password);
+    extractJsonString(json, "serverBornTopic", serverBornTopic);
     extractJsonInt(json, "port", port);
     extractJsonInt(json, "reconnectIntervalMs", reconnectIntervalMs);
     extractJsonInt(json, "clientTimeoutMs", clientTimeoutMs);
+    if (!extractJsonInt(json, "bornIntervalMin", bornIntervalMin)) {
+        bornIntervalMin = DEFAULT_MQTT_BORN_INTERVAL_MIN;
+    }
     if (haveServerType) {
         if (!parseMqttServerType(serverTypeText.c_str(), serverType)) {
             if (errorText != nullptr) {
@@ -853,6 +866,13 @@ bool WebConsole::applyMqttJson(const char *json, String *errorText) {
     settings->mqtt.clientId[sizeof(settings->mqtt.clientId) - 1] = '\0';
     strncpy(settings->mqtt.baseTopic, baseTopic.c_str(), sizeof(settings->mqtt.baseTopic) - 1);
     settings->mqtt.baseTopic[sizeof(settings->mqtt.baseTopic) - 1] = '\0';
+    strncpy(
+        settings->mqtt.serverBornTopic,
+        serverBornTopic.c_str(),
+        sizeof(settings->mqtt.serverBornTopic) - 1
+    );
+    settings->mqtt.serverBornTopic[sizeof(settings->mqtt.serverBornTopic) - 1] = '\0';
+    settings->mqtt.bornIntervalMin = clampBornIntervalMin(bornIntervalMin);
     return true;
 }
 
@@ -1107,6 +1127,35 @@ void WebConsole::handleDevicesGet(AsyncWebServerRequest *request) {
     request->send(response);
 }
 
+void WebConsole::handleDeviceTypesGet(AsyncWebServerRequest *request) {
+    if (!requireUser(request, nullptr)) {
+        return;
+    }
+    size_t count = 0;
+    const ZigbeeDeviceTypeInfo *catalog = zigbeeDeviceTypeCatalog(&count);
+    String json = "[";
+    for (size_t i = 0; i < count; i++) {
+        if (i > 0) {
+            json += ",";
+        }
+        json += "{\"id\":\"";
+        json += catalog[i].jsonId;
+        json += "\",\"label\":\"";
+        appendJsonEscaped(json, catalog[i].label, strlen(catalog[i].label));
+        json += "\",\"cluster\":";
+        if (catalog[i].clusterId == kZigbeeDeviceTypeNoCluster) {
+            json += "null";
+        } else {
+            json += String((unsigned)catalog[i].clusterId);
+        }
+        json += "}";
+    }
+    json += "]";
+    AsyncWebServerResponse *response = request->beginResponse(200, "application/json", json);
+    response->addHeader("Cache-Control", "no-store");
+    request->send(response);
+}
+
 void WebConsole::handleDevicesPost(AsyncWebServerRequest *request) {
     const UserRecord *user = nullptr;
     if (!requireUser(request, &user)) {
@@ -1117,10 +1166,9 @@ void WebConsole::handleDevicesPost(AsyncWebServerRequest *request) {
     String stateTopic;
     String commandTopic;
     String availability;
-    if (!extractJsonString(requestBody.c_str(), "ieee", ieeeText)) {
-        request->send(400, "text/plain", "Need ieee");
-        return;
-    }
+    String transportText;
+    const bool haveIeee = extractJsonString(requestBody.c_str(), "ieee", ieeeText);
+    const bool haveTransport = extractJsonString(requestBody.c_str(), "transport", transportText);
     extractJsonString(requestBody.c_str(), "name", friendlyName);
     extractJsonString(requestBody.c_str(), "friendlyName", friendlyName);
     extractJsonString(requestBody.c_str(), "state", stateTopic);
@@ -1134,14 +1182,20 @@ void WebConsole::handleDevicesPost(AsyncWebServerRequest *request) {
         request->send(400, "text/plain", "Need friendly name");
         return;
     }
-    uint8_t ieee[8];
     DeviceTopicMap *deviceMap = settingsManager->deviceMap();
-    if (!deviceMap->parseIeee(ieeeText.c_str(), ieee)) {
-        request->send(400, "text/plain", "Bad IEEE");
-        return;
+    uint8_t ieee[8];
+    memset(ieee, 0, sizeof(ieee));
+    DeviceTopicEntry *existing = nullptr;
+    bool isEdit = false;
+    if (haveIeee && ieeeText.length() > 0) {
+        if (!deviceMap->parseIeee(ieeeText.c_str(), ieee)) {
+            request->send(400, "text/plain", "Bad IEEE");
+            return;
+        }
+        existing = deviceMap->findByIeee(ieee);
+        isEdit = existing != nullptr && existing->used;
     }
-    DeviceTopicEntry *existing = deviceMap->findByIeee(ieee);
-    if (existing != nullptr && existing->used) {
+    if (isEdit) {
         if (!userCanEditDevices(user)) {
             request->send(403, "text/plain", "Forbidden");
             return;
@@ -1150,8 +1204,34 @@ void WebConsole::handleDevicesPost(AsyncWebServerRequest *request) {
         request->send(403, "text/plain", "Forbidden");
         return;
     }
-    const uint8_t storedType =
-        existing != nullptr && existing->used ? existing->zigbeeType : ZigbeeDeviceTypeUnknown;
+    const uint8_t requestedTransport = deviceTransportFromJsonId(transportText.c_str());
+    const uint8_t storedTransport =
+        isEdit ? clampDeviceTransport(existing->transport) : DeviceTransportZigbee;
+    uint8_t transport = storedTransport;
+    if (!isEdit) {
+        transport = haveTransport ? requestedTransport : DeviceTransportZigbee;
+    }
+    if (!isEdit && transport == DeviceTransportWifi && (!haveIeee || ieeeText.length() == 0)) {
+        bool allocated = false;
+        for (int attempt = 0; attempt < 64 && !allocated; attempt++) {
+            ieee[0] = 0xFE;
+            ieee[1] = 0xFF;
+            for (int byteIndex = 2; byteIndex < 8; byteIndex++) {
+                ieee[byteIndex] = (uint8_t)(esp_random() & 0xFF);
+            }
+            if (deviceMap->findByIeee(ieee) == nullptr) {
+                allocated = true;
+            }
+        }
+        if (!allocated) {
+            request->send(500, "text/plain", "Could not allocate WiFi device id");
+            return;
+        }
+    } else if (!haveIeee || ieeeText.length() == 0) {
+        request->send(400, "text/plain", "Need ieee");
+        return;
+    }
+    const uint8_t storedType = isEdit ? existing->zigbeeType : ZigbeeDeviceTypeUnknown;
     DeviceTopicEntry *entry = deviceMap->upsert(
         ieee,
         friendlyName.c_str(),
@@ -1164,20 +1244,30 @@ void WebConsole::handleDevicesPost(AsyncWebServerRequest *request) {
         request->send(400, "text/plain", "Device map full");
         return;
     }
+    entry->transport = transport;
     bool parsedFullControl = false;
     if (extractJsonBool(requestBody.c_str(), "fullControl", parsedFullControl)) {
         entry->fullControl = parsedFullControl ? 1 : 0;
     }
-    if (storedType != ZigbeeDeviceTypeUnknown) {
+    String typeText;
+    const bool haveType = extractJsonString(requestBody.c_str(), "type", typeText);
+    if (transport == DeviceTransportWifi) {
+        if (haveType) {
+            entry->zigbeeType = zigbeeDeviceTypeFromJsonId(typeText.c_str());
+        } else if (isEdit) {
+            entry->zigbeeType = storedType;
+        } else {
+            entry->zigbeeType = ZigbeeDeviceTypeUnknown;
+        }
+    } else if (storedType != ZigbeeDeviceTypeUnknown) {
         entry->zigbeeType = storedType;
     } else if (foundDevices != nullptr) {
         entry->zigbeeType = foundDevices->zigbeeTypeForIeee(ieee);
-    }
-    if (entry->zigbeeType == ZigbeeDeviceTypeUnknown) {
-        String typeText;
-        if (extractJsonString(requestBody.c_str(), "type", typeText)) {
+        if (entry->zigbeeType == ZigbeeDeviceTypeUnknown && haveType) {
             entry->zigbeeType = zigbeeDeviceTypeFromJsonId(typeText.c_str());
         }
+    } else if (haveType) {
+        entry->zigbeeType = zigbeeDeviceTypeFromJsonId(typeText.c_str());
     }
     if (foundDevices != nullptr) {
         foundDevices->removeIeee(ieee);
@@ -1209,11 +1299,17 @@ void WebConsole::handleDevicesDelete(AsyncWebServerRequest *request) {
         request->send(400, "text/plain", "Bad IEEE");
         return;
     }
+    DeviceTopicEntry *existing = deviceMap->findByIeee(ieee);
+    if (existing == nullptr || !existing->used) {
+        request->send(404, "text/plain", "Device not found");
+        return;
+    }
+    const uint8_t transport = clampDeviceTransport(existing->transport);
     if (!deviceMap->removeByIeee(ieee)) {
         request->send(404, "text/plain", "Device not found");
         return;
     }
-    if (onDeviceRemoved != nullptr && !onDeviceRemoved(ieee)) {
+    if (onDeviceRemoved != nullptr && !onDeviceRemoved(ieee, transport)) {
         request->send(503, "text/plain", "Slave is not ready to store the device");
         return;
     }

@@ -45,6 +45,7 @@
                 loadZigbee();
             }
             if (name == "devices") {
+                ensureDeviceTypeCatalog();
                 startDevicesPolling();
             } else {
                 stopDevicesPolling();
@@ -1159,6 +1160,9 @@
                 document.getElementById("mqttBaseTopic").value = mqttSettings.baseTopic || "";
                 document.getElementById("mqttReconnectIntervalMs").value = mqttSettings.reconnectIntervalMs || 3000;
                 document.getElementById("mqttClientTimeoutMs").value = mqttSettings.clientTimeoutMs || 200;
+                document.getElementById("mqttServerBornTopic").value = mqttSettings.serverBornTopic || "";
+                document.getElementById("mqttBornIntervalMin").value =
+                    mqttSettings.bornIntervalMin || 20;
                 updateMqttServerVisibility();
             }).catch(function (error) {
                 if (saveError) {
@@ -1239,7 +1243,9 @@
                 clientId: document.getElementById("mqttClientId").value,
                 baseTopic: document.getElementById("mqttBaseTopic").value,
                 reconnectIntervalMs: parseInt(document.getElementById("mqttReconnectIntervalMs").value, 10),
-                clientTimeoutMs: parseInt(document.getElementById("mqttClientTimeoutMs").value, 10)
+                clientTimeoutMs: parseInt(document.getElementById("mqttClientTimeoutMs").value, 10),
+                serverBornTopic: document.getElementById("mqttServerBornTopic").value,
+                bornIntervalMin: parseInt(document.getElementById("mqttBornIntervalMin").value, 10)
             };
             fetch("/api/mqtt", {
                 method: "POST",
@@ -1682,20 +1688,189 @@
         var pairingSessionActive = false;
         var searchAwaitingClose = false;
         var parameterDialogTypeId = "unknown";
+        var parameterDialogTransport = "zigbee";
         var parameterDialogBaseline = null;
         var parameterDialogIsEdit = false;
+        var proposedWifiTopics = null;
+        // ZCL cluster catalog (Bolukan / same as firmware ZigbeeDeviceType.h)
+        var deviceTypeCatalog = [
+            { id: "unknown", label: "Unknown", cluster: null },
+            { id: "onOff", label: "On/Off", cluster: 0x0006 },
+            { id: "iasZone", label: "IAS Zone", cluster: 0x0500 },
+            { id: "windowCovering", label: "Window Covering", cluster: 0x0102 },
+            { id: "basic", label: "Basic", cluster: 0x0000 },
+            { id: "powerConfiguration", label: "Power Configuration", cluster: 0x0001 },
+            { id: "deviceTemperatureConfiguration", label: "Device Temperature Configuration", cluster: 0x0002 },
+            { id: "identify", label: "Identify", cluster: 0x0003 },
+            { id: "groups", label: "Groups", cluster: 0x0004 },
+            { id: "scenes", label: "Scenes", cluster: 0x0005 },
+            { id: "onOffSwitchConfiguration", label: "On/Off Switch Configuration", cluster: 0x0007 },
+            { id: "levelControl", label: "Level Control", cluster: 0x0008 },
+            { id: "alarms", label: "Alarms", cluster: 0x0009 },
+            { id: "time", label: "Time", cluster: 0x000A },
+            { id: "rssi", label: "RSSI", cluster: 0x000B },
+            { id: "analogInput", label: "Analog Input", cluster: 0x000C },
+            { id: "analogOutput", label: "Analog Output", cluster: 0x000D },
+            { id: "analogValue", label: "Analog Value", cluster: 0x000E },
+            { id: "binaryInput", label: "Binary Input", cluster: 0x000F },
+            { id: "binaryOutput", label: "Binary Output", cluster: 0x0010 },
+            { id: "binaryValue", label: "Binary Value", cluster: 0x0011 },
+            { id: "multistateInput", label: "Multistate Input", cluster: 0x0012 },
+            { id: "multistateOutput", label: "Multistate Output", cluster: 0x0013 },
+            { id: "multistateValue", label: "Multistate Value", cluster: 0x0014 },
+            { id: "commissioning", label: "Commissioning", cluster: 0x0015 },
+            { id: "partition", label: "Partition", cluster: 0x0016 },
+            { id: "otaUpgrade", label: "OTA Upgrade", cluster: 0x0019 },
+            { id: "powerProfile", label: "Power Profile", cluster: 0x001A },
+            { id: "applianceControl", label: "EN50523 Appliance Control", cluster: 0x001B },
+            { id: "pollControl", label: "Poll Control", cluster: 0x0020 },
+            { id: "mobileDeviceConfiguration", label: "Mobile Device Configuration", cluster: 0x0022 },
+            { id: "neighborCleaning", label: "Neighbor Cleaning", cluster: 0x0023 },
+            { id: "nearestGateway", label: "Nearest Gateway", cluster: 0x0024 },
+            { id: "shadeConfiguration", label: "Shade Configuration", cluster: 0x0100 },
+            { id: "doorLock", label: "Door Lock", cluster: 0x0101 },
+            { id: "pumpConfigurationAndControl", label: "Pump Configuration and Control", cluster: 0x0200 },
+            { id: "thermostat", label: "Thermostat", cluster: 0x0201 },
+            { id: "fanControl", label: "Fan Control", cluster: 0x0202 },
+            { id: "dehumidificationControl", label: "Dehumidification Control", cluster: 0x0203 },
+            { id: "thermostatUserInterfaceConfiguration", label: "Thermostat User Interface Configuration", cluster: 0x0204 },
+            { id: "colorControl", label: "Color Control", cluster: 0x0300 },
+            { id: "ballastConfiguration", label: "Ballast Configuration", cluster: 0x0301 },
+            { id: "illuminanceMeasurement", label: "Illuminance Measurement", cluster: 0x0400 },
+            { id: "illuminanceLevelSensing", label: "Illuminance Level Sensing", cluster: 0x0401 },
+            { id: "temperatureMeasurement", label: "Temperature Measurement", cluster: 0x0402 },
+            { id: "pressureMeasurement", label: "Pressure Measurement", cluster: 0x0403 },
+            { id: "flowMeasurement", label: "Flow Measurement", cluster: 0x0404 },
+            { id: "relativeHumidity", label: "Relative Humidity", cluster: 0x0405 },
+            { id: "occupancySensing", label: "Occupancy Sensing", cluster: 0x0406 },
+            { id: "iasAce", label: "IAS ACE", cluster: 0x0501 },
+            { id: "iasWd", label: "IAS WD", cluster: 0x0502 },
+            { id: "genericTunnel", label: "Generic Tunnel", cluster: 0x0600 },
+            { id: "bacnetProtocolTunnel", label: "BACnet Protocol Tunnel", cluster: 0x0601 },
+            { id: "bacnetAnalogInputRegular", label: "Analog Input (BACnet Regular)", cluster: 0x0602 },
+            { id: "bacnetAnalogInputExtended", label: "Analog Input (BACnet Extended)", cluster: 0x0603 },
+            { id: "bacnetAnalogOutputRegular", label: "Analog Output (BACnet Regular)", cluster: 0x0604 },
+            { id: "bacnetAnalogOutputExtended", label: "Analog Output (BACnet Extended)", cluster: 0x0605 },
+            { id: "bacnetAnalogValueRegular", label: "Analog Value (BACnet Regular)", cluster: 0x0606 },
+            { id: "bacnetAnalogValueExtended", label: "Analog Value (BACnet Extended)", cluster: 0x0607 },
+            { id: "bacnetBinaryInputRegular", label: "Binary Input (BACnet Regular)", cluster: 0x0608 },
+            { id: "bacnetBinaryInputExtended", label: "Binary Input (BACnet Extended)", cluster: 0x0609 },
+            { id: "bacnetBinaryOutputRegular", label: "Binary Output (BACnet Regular)", cluster: 0x060A },
+            { id: "bacnetBinaryOutputExtended", label: "Binary Output (BACnet Extended)", cluster: 0x060B },
+            { id: "bacnetBinaryValueRegular", label: "Binary Value (BACnet Regular)", cluster: 0x060C },
+            { id: "bacnetBinaryValueExtended", label: "Binary Value (BACnet Extended)", cluster: 0x060D },
+            { id: "bacnetMultistateInputRegular", label: "Multistate Input (BACnet Regular)", cluster: 0x060E },
+            { id: "bacnetMultistateInputExtended", label: "Multistate Input (BACnet Extended)", cluster: 0x060F },
+            { id: "bacnetMultistateOutputRegular", label: "Multistate Output (BACnet Regular)", cluster: 0x0610 },
+            { id: "bacnetMultistateOutputExtended", label: "Multistate Output (BACnet Extended)", cluster: 0x0611 },
+            { id: "bacnetMultistateValueRegular", label: "Multistate Value (BACnet Regular)", cluster: 0x0612 },
+            { id: "bacnetMultistateValueExtended", label: "Multistate Value (BACnet Extended)", cluster: 0x0613 },
+            { id: "protocolTunnel11073", label: "11073 Protocol Tunnel", cluster: 0x0614 },
+            { id: "iso7818ProtocolTunnel", label: "ISO 7818 Protocol Tunnel", cluster: 0x0615 },
+            { id: "retailTunnel", label: "Retail Tunnel", cluster: 0x0617 },
+            { id: "price", label: "Price", cluster: 0x0700 },
+            { id: "demandResponseAndLoadControl", label: "Demand Response and Load Control", cluster: 0x0701 },
+            { id: "metering", label: "Metering (Smart Energy)", cluster: 0x0702 },
+            { id: "messaging", label: "Messaging (Smart Energy)", cluster: 0x0703 },
+            { id: "tunneling", label: "Tunneling (Smart Energy)", cluster: 0x0704 },
+            { id: "keyEstablishment", label: "Key Establishment (Smart Energy)", cluster: 0x0800 },
+            { id: "information", label: "Information (Telecom)", cluster: 0x0900 },
+            { id: "voiceOverZigbee", label: "Voice Over ZigBee", cluster: 0x0904 },
+            { id: "chatting", label: "Chatting", cluster: 0x0905 },
+            { id: "applianceIdentification", label: "EN50523 Appliance Identification", cluster: 0x0B00 },
+            { id: "meterIdentification", label: "Meter Identification", cluster: 0x0B01 },
+            { id: "electricalMeasurement", label: "Electrical Measurement", cluster: 0x0B04 },
+            { id: "diagnostics", label: "Diagnostics", cluster: 0x0B05 },
+            { id: "touchlinkCommissioning", label: "Touchlink Commissioning", cluster: 0x1000 }
+        ];
+
+        function deviceTypeOptionLabel(entry) {
+            if (!entry) {
+                return "Unknown";
+            }
+            if (entry.cluster === null || entry.cluster === undefined) {
+                return entry.label || "Unknown";
+            }
+            var hex = Number(entry.cluster).toString(16).toUpperCase();
+            while (hex.length < 4) {
+                hex = "0" + hex;
+            }
+            return (entry.label || entry.id) + " (0x" + hex + ")";
+        }
 
         function zigbeeDeviceTypeLabel(typeId) {
-            if (typeId == "onOff") {
-                return "On/Off";
+            var id = typeId || "unknown";
+            var index;
+            for (index = 0; index < deviceTypeCatalog.length; index++) {
+                if (deviceTypeCatalog[index].id == id) {
+                    return deviceTypeCatalog[index].label || id;
+                }
             }
-            if (typeId == "iasZone") {
-                return "IAS Zone";
+            return id == "unknown" ? "Unknown" : id;
+        }
+
+        function fillDeviceTypeSelect(selectedId) {
+            var typeSelect = document.getElementById("deviceTypeSelect");
+            if (!typeSelect) {
+                return;
             }
-            if (typeId == "windowCovering") {
-                return "Window covering";
+            var previous = selectedId || typeSelect.value || "unknown";
+            typeSelect.innerHTML = "";
+            var index;
+            for (index = 0; index < deviceTypeCatalog.length; index++) {
+                var entry = deviceTypeCatalog[index];
+                var option = document.createElement("option");
+                option.value = entry.id;
+                option.textContent = deviceTypeOptionLabel(entry);
+                typeSelect.appendChild(option);
             }
-            return "Unknown";
+            typeSelect.value = previous;
+            if (typeSelect.value != previous) {
+                typeSelect.value = "unknown";
+            }
+        }
+
+        function ensureDeviceTypeCatalog() {
+            fillDeviceTypeSelect(parameterDialogTypeId || "unknown");
+            return Promise.resolve(deviceTypeCatalog);
+        }
+
+        function deviceTransportLabel(transportId) {
+            if (transportId == "wifi") {
+                return "Wi-Fi";
+            }
+            return "Zigbee";
+        }
+
+        function applyParameterTypeControls() {
+            var typeReadonlyField = document.getElementById("deviceTypeReadonlyField");
+            var typeSelectField = document.getElementById("deviceTypeSelectField");
+            var typeReadonly = document.getElementById("deviceType");
+            var typeSelect = document.getElementById("deviceTypeSelect");
+            var ieeeField = document.getElementById("deviceIeeeField");
+            var transportInput = document.getElementById("deviceTransport");
+            if (transportInput) {
+                transportInput.value = deviceTransportLabel(parameterDialogTransport);
+            }
+            var wifiDevice = parameterDialogTransport == "wifi";
+            if (ieeeField) {
+                ieeeField.hidden = wifiDevice;
+            }
+            if (typeReadonlyField) {
+                typeReadonlyField.hidden = wifiDevice;
+            }
+            if (typeSelectField) {
+                typeSelectField.hidden = !wifiDevice;
+            }
+            if (!wifiDevice && typeReadonly) {
+                typeReadonly.value = zigbeeDeviceTypeLabel(parameterDialogTypeId);
+            }
+            if (wifiDevice) {
+                fillDeviceTypeSelect(parameterDialogTypeId || "unknown");
+                if (typeSelect) {
+                    typeSelect.value = parameterDialogTypeId || "unknown";
+                }
+            }
         }
 
         function findFoundDevice(ieee) {
@@ -1715,7 +1890,19 @@
                 .replace(/^_|_$/g, "");
         }
 
+        function wifiDeviceTopics(name) {
+            var deviceName = String(name || "").trim() || "device";
+            return {
+                state: "state/" + deviceName,
+                command: "commands/" + deviceName,
+                availability: "availability/" + deviceName
+            };
+        }
+
         function defaultDeviceTopics(name) {
+            if (parameterDialogTransport == "wifi") {
+                return wifiDeviceTopics(name);
+            }
             var base = mqttBaseTopicCache || "z2m";
             var slug = topicSlug(name) || "device";
             return {
@@ -1839,9 +2026,35 @@
             cell.appendChild(circle);
         }
 
+        function isMeasurementDeviceType(typeId) {
+            return typeId == "illuminanceMeasurement"
+                || typeId == "illuminanceLevelSensing"
+                || typeId == "temperatureMeasurement"
+                || typeId == "pressureMeasurement"
+                || typeId == "flowMeasurement"
+                || typeId == "relativeHumidity"
+                || typeId == "metering"
+                || typeId == "electricalMeasurement";
+        }
+
+        function fillMeasurementStatusCell(cell, entries) {
+            var textParts = [];
+            var textIndex;
+            for (textIndex = 0; textIndex < entries.length; textIndex++) {
+                if (entries[textIndex].state) {
+                    textParts.push(entries[textIndex].state);
+                }
+            }
+            cell.textContent = textParts.join(" ");
+        }
+
         function fillDeviceStatusCell(cell, device) {
             var entries = statusEntriesForDevice(device);
             var typeId = device.type || "unknown";
+            if (isMeasurementDeviceType(typeId)) {
+                fillMeasurementStatusCell(cell, entries);
+                return;
+            }
             var channels = device.channels;
             if (channels === undefined || channels === null || channels === "") {
                 channels = 1;
@@ -2620,14 +2833,21 @@
             }
             document.getElementById("deviceIeee").value = device.ieee || "";
             parameterDialogTypeId = device.type || "unknown";
-            var typeInput = document.getElementById("deviceType");
-            if (typeInput) {
-                typeInput.value = zigbeeDeviceTypeLabel(parameterDialogTypeId);
-            }
+            parameterDialogTransport = device.transport == "wifi" ? "wifi" : "zigbee";
+            applyParameterTypeControls();
             document.getElementById("deviceName").value = device.name || device.friendlyName || "";
-            document.getElementById("deviceStateTopic").value = device.state || "";
-            document.getElementById("deviceCommandTopic").value = device.command || "";
-            document.getElementById("deviceAvailabilityTopic").value = device.availability || "";
+            if (parameterDialogTransport == "wifi" && !parameterDialogIsEdit) {
+                var wifiTopics = wifiDeviceTopics(document.getElementById("deviceName").value);
+                document.getElementById("deviceStateTopic").value = wifiTopics.state;
+                document.getElementById("deviceCommandTopic").value = wifiTopics.command;
+                document.getElementById("deviceAvailabilityTopic").value = wifiTopics.availability;
+                proposedWifiTopics = wifiTopics;
+            } else {
+                document.getElementById("deviceStateTopic").value = device.state || "";
+                document.getElementById("deviceCommandTopic").value = device.command || "";
+                document.getElementById("deviceAvailabilityTopic").value = device.availability || "";
+                proposedWifiTopics = null;
+            }
             var channelsSelect = document.getElementById("deviceChannels");
             if (channelsSelect) {
                 var channelsValue = device.channels;
@@ -2689,23 +2909,30 @@
         function readParameterDialogDraft() {
             var channelsSelect = document.getElementById("deviceChannels");
             var fullControlInput = document.getElementById("deviceFullControl");
+            var typeSelect = document.getElementById("deviceTypeSelect");
             return {
+                ieee: document.getElementById("deviceIeee").value,
                 name: document.getElementById("deviceName").value,
                 state: document.getElementById("deviceStateTopic").value,
                 command: document.getElementById("deviceCommandTopic").value,
                 availability: document.getElementById("deviceAvailabilityTopic").value,
                 channels: channelsSelect ? channelsSelect.value : "1",
-                fullControl: fullControlInput ? !!fullControlInput.checked : false
+                fullControl: fullControlInput ? !!fullControlInput.checked : false,
+                type: parameterDialogTransport == "wifi" && typeSelect
+                    ? typeSelect.value
+                    : parameterDialogTypeId
             };
         }
 
         function parameterDialogDraftEquals(left, right) {
-            return left.name === right.name
+            return left.ieee === right.ieee
+                && left.name === right.name
                 && left.state === right.state
                 && left.command === right.command
                 && left.availability === right.availability
                 && left.channels === right.channels
-                && left.fullControl === right.fullControl;
+                && left.fullControl === right.fullControl
+                && left.type === right.type;
         }
 
         function parameterDialogHasUnsavedChanges() {
@@ -2771,8 +2998,27 @@
             parameterDialogIsEdit = false;
             var found = findFoundDevice(selectedFoundIeee);
             fillParameterDialog(
-                { ieee: selectedFoundIeee, type: found && found.type },
+                {
+                    ieee: selectedFoundIeee,
+                    type: found && found.type,
+                    transport: "zigbee"
+                },
                 "Device parameters"
+            );
+        }
+
+        function openWifiDeviceDialog() {
+            closeSearchDialog(true);
+            refreshMqttBaseTopic();
+            parameterDialogIsEdit = false;
+            fillDeviceTypeSelect("unknown");
+            fillParameterDialog(
+                {
+                    ieee: "",
+                    type: "unknown",
+                    transport: "wifi"
+                },
+                "Wi-Fi device"
             );
         }
 
@@ -2852,8 +3098,38 @@
             resumePairingDialog();
         }
 
+        function assignTopicIfProposed(field, previousValue, nextValue) {
+            if (field.value === "" || (previousValue != null && field.value === previousValue)) {
+                field.value = nextValue;
+            }
+        }
+
         function onDeviceNameInput() {
-            var topics = defaultDeviceTopics(document.getElementById("deviceName").value);
+            var deviceName = document.getElementById("deviceName").value;
+            if (parameterDialogTransport == "wifi") {
+                if (proposedWifiTopics == null) {
+                    return;
+                }
+                var wifiTopics = wifiDeviceTopics(deviceName);
+                assignTopicIfProposed(
+                    document.getElementById("deviceStateTopic"),
+                    proposedWifiTopics.state,
+                    wifiTopics.state
+                );
+                assignTopicIfProposed(
+                    document.getElementById("deviceCommandTopic"),
+                    proposedWifiTopics.command,
+                    wifiTopics.command
+                );
+                assignTopicIfProposed(
+                    document.getElementById("deviceAvailabilityTopic"),
+                    proposedWifiTopics.availability,
+                    wifiTopics.availability
+                );
+                proposedWifiTopics = wifiTopics;
+                return;
+            }
+            var topics = defaultDeviceTopics(deviceName);
             document.getElementById("deviceStateTopic").value = topics.state;
             document.getElementById("deviceCommandTopic").value = topics.command;
             document.getElementById("deviceAvailabilityTopic").value = topics.availability;
@@ -2868,17 +3144,41 @@
                 errorLine.textContent = "Friendly name is required";
                 return;
             }
+            var typeSelect = document.getElementById("deviceTypeSelect");
+            var typeId = parameterDialogTypeId || "unknown";
+            if (parameterDialogTransport == "wifi") {
+                if (typeSelect && typeSelect.options.length == 0) {
+                    fillDeviceTypeSelect("unknown");
+                }
+                if (typeSelect && typeSelect.value) {
+                    typeId = typeSelect.value;
+                }
+            }
+            var ieeeText = document.getElementById("deviceIeee").value;
+            if (parameterDialogTransport != "wifi" && !ieeeText) {
+                errorLine.hidden = false;
+                errorLine.textContent = "IEEE is required";
+                return;
+            }
+            var channelsValue = parseInt(document.getElementById("deviceChannels").value, 10);
+            if (isNaN(channelsValue)) {
+                channelsValue = 1;
+            }
             var body = {
-                ieee: document.getElementById("deviceIeee").value,
                 name: name,
                 friendlyName: name,
                 state: document.getElementById("deviceStateTopic").value,
                 command: document.getElementById("deviceCommandTopic").value,
                 availability: document.getElementById("deviceAvailabilityTopic").value,
-                channels: parseInt(document.getElementById("deviceChannels").value, 10),
-                fullControl: document.getElementById("deviceFullControl").checked,
-                type: parameterDialogTypeId
+                channels: channelsValue,
+                fullControl: !!(document.getElementById("deviceFullControl")
+                    && document.getElementById("deviceFullControl").checked),
+                type: typeId || "unknown",
+                transport: parameterDialogTransport || "zigbee"
             };
+            if (ieeeText) {
+                body.ieee = ieeeText;
+            }
             fetch("/api/devices", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -3226,6 +3526,16 @@
                 <input id="mqttClientTimeoutMs" type="number" min="50" max="1500" autocomplete="off">
                 <p class="field-hint">Clamped to 50–1500 ms.</p>
             </div>
+            <div class="field">
+                <label for="mqttServerBornTopic">SERVER_BORN_TOPIC</label>
+                <input id="mqttServerBornTopic" type="text" autocomplete="off">
+                <p class="field-hint">Listen for any message to refresh Zigbee states. Empty disables born listen/announce.</p>
+            </div>
+            <div class="field">
+                <label for="mqttBornIntervalMin">BORN_INTERVAL_MIN</label>
+                <input id="mqttBornIntervalMin" type="number" min="5" max="120" autocomplete="off">
+                <p class="field-hint">Minutes between host born announces after the first post-boot announce (5–120, default 20).</p>
+            </div>
             </div>
             <div class="page-footer">
                 <div class="page-footer-inner">
@@ -3311,6 +3621,7 @@
                         <span id="searchStartLabel">Search</span>
                     </button>
                     <button type="button" id="foundAddBtn" class="btn btn-primary" onclick="openParameterDialog()" disabled>Add</button>
+                    <button type="button" id="wifiDeviceBtn" class="btn btn-secondary" onclick="openWifiDeviceDialog()">WIFI DEVICE</button>
                     <button type="button" class="btn btn-secondary" onclick="closeSearchDialog(true)">Close</button>
                 </div>
             </div>
@@ -3326,13 +3637,21 @@
                 </nav>
                 <div class="tab-content">
                     <div id="parameter-tab-settings" class="parameter-tab-panel tab-panel active" role="tabpanel">
-                        <div class="field">
+                        <div class="field" id="deviceIeeeField">
                             <label for="deviceIeee">IEEE</label>
-                            <input id="deviceIeee" type="text" readonly>
+                            <input id="deviceIeee" type="text" readonly autocomplete="off">
                         </div>
                         <div class="field">
-                            <label for="deviceType">TYPE</label>
+                            <label for="deviceTransport">DEVICE SOURCE</label>
+                            <input id="deviceTransport" type="text" readonly>
+                        </div>
+                        <div class="field" id="deviceTypeReadonlyField">
+                            <label for="deviceType">DEVICE CLASS</label>
                             <input id="deviceType" type="text" readonly>
+                        </div>
+                        <div class="field" id="deviceTypeSelectField" hidden>
+                            <label for="deviceTypeSelect">DEVICE CLASS</label>
+                            <select id="deviceTypeSelect"></select>
                         </div>
                         <div class="field">
                             <label for="deviceName">NAME</label>

@@ -9,10 +9,17 @@ DeviceStore::DeviceStore() : topicMap(slots) {
     memset(slots, 0, sizeof(slots));
 }
 
-bool DeviceStore::begin() {
+bool DeviceStore::begin(bool persistToLittleFs) {
+    persistEnabled = persistToLittleFs;
     if (!LittleFS.begin(false)) {
-        LOGGER.error("Slave LittleFS mount failed; not formatting");
+        LOGGER.error("LittleFS mount failed; not formatting");
         return false;
+    }
+    if (!persistEnabled) {
+        LittleFS.remove(DEVICES_STORE_PATH);
+        LittleFS.remove(USERS_STORE_PATH);
+        LOGGER.info("No device or user files on this chip");
+        return true;
     }
     if (!topicMap.loadFromFile(DEVICES_STORE_PATH)) {
         LOGGER.info("Slave device store file missing; starting with an empty list");
@@ -55,6 +62,10 @@ void DeviceStore::requestPersist(bool allowEmpty) {
 
 void DeviceStore::persistIfDue() {
     if (!persistPending) {
+        return;
+    }
+    if (!persistEnabled) {
+        persistPending = false;
         return;
     }
     persistPending = false;

@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include <string.h>
 
-#define GLOBAL_CURRENT_SETTINGS_VERSION 5
+#define GLOBAL_CURRENT_SETTINGS_VERSION 6
 #define GLOBAL_SETTINGS_MARKER_0 0x5A
 #define GLOBAL_SETTINGS_MARKER_1 0x32
 #define GLOBAL_SETTINGS_MARKER_2 0x4D
@@ -15,6 +15,42 @@ enum WifiSettingsMode : uint8_t {
     WifiSettingsModeAp = 0,
     WifiSettingsModeSta = 1
 };
+
+enum DeviceTransport : uint8_t {
+    DeviceTransportZigbee = 0,
+    DeviceTransportWifi = 1
+};
+
+inline DeviceTransport clampDeviceTransport(uint8_t rawTransport) {
+    if (rawTransport == DeviceTransportWifi) {
+        return DeviceTransportWifi;
+    }
+    return DeviceTransportZigbee;
+}
+
+inline const char *deviceTransportJsonId(uint8_t transport) {
+    if (transport == DeviceTransportWifi) {
+        return "wifi";
+    }
+    return "zigbee";
+}
+
+inline DeviceTransport deviceTransportFromJsonId(const char *transportId) {
+    if (transportId != nullptr && strcmp(transportId, "wifi") == 0) {
+        return DeviceTransportWifi;
+    }
+    return DeviceTransportZigbee;
+}
+
+inline uint8_t clampBornIntervalMin(int rawMinutes) {
+    if (rawMinutes < MQTT_BORN_INTERVAL_MIN) {
+        return MQTT_BORN_INTERVAL_MIN;
+    }
+    if (rawMinutes > MQTT_BORN_INTERVAL_MAX) {
+        return MQTT_BORN_INTERVAL_MAX;
+    }
+    return (uint8_t)rawMinutes;
+}
 
 enum MqttServerType : uint8_t {
     MqttServerTypeDisable = 0,
@@ -79,6 +115,8 @@ struct MqttSettings {
     char password[64];
     char clientId[32];
     char baseTopic[32];
+    char serverBornTopic[64];
+    uint8_t bornIntervalMin;
 };
 
 struct ZigbeeSettings {
@@ -95,6 +133,7 @@ struct DeviceTopicEntry {
     uint8_t channelCount;
     uint8_t fullControl;
     uint8_t zigbeeType;
+    uint8_t transport;
     uint8_t used;
 };
 

@@ -40,6 +40,7 @@ public:
     void queueDeletedIeeesAndPushAll(const uint8_t (*deletedIeees)[8], int deletedCount);
     void requestRegistryPull(DeviceTopicMap *topicMap);
     void requestUsersPull(UserStore *store);
+    void publishHostStores(DeviceTopicMap *topicMap, UserStore *store);
     void requestDevicesFile();
     String devicesFileJson() const;
     void pumpRegistrySync();
@@ -52,7 +53,10 @@ public:
     bool isOnline(const uint8_t ieee[8]) const;
     bool lastRssiDbm(const uint8_t ieee[8], int8_t *rssiDbm) const;
     void appendListTelemetry(const uint8_t ieee[8], String &json) const;
+    void noteMqttState(const uint8_t ieee[8], uint8_t endpoint, const char *message);
     void noteSeen(const uint8_t ieee[8]);
+    void notePacketReceived();
+    void notePacketSent();
     uint32_t packetsReceived() const;
     uint32_t packetsSent() const;
     bool pairingActive() const;

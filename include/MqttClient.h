@@ -23,9 +23,13 @@ public:
     void publishStatus(const char *payload);
     void publishDevices(const String &json);
     void publishDeviceState(const DeviceTopicEntry *entry, const char *message, uint8_t endpoint);
+    bool publishDeviceCommand(const DeviceTopicEntry *entry, const char *message, uint8_t endpoint);
     void subscribeDeviceCommands();
+    void serviceBornAnnounce();
+    bool publishServerBornAnnounce();
     const String &permitJoinTopic() const { return topicPermitJoin; }
     const String &configDeviceTopic() const { return topicConfigDevice; }
+    const String &serverBornTopic() const { return topicServerBorn; }
 
 private:
     SettingsManager *settingsManager;
@@ -37,14 +41,18 @@ private:
     MessageFn messageHandler = nullptr;
     unsigned long lastReconnectMs = 0;
     unsigned long reconnectBackoffMs = 0;
+    unsigned long bootMs = 0;
+    unsigned long lastBornAnnounceMs = 0;
+    bool bornBootAnnounceDone = false;
 
     String topicStatus;
     String topicDevices;
     String topicPermitJoin;
     String topicConfigDevice;
+    String topicServerBorn;
     String lastDevicesJson;
-    static constexpr int kMaxCommandSubscriptions = DEVICE_MAP_SLOTS * 2;
-    char subscribedCommandTopics[kMaxCommandSubscriptions][64];
+    static constexpr int kMaxTopicSubscriptions = DEVICE_MAP_SLOTS * 4;
+    char subscribedTopics[kMaxTopicSubscriptions][64];
 
     void rebuildTopics();
     bool usesLocalBroker() const;
@@ -52,8 +60,9 @@ private:
     void applyRemoteBrokerTarget();
     void reconnect();
     void subscribeBridge();
-    void clearCommandSubscriptions();
-    int findCommandSubscription(const char *topic) const;
-    int nextFreeCommandSubscription() const;
+    void clearTopicSubscriptions();
+    int findTopicSubscription(const char *topic) const;
+    int nextFreeTopicSubscription() const;
+    void keepOrSubscribe(const String &subscribeTopic, bool *keepSubscription);
     bool publishMessage(const char *topic, const char *payload, bool retained);
 };

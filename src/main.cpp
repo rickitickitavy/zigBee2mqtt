@@ -14,7 +14,6 @@
 #include "MqttClient.h"
 #include "MqttBroker.h"
 #include "ZigbeeCoordinator.h"
-#include "SerialCli.h"
 #include "WebConsole.h"
 #include "JsonField.h"
 #include "InterChipHost.h"
@@ -47,7 +46,6 @@ static WiFiController *wifiController = nullptr;
 static MqttClient *mqttClient = nullptr;
 static MqttBroker *mqttBroker = nullptr;
 static ZigbeeCoordinator *zigbeeCoordinator = nullptr;
-static SerialCli *serialCli = nullptr;
 static WebConsole *webConsole = nullptr;
 static UserStore *userStore = nullptr;
 static FoundDeviceList *foundDevices = nullptr;
@@ -57,7 +55,6 @@ static bool slaveZigbeeStarted = false;
 static bool slaveZigbeeStarting = false;
 static bool persistHostDeviceList();
 static bool onUsersRestored(const char (*removedNames)[USER_NAME_MAX], int removedCount);
-static void persistSlaveUserStore();
 static void onHostUserChanged(UserChangeKind kind, const UserRecord *user);
 static void onSlaveUserSync(uint8_t flags, const UserRecord *user);
 static bool hostPreparationLatched = false;
@@ -79,6 +76,9 @@ static void pumpHostDeferredStoreWork() {
         if (mqttClient != nullptr && topicMap != nullptr) {
             mqttClient->subscribeDeviceCommands();
         }
+    }
+    if (userStore != nullptr) {
+        userStore->persistIfDue();
     }
 }
 static void applyRegisteredDeviceCommand(
@@ -152,12 +152,76 @@ static void applyDeviceConfigPayload(const char *payload) {
     LOGGER.info("Configured topics for " + ieeeText);
 }
 
+struct PendingWifiCommand {
+    bool used;
+    uint8_t ieee[8];
+    uint8_t endpoint;
+    char action[64];
+};
+
+static constexpr int kPendingWifiCommands = 8;
+static PendingWifiCommand pendingWifiCommands[kPendingWifiCommands];
+static portMUX_TYPE pendingWifiCommandMux = portMUX_INITIALIZER_UNLOCKED;
+
+static bool enqueueWifiDeviceCommand(const DeviceTopicEntry *entry, const char *action, uint8_t endpoint) {
+    if (entry == nullptr || action == nullptr || action[0] == '\0') {
+        return false;
+    }
+    if (entry->commandTopic[0] == '\0') {
+        LOGGER.warning("WiFi command topic is empty");
+        return false;
+    }
+    portENTER_CRITICAL(&pendingWifiCommandMux);
+    PendingWifiCommand *slot = nullptr;
+    for (int index = 0; index < kPendingWifiCommands; index++) {
+        if (!pendingWifiCommands[index].used) {
+            slot = &pendingWifiCommands[index];
+            break;
+        }
+    }
+    if (slot == nullptr) {
+        slot = &pendingWifiCommands[0];
+    }
+    memset(slot, 0, sizeof(*slot));
+    memcpy(slot->ieee, entry->ieee, 8);
+    slot->endpoint = DeviceTopicMap::isUsableEndpoint(endpoint) ? endpoint : 1;
+    strncpy(slot->action, action, sizeof(slot->action) - 1);
+    slot->used = true;
+    portEXIT_CRITICAL(&pendingWifiCommandMux);
+    return true;
+}
+
+static void pumpWifiDeviceCommands() {
+    if (topicMap == nullptr || mqttClient == nullptr || !mqttClient->isConnected()) {
+        return;
+    }
+    for (int index = 0; index < kPendingWifiCommands; index++) {
+        if (!pendingWifiCommands[index].used) {
+            continue;
+        }
+        PendingWifiCommand pending;
+        portENTER_CRITICAL(&pendingWifiCommandMux);
+        pending = pendingWifiCommands[index];
+        pendingWifiCommands[index].used = false;
+        portEXIT_CRITICAL(&pendingWifiCommandMux);
+        DeviceTopicEntry *entry = topicMap->findByIeee(pending.ieee);
+        if (entry == nullptr || entry->transport != DeviceTransportWifi) {
+            continue;
+        }
+        if (!mqttClient->publishDeviceCommand(entry, pending.action, pending.endpoint)) {
+            LOGGER.warning("WiFi command publish failed");
+            continue;
+        }
+        ZIGBEE_SPI_PROXY.notePacketSent();
+    }
+}
+
 static void applyRegisteredDeviceCommand(
     DeviceTopicEntry *entry,
     const char *payload,
     uint8_t topicEndpoint
 ) {
-    if (entry == nullptr) {
+    if (entry == nullptr || entry->transport == DeviceTransportWifi) {
         return;
     }
     String action = String(payload != nullptr ? payload : "");
@@ -223,6 +287,13 @@ static int applyManualDeviceCommand(const char *ieeeText, const char *payload, i
     if (body.length() == 0) {
         return 400;
     }
+    if (entry->transport == DeviceTransportWifi) {
+        const uint8_t commandEndpoint = channel > 0 && channel <= 240 ? (uint8_t)channel : 1;
+        if (!enqueueWifiDeviceCommand(entry, body.c_str(), commandEndpoint)) {
+            return 503;
+        }
+        return 200;
+    }
     uint8_t topicEndpoint = 0;
     String wrapped;
     const char *applyPayload = body.c_str();
@@ -241,7 +312,203 @@ static int applyManualDeviceCommand(const char *ieeeText, const char *payload, i
     return 200;
 }
 
+static void hostCollectZigbeeStatuses() {
+    if (topicMap == nullptr) {
+        return;
+    }
+    int slotIndex = topicMap->nextUsedIndex(0);
+    while (slotIndex >= 0) {
+        DeviceTopicEntry *entry = topicMap->slotAt(slotIndex);
+        slotIndex = topicMap->nextUsedIndex(slotIndex + 1);
+        if (entry == nullptr || !entry->used || entry->transport == DeviceTransportWifi) {
+            continue;
+        }
+        uint8_t endpoints[DEVICE_CHANNEL_COUNT_MAX];
+        uint8_t endpointCount = 0;
+        if (entry->channelCount == DEVICE_CHANNEL_PARSE) {
+            endpoints[0] = 1;
+            endpointCount = 1;
+        } else if (entry->channelCount >= 2) {
+            endpointCount = entry->channelCount;
+            for (uint8_t channel = 1; channel <= entry->channelCount; channel++) {
+                endpoints[channel - 1] = channel;
+            }
+        } else {
+            endpoints[0] = 1;
+            endpointCount = 1;
+        }
+        for (uint8_t i = 0; i < endpointCount; i++) {
+            const uint8_t endpoint = endpoints[i];
+            if (entry->zigbeeType == ZigbeeDeviceTypeOnOff) {
+                ZIGBEE_SPI_PROXY.readAttribute(
+                    entry->ieee,
+                    endpoint,
+                    kZigbeeClusterOnOff,
+                    0x0000
+                );
+            } else if (entry->zigbeeType == ZigbeeDeviceTypeIasZone) {
+                ZIGBEE_SPI_PROXY.readAttribute(
+                    entry->ieee,
+                    endpoint,
+                    kZigbeeClusterIasZone,
+                    kZigbeeAttrIasZoneStatus
+                );
+            } else if (zigbeeDeviceTypeIsMeasurement(entry->zigbeeType)) {
+                const ZigbeeDeviceTypeInfo *measurementType = zigbeeDeviceTypeInfo(entry->zigbeeType);
+                if (measurementType != nullptr && measurementType->clusterId != kZigbeeDeviceTypeNoCluster) {
+                    ZIGBEE_SPI_PROXY.readAttribute(
+                        entry->ieee,
+                        endpoint,
+                        measurementType->clusterId,
+                        0x0000
+                    );
+                }
+            } else if (entry->zigbeeType == ZigbeeDeviceTypeWindowCovering) {
+                ZIGBEE_SPI_PROXY.readAttribute(
+                    entry->ieee,
+                    endpoint,
+                    kZigbeeClusterWindowCovering,
+                    kZigbeeAttrCurrentPositionLiftPercentage
+                );
+                ZIGBEE_SPI_PROXY.readAttribute(
+                    entry->ieee,
+                    endpoint,
+                    kZigbeeClusterWindowCovering,
+                    kZigbeeAttrWindowCoveringMoveStatus
+                );
+            }
+        }
+        const uint8_t batteryEndpoint = endpointCount > 0 ? endpoints[0] : 1;
+        ZIGBEE_SPI_PROXY.readAttribute(
+            entry->ieee,
+            batteryEndpoint,
+            kZigbeeClusterPowerConfig,
+            kZigbeeAttrBatteryPercentageRemaining
+        );
+    }
+    LOGGER.info("Zigbee status collect requested after server-born");
+}
+
+static String trimmedMqttText(const char *payload) {
+    String body = String(payload != nullptr ? payload : "");
+    body.trim();
+    if (body.length() >= 2 && body.charAt(0) == '"' && body.charAt(body.length() - 1) == '"') {
+        body = body.substring(1, body.length() - 1);
+        body.trim();
+    }
+    return body;
+}
+
+static DeviceTopicEntry *findWifiStateEntry(const char *topic, uint8_t *topicEndpoint) {
+    if (topicMap == nullptr || topic == nullptr || topic[0] == '\0') {
+        return nullptr;
+    }
+    DeviceTopicEntry *exact = topicMap->findByStateTopic(topic, topicEndpoint);
+    if (exact != nullptr && exact->transport == DeviceTransportWifi) {
+        return exact;
+    }
+    DeviceTopicEntry *best = nullptr;
+    size_t bestLength = 0;
+    int slotIndex = topicMap->nextUsedIndex(0);
+    while (slotIndex >= 0) {
+        DeviceTopicEntry *entry = topicMap->slotAt(slotIndex);
+        slotIndex = topicMap->nextUsedIndex(slotIndex + 1);
+        if (entry == nullptr || entry->transport != DeviceTransportWifi || entry->stateTopic[0] == '\0') {
+            continue;
+        }
+        const size_t mappedLength = strlen(entry->stateTopic);
+        if (strncmp(topic, entry->stateTopic, mappedLength) != 0) {
+            continue;
+        }
+        if (topic[mappedLength] != '\0' && topic[mappedLength] != '/') {
+            continue;
+        }
+        if (mappedLength <= bestLength) {
+            continue;
+        }
+        best = entry;
+        bestLength = mappedLength;
+        if (topicEndpoint != nullptr) {
+            *topicEndpoint = 0;
+            if (topic[mappedLength] == '/' && DeviceTopicMap::usesTopicSuffix(entry->channelCount)) {
+                const int parsed = atoi(topic + mappedLength + 1);
+                if (DeviceTopicMap::isUsableEndpoint((uint8_t)parsed)) {
+                    *topicEndpoint = (uint8_t)parsed;
+                }
+            }
+        }
+    }
+    return best;
+}
+
+static void applyWifiMqttState(const char *topic, const char *payload) {
+    if (topicMap == nullptr || topic == nullptr) {
+        return;
+    }
+    uint8_t topicEndpoint = 0;
+    DeviceTopicEntry *entry = findWifiStateEntry(topic, &topicEndpoint);
+    if (entry == nullptr) {
+        return;
+    }
+    String body = trimmedMqttText(payload);
+    uint8_t statusEndpoint = topicEndpoint;
+    if (DeviceTopicMap::usesPayloadParse(entry->channelCount)) {
+        uint8_t parsedEndpoint = 0;
+        String parsedAction;
+        if (DeviceTopicMap::parseChannelPayload(payload, &parsedEndpoint, &parsedAction)) {
+            statusEndpoint = parsedEndpoint;
+            body = trimmedMqttText(parsedAction.c_str());
+        } else if (body.length() == 0) {
+            LOGGER.warning("WiFi state ignored; expected ch-<ep>##payload");
+            return;
+        } else {
+            statusEndpoint = 1;
+        }
+    } else if (statusEndpoint == 0) {
+        statusEndpoint = 1;
+    }
+    if (body.length() == 0) {
+        return;
+    }
+    LOGGER.info("WiFi state " + String(topic) + " = " + body);
+    ZIGBEE_SPI_PROXY.noteMqttState(entry->ieee, statusEndpoint, body.c_str());
+    ZIGBEE_SPI_PROXY.notePacketReceived();
+}
+
+static void applyMeasurementMqttState(const char *topic, const char *payload) {
+    if (topicMap == nullptr || topic == nullptr) {
+        return;
+    }
+    uint8_t topicEndpoint = 0;
+    DeviceTopicEntry *entry = topicMap->findByStateTopic(topic, &topicEndpoint);
+    if (entry == nullptr
+        || entry->transport == DeviceTransportWifi
+        || !zigbeeDeviceTypeIsMeasurement(entry->zigbeeType)) {
+        return;
+    }
+    const String body = trimmedMqttText(payload);
+    if (body.length() == 0) {
+        return;
+    }
+    uint8_t statusEndpoint = topicEndpoint;
+    if (!DeviceTopicMap::isUsableEndpoint(statusEndpoint)) {
+        statusEndpoint = 1;
+    }
+    LOGGER.info("Measurement state " + String(topic) + " = " + body);
+    ZIGBEE_SPI_PROXY.noteMqttState(entry->ieee, statusEndpoint, body.c_str());
+}
+
 static void onMqttLogicalMessage(const char *topic, const char *payload) {
+    if (mqttClient != nullptr
+        && mqttClient->serverBornTopic().length() > 0
+        && strcmp(topic, mqttClient->serverBornTopic().c_str()) == 0) {
+        hostCollectZigbeeStatuses();
+        return;
+    }
+
+    applyWifiMqttState(topic, payload);
+    applyMeasurementMqttState(topic, payload);
+
     if (strcmp(topic, mqttClient->permitJoinTopic().c_str()) == 0) {
         String body = String(payload);
         body.trim();
@@ -275,6 +542,12 @@ static void onMqttLogicalMessage(const char *topic, const char *payload) {
     DeviceTopicEntry *entry = topicMap->findByCommandTopic(topic, &topicEndpoint);
     if (entry == nullptr) {
         return;
+    }
+    if (entry->transport == DeviceTransportWifi) {
+        uint8_t stateEndpoint = 0;
+        if (findWifiStateEntry(topic, &stateEndpoint) == nullptr) {
+            ZIGBEE_SPI_PROXY.notePacketReceived();
+        }
     }
     applyRegisteredDeviceCommand(entry, payload, topicEndpoint);
 }
@@ -319,8 +592,7 @@ static void onHostSpiEvent(const SpiFrame &frame) {
         );
     }
     if (frame.cmd == SpiEvtSettingsOk && topicMap != nullptr) {
-        ZIGBEE_SPI_PROXY.requestRegistryPull(topicMap);
-        ZIGBEE_SPI_PROXY.requestUsersPull(userStore);
+        ZIGBEE_SPI_PROXY.publishHostStores(topicMap, userStore);
     }
 }
 
@@ -441,14 +713,20 @@ static bool onDeviceUpserted(const DeviceTopicEntry *entry) {
         mqttClient->subscribeDeviceCommands();
     }
     persistHostDeviceList();
+    if (entry != nullptr && entry->transport == DeviceTransportWifi) {
+        return true;
+    }
     return ZIGBEE_SPI_PROXY.enqueueDeviceUpsert(entry);
 }
 
-static bool onDeviceRemoved(const uint8_t ieee[8]) {
+static bool onDeviceRemoved(const uint8_t ieee[8], uint8_t transport) {
     if (mqttClient != nullptr) {
         mqttClient->subscribeDeviceCommands();
     }
     persistHostDeviceList();
+    if (transport == DeviceTransportWifi) {
+        return true;
+    }
     return ZIGBEE_SPI_PROXY.enqueueDeviceDelete(ieee);
 }
 
@@ -477,14 +755,6 @@ static void onHostUserChanged(UserChangeKind kind, const UserRecord *user) {
     ZIGBEE_SPI_PROXY.enqueueUserUpsert(user);
 }
 
-static void persistSlaveUserStore() {
-    if (userStore == nullptr) {
-        return;
-    }
-    userStore->requestPersist();
-    userStore->persistIfDue();
-}
-
 static void onSlaveUserSync(uint8_t flags, const UserRecord *user) {
     if ((flags & SPI_USER_SYNC_RESET) != 0) {
         LOGGER.warning("Host cannot replace the full user store");
@@ -499,12 +769,10 @@ static void onSlaveUserSync(uint8_t flags, const UserRecord *user) {
             return;
         }
         userStore->removeByName(user->userName, true);
-        persistSlaveUserStore();
         return;
     }
     if ((flags & SPI_USER_SYNC_ENTRY) != 0 && user != nullptr) {
         userStore->upsertFromRecord(user, true);
-        persistSlaveUserStore();
     }
 }
 
@@ -522,14 +790,12 @@ static void runDeviceRegistryFixtures() {
     }
 
     if (!settingsManager->mainEqualsCommitted()) {
-        LOGGER.error("Main snapshot fixture failed before device save");
-    } else if (!settingsManager->saveDeviceSlot(0)) {
-        LOGGER.error("Device slot save fixture failed");
-    } else if (!settingsManager->mainEqualsCommitted()) {
-        LOGGER.error("Device save dirtied main-block snapshot");
+        LOGGER.error("Main snapshot fixture failed");
     } else {
-        LOGGER.info("Device slot save leaves main snapshot clean");
+        LOGGER.info("Main snapshot fixture ok");
     }
+
+    const String savedDeviceList = topicMap != nullptr ? topicMap->listStoreJson() : String("[]");
 
     if (foundDevices == nullptr || topicMap == nullptr) {
         return;
@@ -752,6 +1018,7 @@ static void runDeviceRegistryFixtures() {
         memset(probe, 0, sizeof(DeviceTopicEntry));
     }
     foundDevices->clear();
+    topicMap->replaceFromJson(savedDeviceList);
 
     LOGGER.info("Device map cap " + String(DEVICE_MAP_SLOTS) + " (overflow rejected)");
 }
@@ -835,26 +1102,12 @@ static void startZigbeeOnOwnTask(uint8_t channel, uint8_t permitJoinSec) {
     }
 }
 
-static void persistSlaveDeviceStore(bool allowEmpty) {
-    if (deviceStore == nullptr) {
-        return;
-    }
-    deviceStore->requestPersist(allowEmpty);
-    deviceStore->persistIfDue();
-}
-
 static void createSlaveCoordinator() {
     if (zigbeeCoordinator != nullptr) {
         return;
     }
     zigbeeCoordinator = new ZigbeeCoordinator();
-    zigbeeCoordinator->setRegistryChangedHandler(
-        []() {
-            persistSlaveDeviceStore(false);
-            INTER_CHIP_SLAVE.requestDeviceDump();
-            INTER_CHIP_SLAVE.requestDevicesFileDump();
-        }
-    );
+    zigbeeCoordinator->setRegistryChangedHandler(nullptr);
     zigbeeCoordinator->setJoinClosedHandler(
         []() { INTER_CHIP_SLAVE.enqueueJoinClosed(); }
     );
@@ -922,14 +1175,12 @@ static void onSlaveDeviceSync(uint8_t flags, const DeviceTopicEntry *entry) {
         } else if (storeMap != nullptr) {
             storeMap->removeByIeee(entry->ieee);
         }
-        persistSlaveDeviceStore(true);
     } else if ((flags & SPI_DEVICE_SYNC_ENTRY) != 0 && entry != nullptr) {
         if (zigbeeCoordinator != nullptr) {
             zigbeeCoordinator->upsertRegisteredDevice(entry);
         } else if (storeMap != nullptr) {
             storeMap->upsertFromEntry(entry, false);
         }
-        persistSlaveDeviceStore(false);
     }
     if (zigbeeCoordinator != nullptr) {
         zigbeeCoordinator->markRegistryReady();
@@ -1163,14 +1414,13 @@ static void setupHost() {
     settingsManager = new SettingsManager();
     settingsManager->loadDeviceFile();
     userStore = new UserStore();
-    userStore->begin(false);
+    userStore->begin(true);
     userStore->setChangedHandler(onHostUserChanged);
     topicMap = settingsManager->deviceMap();
     foundDevices = new FoundDeviceList();
     wifiController = new WiFiController(settingsManager, forceAp);
     mqttClient = new MqttClient(settingsManager, topicMap);
     mqttBroker = new MqttBroker(settingsManager);
-    serialCli = new SerialCli(settingsManager);
     webConsole = new WebConsole(settingsManager, userStore);
     webConsole->setDeviceServices(
         foundDevices,
@@ -1192,8 +1442,7 @@ static void setupHost() {
     webConsole->setUsersRestoredHandler(onUsersRestored);
     webConsole->setGatewayStatusHandler(hostGatewayStatusJson);
     webConsole->setDevicesFileHandler([]() {
-        ZIGBEE_SPI_PROXY.requestDevicesFile();
-        return ZIGBEE_SPI_PROXY.devicesFileJson();
+        return settingsManager != nullptr ? settingsManager->devicesJsonFile() : String("[]");
     });
     webConsole->begin();
     wifiController->setInterfaceReadyHandler([]() {
@@ -1215,7 +1464,6 @@ static void setupHost() {
     ZIGBEE_SPI_PROXY.begin();
     ZIGBEE_SPI_PROXY.setLightStateHandler(onLightState);
     ZIGBEE_SPI_PROXY.setRegistryPullDoneHandler([]() {
-        requestHostDeviceListPersist();
         requestHostMqttCommandResubscribe();
     });
 
@@ -1226,7 +1474,6 @@ static void setupHost() {
     INTER_CHIP_HOST.begin();
     runDeviceRegistryFixtures();
     LOGGER.info("Host SPI ready; Zigbee radio stays on the slave");
-    LOGGER.info("USB CLI ready. Type help");
 }
 
 static void setupSlave() {
@@ -1243,9 +1490,9 @@ static void setupSlave() {
     INTER_CHIP_SLAVE.setDeviceSyncHandler(onSlaveDeviceSync);
     INTER_CHIP_SLAVE.setUserSyncHandler(onSlaveUserSync);
     deviceStore = new DeviceStore();
-    deviceStore->begin();
+    deviceStore->begin(false);
     userStore = new UserStore();
-    userStore->begin(true);
+    userStore->begin(false);
     INTER_CHIP_SLAVE.setUserMapSource(userStore);
     createSlaveCoordinator();
     if (zigbeeCoordinator != nullptr) {
@@ -1255,15 +1502,13 @@ static void setupSlave() {
         }
     }
     INTER_CHIP_SLAVE.setDeviceMapSource(deviceStore->deviceMap());
-    INTER_CHIP_SLAVE.setDevicesFileSource([]() {
-        return deviceStore != nullptr ? deviceStore->readFileText() : String("[]");
-    });
+    INTER_CHIP_SLAVE.setDevicesFileSource(nullptr);
     INTER_CHIP_SLAVE.begin();
     LOGGER.setLineHook(interChipSlaveLogHook);
     LOGGER.info("role=slave");
     LOGGER.info("z2m-gateway " FIRMWARE_VERSION " slave");
     LOGGER.info("Reset " + String((int)esp_reset_reason()));
-    LOGGER.info("Device and user stores on slave LittleFS; no Wi-Fi on slave");
+    LOGGER.info("Zigbee runtime copy only; devices and users stay on the host");
 }
 
 void setup() {
@@ -1297,7 +1542,7 @@ void loop() {
         maybeStartNtp();
         mqttBroker->dispatch(wifiController->hasUsableInterface());
         mqttClient->dispatch(wifiController->isStaConnected());
-        serialCli->dispatch();
+        pumpWifiDeviceCommands();
         ZIGBEE_SPI_PROXY.pumpRegistrySync();
         pumpHostDeferredStoreWork();
         if (!hostPreparationLatched && wifiController->hasUsableInterface() && INTER_CHIP_HOST.isNormal()) {

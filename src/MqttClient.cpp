@@ -2,13 +2,16 @@
 #include "MqttBroker.h"
 #include "Logger.h"
 #include "StatusRgb.h"
+#include "Defines.h"
+#include "ZigbeeDeviceType.h"
 
 #include <string.h>
 
 MqttClient::MqttClient(SettingsManager *settingsManager, DeviceTopicMap *topicMap)
     : settingsManager(settingsManager), topicMap(topicMap), client(nullptr) {
     client = new PubSubClient(wifiClient);
-    memset(subscribedCommandTopics, 0, sizeof(subscribedCommandTopics));
+    memset(subscribedTopics, 0, sizeof(subscribedTopics));
+    bootMs = millis();
 }
 
 MqttClient::~MqttClient() {
@@ -35,6 +38,7 @@ void MqttClient::rebuildTopics() {
     topicDevices = base + "/bridge/devices";
     topicPermitJoin = base + "/bridge/permit_join";
     topicConfigDevice = base + "/bridge/config/device";
+    topicServerBorn = String(settings->mqtt.serverBornTopic);
 }
 
 void MqttClient::applyRemoteBrokerTarget() {
@@ -49,6 +53,9 @@ void MqttClient::begin(void (*rawCallback)(char *topic, byte *payload, unsigned 
     client->setCallback(rawCallback);
     client->setBufferSize(1024);
     client->setSocketTimeout(settings->mqtt.clientTimeoutMs / 1000 > 0 ? settings->mqtt.clientTimeoutMs / 1000 : 1);
+    bootMs = millis();
+    lastBornAnnounceMs = 0;
+    bornBootAnnounceDone = false;
 }
 
 void MqttClient::onMessage(char *topic, byte *payload, unsigned int length) {
@@ -58,10 +65,7 @@ void MqttClient::onMessage(char *topic, byte *payload, unsigned int length) {
         body += (char)payload[i];
     }
     LOGGER.debug("MQTT " + String(topic) + " = " + body);
-    uint8_t commandEndpoint = 0;
-    if (topicMap != nullptr && topicMap->findByCommandTopic(topic, &commandEndpoint) != nullptr) {
-        STATUS_RGB.pulseMqttCommandReceived();
-    }
+    STATUS_RGB.pulseMqttCommandReceived();
     if (messageHandler != nullptr) {
         messageHandler(topic, body.c_str());
     }
@@ -74,38 +78,67 @@ bool MqttClient::isConnected() const {
     return client != nullptr && client->connected();
 }
 
+void MqttClient::clearTopicSubscriptions() {
+    memset(subscribedTopics, 0, sizeof(subscribedTopics));
+}
+
+int MqttClient::findTopicSubscription(const char *topic) const {
+    if (topic == nullptr || topic[0] == '\0') {
+        return -1;
+    }
+    for (int i = 0; i < kMaxTopicSubscriptions; i++) {
+        if (subscribedTopics[i][0] != '\0' && strcmp(subscribedTopics[i], topic) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+int MqttClient::nextFreeTopicSubscription() const {
+    for (int i = 0; i < kMaxTopicSubscriptions; i++) {
+        if (subscribedTopics[i][0] == '\0') {
+            return i;
+        }
+    }
+    return -1;
+}
+
+void MqttClient::keepOrSubscribe(const String &subscribeTopic, bool *keepSubscription) {
+    if (subscribeTopic.length() == 0 || keepSubscription == nullptr) {
+        return;
+    }
+    const int existing = findTopicSubscription(subscribeTopic.c_str());
+    if (existing >= 0) {
+        keepSubscription[existing] = true;
+        return;
+    }
+    if (!client->subscribe(subscribeTopic.c_str())) {
+        LOGGER.warning("MQTT subscribe failed topic=" + subscribeTopic);
+        return;
+    }
+    const int freeIndex = nextFreeTopicSubscription();
+    if (freeIndex < 0) {
+        LOGGER.warning("MQTT subscribe table full topic=" + subscribeTopic);
+        return;
+    }
+    strncpy(
+        subscribedTopics[freeIndex],
+        subscribeTopic.c_str(),
+        sizeof(subscribedTopics[freeIndex]) - 1
+    );
+    subscribedTopics[freeIndex][sizeof(subscribedTopics[freeIndex]) - 1] = '\0';
+    keepSubscription[freeIndex] = true;
+    LOGGER.info("MQTT subscribe topic=" + subscribeTopic);
+}
+
 void MqttClient::subscribeBridge() {
     client->subscribe(topicPermitJoin.c_str());
     client->subscribe(topicConfigDevice.c_str());
     subscribeDeviceCommands();
 }
 
-void MqttClient::clearCommandSubscriptions() {
-    memset(subscribedCommandTopics, 0, sizeof(subscribedCommandTopics));
-}
-
-int MqttClient::findCommandSubscription(const char *topic) const {
-    if (topic == nullptr || topic[0] == '\0') {
-        return -1;
-    }
-    for (int i = 0; i < kMaxCommandSubscriptions; i++) {
-        if (subscribedCommandTopics[i][0] != '\0' && strcmp(subscribedCommandTopics[i], topic) == 0) {
-            return i;
-        }
-    }
-    return -1;
-}
-
-int MqttClient::nextFreeCommandSubscription() const {
-    for (int i = 0; i < kMaxCommandSubscriptions; i++) {
-        if (subscribedCommandTopics[i][0] == '\0') {
-            return i;
-        }
-    }
-    return -1;
-}
-
 void MqttClient::subscribeDeviceCommands() {
+    rebuildTopics();
     if (usesLocalBroker()) {
         return;
     }
@@ -113,57 +146,44 @@ void MqttClient::subscribeDeviceCommands() {
         return;
     }
 
-    bool keepSubscription[kMaxCommandSubscriptions];
+    bool keepSubscription[kMaxTopicSubscriptions];
     memset(keepSubscription, 0, sizeof(keepSubscription));
+
+    if (topicServerBorn.length() > 0) {
+        keepOrSubscribe(topicServerBorn, keepSubscription);
+    }
 
     for (int slotIndex = 0; slotIndex < DEVICE_MAP_SLOTS; slotIndex++) {
         DeviceTopicEntry *entry = topicMap->slotAt(slotIndex);
-        if (entry == nullptr || !entry->used || entry->commandTopic[0] == '\0') {
+        if (entry == nullptr || !entry->used) {
             continue;
         }
 
-        String subscribeTopics[2];
-        subscribeTopics[0] = String(entry->commandTopic);
-        int topicCount = 1;
-        if (DeviceTopicMap::usesTopicSuffix(entry->channelCount)) {
-            subscribeTopics[1] = String(entry->commandTopic) + "/+";
-            topicCount = 2;
+        if (entry->transport != DeviceTransportWifi && entry->commandTopic[0] != '\0') {
+            keepOrSubscribe(String(entry->commandTopic), keepSubscription);
+            if (DeviceTopicMap::usesTopicSuffix(entry->channelCount)) {
+                keepOrSubscribe(String(entry->commandTopic) + "/+", keepSubscription);
+            }
         }
 
-        for (int topicIndex = 0; topicIndex < topicCount; topicIndex++) {
-            const String &subscribeTopic = subscribeTopics[topicIndex];
-            const int existing = findCommandSubscription(subscribeTopic.c_str());
-            if (existing >= 0) {
-                keepSubscription[existing] = true;
-                continue;
+        if (entry->stateTopic[0] != '\0'
+            && (entry->transport == DeviceTransportWifi
+                || zigbeeDeviceTypeIsMeasurement(entry->zigbeeType))) {
+            keepOrSubscribe(String(entry->stateTopic), keepSubscription);
+            if (entry->transport != DeviceTransportWifi
+                && DeviceTopicMap::usesTopicSuffix(entry->channelCount)) {
+                keepOrSubscribe(String(entry->stateTopic) + "/+", keepSubscription);
             }
-            if (!client->subscribe(subscribeTopic.c_str())) {
-                LOGGER.warning("MQTT subscribe failed topic=" + subscribeTopic);
-                continue;
-            }
-            const int freeIndex = nextFreeCommandSubscription();
-            if (freeIndex < 0) {
-                LOGGER.warning("MQTT subscribe table full topic=" + subscribeTopic);
-                continue;
-            }
-            strncpy(
-                subscribedCommandTopics[freeIndex],
-                subscribeTopic.c_str(),
-                sizeof(subscribedCommandTopics[freeIndex]) - 1
-            );
-            subscribedCommandTopics[freeIndex][sizeof(subscribedCommandTopics[freeIndex]) - 1] = '\0';
-            keepSubscription[freeIndex] = true;
-            LOGGER.info("MQTT subscribe topic=" + subscribeTopic);
         }
     }
 
-    for (int i = 0; i < kMaxCommandSubscriptions; i++) {
-        if (subscribedCommandTopics[i][0] == '\0' || keepSubscription[i]) {
+    for (int i = 0; i < kMaxTopicSubscriptions; i++) {
+        if (subscribedTopics[i][0] == '\0' || keepSubscription[i]) {
             continue;
         }
-        client->unsubscribe(subscribedCommandTopics[i]);
-        LOGGER.info("MQTT unsubscribe topic=" + String(subscribedCommandTopics[i]));
-        subscribedCommandTopics[i][0] = '\0';
+        client->unsubscribe(subscribedTopics[i]);
+        LOGGER.info("MQTT unsubscribe topic=" + String(subscribedTopics[i]));
+        subscribedTopics[i][0] = '\0';
     }
 }
 
@@ -191,7 +211,7 @@ void MqttClient::reconnect() {
 
     reconnectBackoffMs = 0;
     lastDevicesJson = "";
-    clearCommandSubscriptions();
+    clearTopicSubscriptions();
     LOGGER.info("MQTT connected");
     subscribeBridge();
     publishStatus("online");
@@ -210,6 +230,7 @@ void MqttClient::dispatch(bool staConnected) {
             attachLocalBroker();
         }
         STATUS_RGB.setMqttConnected(true);
+        serviceBornAnnounce();
         return;
     }
 
@@ -222,6 +243,7 @@ void MqttClient::dispatch(bool staConnected) {
     if (client->connected()) {
         STATUS_RGB.setMqttConnected(true);
         client->loop();
+        serviceBornAnnounce();
         return;
     }
 
@@ -269,6 +291,9 @@ void MqttClient::publishDeviceState(const DeviceTopicEntry *entry, const char *m
     if (entry == nullptr || entry->stateTopic[0] == '\0') {
         return;
     }
+    if (entry->transport == DeviceTransportWifi) {
+        return;
+    }
     if (message == nullptr) {
         return;
     }
@@ -280,5 +305,77 @@ void MqttClient::publishDeviceState(const DeviceTopicEntry *entry, const char *m
     const String payload = DeviceTopicMap::statePublishPayload(entry, endpoint, message);
     if (publishMessage(topic.c_str(), payload.c_str(), true)) {
         STATUS_RGB.pulseMqttPublished();
+    }
+}
+
+bool MqttClient::publishDeviceCommand(const DeviceTopicEntry *entry, const char *message, uint8_t endpoint) {
+    if (entry == nullptr || entry->commandTopic[0] == '\0' || message == nullptr) {
+        return false;
+    }
+    if (entry->transport == DeviceTransportWifi) {
+        const bool sent = publishMessage(entry->commandTopic, message, false);
+        if (sent) {
+            STATUS_RGB.pulseMqttPublished();
+        }
+        return sent;
+    }
+    uint8_t publishEndpoint = endpoint;
+    String publishBody = String(message);
+    if (DeviceTopicMap::usesPayloadParse(entry->channelCount)) {
+        if (!DeviceTopicMap::isUsableEndpoint(endpoint)) {
+            publishEndpoint = 1;
+        }
+        publishBody = DeviceTopicMap::statePublishPayload(entry, publishEndpoint, message);
+        publishEndpoint = 0;
+    } else if (DeviceTopicMap::usesTopicSuffix(entry->channelCount)
+        && !DeviceTopicMap::isUsableEndpoint(publishEndpoint)) {
+        publishEndpoint = 1;
+    }
+    const String topic = DeviceTopicMap::commandPublishTopic(
+        entry,
+        DeviceTopicMap::usesTopicSuffix(entry->channelCount) ? publishEndpoint : 1
+    );
+    const bool sent = publishMessage(topic.c_str(), publishBody.c_str(), false);
+    if (sent) {
+        STATUS_RGB.pulseMqttPublished();
+    }
+    return sent;
+}
+
+bool MqttClient::publishServerBornAnnounce() {
+    rebuildTopics();
+    if (topicServerBorn.length() == 0) {
+        return false;
+    }
+    return publishMessage(topicServerBorn.c_str(), "online", false);
+}
+
+void MqttClient::serviceBornAnnounce() {
+    rebuildTopics();
+    if (topicServerBorn.length() == 0 || !isConnected()) {
+        return;
+    }
+    GlobalSettings *settings = settingsManager->getSettings();
+    const unsigned long now = millis();
+    const unsigned long intervalMs =
+        (unsigned long)clampBornIntervalMin(settings->mqtt.bornIntervalMin) * 60UL * 1000UL;
+    if (!bornBootAnnounceDone) {
+        const unsigned long bootDelayMs = usesLocalBroker()
+            ? MQTT_BORN_BOOT_DELAY_MS
+            : MQTT_BORN_BOOT_DELAY_REMOTE_MS;
+        if ((now - bootMs) < bootDelayMs) {
+            return;
+        }
+        if (publishServerBornAnnounce()) {
+            bornBootAnnounceDone = true;
+            lastBornAnnounceMs = now;
+        }
+        return;
+    }
+    if ((now - lastBornAnnounceMs) < intervalMs) {
+        return;
+    }
+    if (publishServerBornAnnounce()) {
+        lastBornAnnounceMs = now;
     }
 }
