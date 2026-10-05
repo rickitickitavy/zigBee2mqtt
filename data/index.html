@@ -46,9 +46,9 @@
             }
             if (name == "devices") {
                 ensureDeviceTypeCatalog();
-                startDevicesPolling();
+                startDevicesLive();
             } else {
-                stopDevicesPolling();
+                stopDevicesLive();
                 var searchDialog = document.getElementById("searchDialog");
                 if (searchDialog && !searchDialog.hidden) {
                     closeSearchDialog(true);
@@ -302,7 +302,7 @@
             setHidden(document.getElementById("firmwareUpdateDialog"), true);
             stopStatusPolling();
             stopLogPolling();
-            stopDevicesPolling();
+            stopDevicesLive();
         }
 
         function enterSignedInConsole(user) {
@@ -1693,8 +1693,10 @@
         }
 
         var foundPollTimer = null;
-        var devicesPollTimer = null;
         var pairingPollTimer = null;
+        var devicesLiveSocket = null;
+        var devicesLiveWanted = false;
+        var devicesLiveReconnectTimer = null;
         var selectedFoundIeee = "";
         var selectedRegisteredIeee = "";
         var mqttBaseTopicCache = "";
@@ -2593,19 +2595,94 @@
             }
         }
 
-        function stopDevicesPolling() {
-            if (devicesPollTimer != null) {
-                window.clearInterval(devicesPollTimer);
-                devicesPollTimer = null;
+        function applyDevicesLiveMessage(text) {
+            var message;
+            try {
+                message = JSON.parse(text);
+            } catch (parseError) {
+                return;
+            }
+            if (!message || !message.op) {
+                return;
+            }
+            if (message.op === "reload") {
+                loadDevices();
+                return;
+            }
+            if (message.op === "remove") {
+                var removedIeee = message.ieee || "";
+                var keptRows = [];
+                var keepIndex;
+                for (keepIndex = 0; keepIndex < registeredDeviceRows.length; keepIndex++) {
+                    if ((registeredDeviceRows[keepIndex].ieee || "") !== removedIeee) {
+                        keptRows.push(registeredDeviceRows[keepIndex]);
+                    }
+                }
+                renderDeviceTable(keptRows);
+                return;
+            }
+            if (message.op === "upsert" && message.device) {
+                var nextDevice = message.device;
+                var replaced = false;
+                var rowIndex;
+                for (rowIndex = 0; rowIndex < registeredDeviceRows.length; rowIndex++) {
+                    if ((registeredDeviceRows[rowIndex].ieee || "") === (nextDevice.ieee || "")) {
+                        registeredDeviceRows[rowIndex] = nextDevice;
+                        replaced = true;
+                        break;
+                    }
+                }
+                if (!replaced) {
+                    registeredDeviceRows.push(nextDevice);
+                }
+                renderDeviceTable(registeredDeviceRows);
+                if (manualCommandIeee && (nextDevice.ieee || "") === manualCommandIeee) {
+                    appendManualAnswers(nextDevice);
+                }
             }
         }
 
-        function startDevicesPolling() {
-            loadDevices();
-            if (devicesPollTimer != null) {
+        function stopDevicesLive() {
+            devicesLiveWanted = false;
+            if (devicesLiveReconnectTimer != null) {
+                window.clearTimeout(devicesLiveReconnectTimer);
+                devicesLiveReconnectTimer = null;
+            }
+            if (devicesLiveSocket != null) {
+                devicesLiveSocket.onclose = null;
+                devicesLiveSocket.close();
+                devicesLiveSocket = null;
+            }
+        }
+
+        function openDevicesLiveSocket() {
+            if (!devicesLiveWanted || firmwareRebootWaitActive) {
                 return;
             }
-            devicesPollTimer = window.setInterval(loadDevices, 2000);
+            if (devicesLiveSocket != null
+                && (devicesLiveSocket.readyState === WebSocket.OPEN
+                    || devicesLiveSocket.readyState === WebSocket.CONNECTING)) {
+                return;
+            }
+            var protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+            var socket = new WebSocket(protocol + "//" + window.location.host + "/ws/devices");
+            devicesLiveSocket = socket;
+            socket.onmessage = function (event) {
+                applyDevicesLiveMessage(event.data);
+            };
+            socket.onclose = function () {
+                devicesLiveSocket = null;
+                if (!devicesLiveWanted || firmwareRebootWaitActive) {
+                    return;
+                }
+                devicesLiveReconnectTimer = window.setTimeout(openDevicesLiveSocket, 2000);
+            };
+        }
+
+        function startDevicesLive() {
+            devicesLiveWanted = true;
+            loadDevices();
+            openDevicesLiveSocket();
         }
 
         function resumePairingDialog() {

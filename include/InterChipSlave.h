@@ -80,9 +80,9 @@ public:
     bool completeCommandResult(uint8_t seq, bool ok);
 
 private:
-    static constexpr int kQueue = 16;
+    static constexpr int kQueue = 32;
     static constexpr int kHwSlots = 2;
-    static constexpr int kMaxDeferredDeviceCommands = 16;
+    static constexpr int kMaxDeferredDeviceCommands = 32;
 
     enum class DeferredDeviceKind : uint8_t {
         OnOff = 0,

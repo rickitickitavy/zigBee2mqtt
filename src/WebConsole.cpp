@@ -7,12 +7,14 @@
 #include "UserStore.h"
 #include "generated/EmbeddedWebAssets.h"
 
+#include <ESPAsyncWebServer.h>
+#include <AsyncWebSocket.h>
 #include <Update.h>
 #include <IPAddress.h>
 #include <string.h>
 
 WebConsole::WebConsole(SettingsManager *settingsManager, UserStore *userStore)
-    : settingsManager(settingsManager), userStore(userStore), server(80) {}
+    : settingsManager(settingsManager), userStore(userStore), server(80), devicesSocket("/ws/devices") {}
 
 void WebConsole::begin() {
     server.on("/", HTTP_GET, [this](AsyncWebServerRequest *request) { handleRoot(request); });
@@ -47,6 +49,7 @@ void WebConsole::begin() {
         HTTP_POST,
         [this](AsyncWebServerRequest *request) { handleAuthLogoutPost(request); }
     );
+    bindDevicesSocket();
     server.on("/api/auth/me", HTTP_GET, [this](AsyncWebServerRequest *request) { handleAuthMeGet(request); });
     server.on("/api/auth/touch", HTTP_POST, [this](AsyncWebServerRequest *request) { handleAuthTouchPost(request); });
     server.on("/api/users", HTTP_GET, [this](AsyncWebServerRequest *request) { handleUsersGet(request); });
@@ -268,6 +271,53 @@ void WebConsole::rebind() {
     delay(50);
     server.begin();
     LOGGER.info("Web console rebound on port 80");
+}
+
+void WebConsole::loop() {
+    devicesSocket.cleanupClients();
+}
+
+void WebConsole::bindDevicesSocket() {
+    devicesSocket.handleHandshake([this](AsyncWebServerRequest *request) {
+        return authenticatedUser(request, false) != nullptr;
+    });
+    server.addHandler(&devicesSocket);
+}
+
+void WebConsole::broadcastDeviceUpsert(const uint8_t ieee[8]) {
+    if (devicesSocket.count() == 0 || settingsManager == nullptr || ieee == nullptr) {
+        return;
+    }
+    DeviceTopicMap *deviceMap = settingsManager->deviceMap();
+    String deviceJson = deviceMap->entryJson(ieee, isDeviceOnline, lastDeviceRssi, appendDeviceTelemetry);
+    if (deviceJson.length() == 0) {
+        return;
+    }
+    String message = "{\"op\":\"upsert\",\"device\":";
+    message += deviceJson;
+    message += "}";
+    devicesSocket.textAll(message);
+}
+
+void WebConsole::notifyDeviceLiveChanged(const uint8_t ieee[8]) {
+    broadcastDeviceUpsert(ieee);
+}
+
+void WebConsole::broadcastDeviceRemoved(const uint8_t ieee[8]) {
+    if (devicesSocket.count() == 0 || settingsManager == nullptr || ieee == nullptr) {
+        return;
+    }
+    String message = "{\"op\":\"remove\",\"ieee\":\"";
+    message += settingsManager->deviceMap()->formatIeee(ieee);
+    message += "\"}";
+    devicesSocket.textAll(message);
+}
+
+void WebConsole::broadcastDevicesReload() {
+    if (devicesSocket.count() == 0) {
+        return;
+    }
+    devicesSocket.textAll("{\"op\":\"reload\"}");
 }
 
 void WebConsole::handleRoot(AsyncWebServerRequest *request) {
@@ -1046,6 +1096,7 @@ void WebConsole::handleSettingsRestorePost(AsyncWebServerRequest *request) {
         if (applyDevicesRestored == nullptr) {
             settingsManager->saveDevicesJson();
         }
+        broadcastDevicesReload();
     }
     if (haveMqtt || haveZigbee) {
         settingsManager->saveMain(true);
@@ -1284,6 +1335,7 @@ void WebConsole::handleDevicesPost(AsyncWebServerRequest *request) {
         request->send(503, "text/plain", "Slave is not ready to store the device");
         return;
     }
+    broadcastDeviceUpsert(ieee);
     request->send(200, "text/plain", "Saved");
 }
 
@@ -1321,6 +1373,7 @@ void WebConsole::handleDevicesDelete(AsyncWebServerRequest *request) {
         request->send(503, "text/plain", "Slave is not ready to store the device");
         return;
     }
+    broadcastDeviceRemoved(ieee);
     request->send(200, "text/plain", "Deleted");
 }
 

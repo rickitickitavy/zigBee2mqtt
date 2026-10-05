@@ -28,7 +28,7 @@ public:
     const char *slaveFirmwareVersion() const;
 
 private:
-    static constexpr int kOutQueue = 8;
+    static constexpr int kOutQueue = 32;
     static constexpr unsigned long kReadyTimeoutMs = 10000UL;
     static constexpr unsigned long kReplyTimeoutMs = 3000UL;
     static constexpr unsigned long kOtaBeginReplyTimeoutMs = 180000UL;

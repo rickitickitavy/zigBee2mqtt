@@ -67,6 +67,9 @@ public:
     String devicesJson(DeviceTopicMap *topicMap);
     void setLightStateHandler(LightStateFn handler);
     void setRegistryPullDoneHandler(void (*handler)());
+    using DeviceLiveChangedFn = void (*)(const uint8_t ieee[8]);
+    void setDeviceLiveChangedHandler(DeviceLiveChangedFn handler);
+    void pumpOnlineWindows();
     bool commandsAllowed() const;
 
 private:
@@ -88,6 +91,7 @@ private:
         char manufacturer[32];
         char model[32];
         unsigned long lastSeenMs;
+        bool consoleOnlineSent;
         int8_t lastRssiDbm;
         bool hasRssi;
         bool hasBattery;
@@ -108,6 +112,7 @@ private:
 
     CachedDevice *deviceHead = nullptr;
     LightStateFn lightStateHandler = nullptr;
+    DeviceLiveChangedFn deviceLiveChanged = nullptr;
     DeviceTopicMap *registryMap = nullptr;
     DeviceTopicEntry pullSlots[DEVICE_MAP_SLOTS]{};
     DeviceTopicMap pullMap;
@@ -158,6 +163,7 @@ private:
     CachedDevice *allocSlot(const uint8_t ieee[8]);
     void releaseSlot(CachedDevice *slot);
     void noteReportTelemetry(CachedDevice *slot, uint8_t endpoint, const char *message);
+    void notifyDeviceLiveChanged(const uint8_t ieee[8]);
     bool enqueueRegistryFrame(uint8_t flags, const DeviceTopicEntry *entry);
     bool queueDeviceChange(uint8_t flags, const DeviceTopicEntry *entry);
     void applyPendingChangeToMap(const PendingDeviceChange *change);

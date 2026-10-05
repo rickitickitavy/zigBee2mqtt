@@ -1476,6 +1476,11 @@ static void setupHost() {
         return settingsManager != nullptr ? settingsManager->devicesJsonFile() : String("[]");
     });
     webConsole->begin();
+    ZIGBEE_SPI_PROXY.setDeviceLiveChangedHandler([](const uint8_t ieee[8]) {
+        if (webConsole != nullptr) {
+            webConsole->notifyDeviceLiveChanged(ieee);
+        }
+    });
     wifiController->setInterfaceReadyHandler([]() {
         if (webConsole != nullptr) {
             webConsole->rebind();
@@ -1575,6 +1580,9 @@ void loop() {
         mqttClient->dispatch(wifiController->isStaConnected());
         pumpWifiDeviceCommands();
         ZIGBEE_SPI_PROXY.pumpRegistrySync();
+        if (webConsole != nullptr) {
+            webConsole->loop();
+        }
         pumpHostDeferredStoreWork();
         if (!hostPreparationLatched && wifiController->hasUsableInterface() && INTER_CHIP_HOST.isNormal()) {
             hostPreparationLatched = true;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <ESPAsyncWebServer.h>
+#include <AsyncWebSocket.h>
 #include "SettingsManager.h"
 #include "FoundDeviceList.h"
 #include "UserStore.h"
@@ -25,6 +26,10 @@ public:
 
     void begin();
     void rebind();
+    void loop();
+    void notifyDeviceLiveChanged(const uint8_t ieee[8]);
+    void broadcastDeviceRemoved(const uint8_t ieee[8]);
+    void broadcastDevicesReload();
     void setDeviceServices(
         FoundDeviceList *foundDevices,
         SearchStartFn startSearch,
@@ -60,11 +65,14 @@ private:
     DevicesRestoredFn applyDevicesRestored = nullptr;
     UsersRestoredFn applyUsersRestored = nullptr;
     AsyncWebServer server;
+    AsyncWebSocket devicesSocket;
     String requestBody;
     bool otaStarted = false;
     bool otaFailed = false;
     int otaCommand = 0;
 
+    void bindDevicesSocket();
+    void broadcastDeviceUpsert(const uint8_t ieee[8]);
     void handleRoot(AsyncWebServerRequest *request);
     void handleWifiGet(AsyncWebServerRequest *request);
     void handleWifiPost(AsyncWebServerRequest *request);

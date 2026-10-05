@@ -305,6 +305,29 @@ void ZigbeeSpiProxy::setRegistryPullDoneHandler(void (*handler)()) {
     registryPullDone = handler;
 }
 
+void ZigbeeSpiProxy::setDeviceLiveChangedHandler(DeviceLiveChangedFn handler) {
+    deviceLiveChanged = handler;
+}
+
+void ZigbeeSpiProxy::notifyDeviceLiveChanged(const uint8_t ieee[8]) {
+    if (deviceLiveChanged != nullptr && ieee != nullptr) {
+        deviceLiveChanged(ieee);
+    }
+}
+
+void ZigbeeSpiProxy::pumpOnlineWindows() {
+    const unsigned long nowMs = millis();
+    for (CachedDevice *slot = deviceHead; slot != nullptr; slot = slot->next) {
+        const bool nowOnline =
+            slot->lastSeenMs != 0 && (long)(nowMs - slot->lastSeenMs) < (long)kOnlineWindowMs;
+        if (nowOnline == slot->consoleOnlineSent) {
+            continue;
+        }
+        slot->consoleOnlineSent = nowOnline;
+        notifyDeviceLiveChanged(slot->ieee);
+    }
+}
+
 bool ZigbeeSpiProxy::registryHydrated() const {
     return registryReady;
 }
@@ -799,6 +822,7 @@ void ZigbeeSpiProxy::pumpRegistrySync() {
     userPullRequested = false;
     pumpPendingChanges();
     pumpPendingUserChanges();
+    pumpOnlineWindows();
 }
 
 void ZigbeeSpiProxy::onSpiEvent(const SpiFrame &frame) {
@@ -838,6 +862,8 @@ void ZigbeeSpiProxy::onSpiEvent(const SpiFrame &frame) {
             slot->lastRssiDbm = rssiDbm;
             slot->hasRssi = true;
             noteReportTelemetry(slot, endpoint, message);
+            slot->consoleOnlineSent = true;
+            notifyDeviceLiveChanged(ieee);
         }
         packetsRx++;
         if (lightStateHandler != nullptr) {
@@ -858,6 +884,8 @@ void ZigbeeSpiProxy::onSpiEvent(const SpiFrame &frame) {
         slot->lastSeenMs = millis();
         strncpy(slot->manufacturer, (const char *)frame.payload + 11, sizeof(slot->manufacturer) - 1);
         strncpy(slot->model, (const char *)frame.payload + 43, sizeof(slot->model) - 1);
+        slot->consoleOnlineSent = true;
+        notifyDeviceLiveChanged(ieee);
     }
     if (frame.cmd == SpiEvtDeviceLeave) {
         packetsRx++;
@@ -871,6 +899,8 @@ void ZigbeeSpiProxy::noteSeen(const uint8_t ieee[8]) {
     }
     if (slot != nullptr) {
         slot->lastSeenMs = millis();
+        slot->consoleOnlineSent = true;
+        notifyDeviceLiveChanged(ieee);
     }
 }
 
@@ -905,6 +935,8 @@ void ZigbeeSpiProxy::noteMqttState(const uint8_t ieee[8], uint8_t endpoint, cons
     }
     slot->lastSeenMs = millis();
     noteReportTelemetry(slot, endpoint, message);
+    slot->consoleOnlineSent = true;
+    notifyDeviceLiveChanged(ieee);
 }
 
 void ZigbeeSpiProxy::noteMqttOffline(const uint8_t ieee[8]) {
@@ -916,6 +948,8 @@ void ZigbeeSpiProxy::noteMqttOffline(const uint8_t ieee[8]) {
         return;
     }
     slot->lastSeenMs = 0;
+    slot->consoleOnlineSent = false;
+    notifyDeviceLiveChanged(ieee);
 }
 
 void ZigbeeSpiProxy::appendListTelemetry(const uint8_t ieee[8], String &json) const {
