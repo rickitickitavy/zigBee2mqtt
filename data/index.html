@@ -216,6 +216,7 @@
 
         var signedInUser = null;
         var sessionWatchTimer = null;
+        var sessionIdleTouchMs = 0;
         var firmwareRebootWaitActive = false;
         var nativeFetch = window.fetch.bind(window);
         window.fetch = function (input, init) {
@@ -278,8 +279,22 @@
             }, 10000);
         }
 
+        function noteOperatorActivity() {
+            if (!signedInUser || firmwareRebootWaitActive) {
+                return;
+            }
+            var nowMs = Date.now();
+            if (nowMs - sessionIdleTouchMs < 30000) {
+                return;
+            }
+            sessionIdleTouchMs = nowMs;
+            fetch("/api/auth/touch", { method: "POST", cache: "no-store" }).catch(function () {
+            });
+        }
+
         function showLoginForm() {
             signedInUser = null;
+            sessionIdleTouchMs = 0;
             stopSessionWatch();
             applyThemeToDocument("dark");
             setHidden(document.getElementById("appShell"), true);
@@ -292,6 +307,7 @@
 
         function enterSignedInConsole(user) {
             signedInUser = user;
+            sessionIdleTouchMs = 0;
             setHidden(document.getElementById("loginOverlay"), true);
             setHidden(document.getElementById("appShell"), false);
             applyChromeForRoles();
@@ -2987,7 +3003,7 @@
             closeParameterDialog();
         }
 
-        function onDialogOverlayClick(event) {
+        function onDialogOverlayPointerDown(event) {
             if (event.target !== event.currentTarget) {
                 return;
             }
@@ -3298,6 +3314,9 @@
             document.getElementById("wifiMode").onchange = updateApIpVisibility;
             document.getElementById("mqttServerType").onchange = updateMqttServerVisibility;
             document.addEventListener("keydown", onDocumentKeyDown);
+            window.addEventListener("pointerdown", noteOperatorActivity);
+            window.addEventListener("keydown", noteOperatorActivity);
+            window.addEventListener("input", noteOperatorActivity);
             document.addEventListener("click", function (clickEvent) {
                 if (clickEvent.target && clickEvent.target.closest
                     && (clickEvent.target.closest(".device-row-menu")
@@ -3313,7 +3332,7 @@
             var overlays = document.querySelectorAll(".dialog-overlay");
             var overlayIndex;
             for (overlayIndex = 0; overlayIndex < overlays.length; overlayIndex++) {
-                overlays[overlayIndex].addEventListener("click", onDialogOverlayClick);
+                overlays[overlayIndex].addEventListener("mousedown", onDialogOverlayPointerDown);
             }
             var loginForm = document.getElementById("loginForm");
             if (loginForm) {

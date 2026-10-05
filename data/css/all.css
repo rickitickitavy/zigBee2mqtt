@@ -730,6 +730,15 @@ html, body {
     border-radius: 6px;
 }
 
+.field input:read-only,
+.field input:disabled,
+.field select:disabled,
+.field textarea:read-only,
+.field textarea:disabled {
+    background: color-mix(in srgb, var(--bg) 72%, var(--muted) 28%);
+    color: var(--muted);
+}
+
 .group-title {
     margin: 0.5rem 0 0;
     font-size: 1rem;

@@ -83,7 +83,8 @@ public:
         const char *cookieHeader,
         uint32_t nowMs,
         char *tokenHexOut,
-        size_t tokenHexOutSize
+        size_t tokenHexOutSize,
+        bool touchActivity = true
     );
     bool startSession(
         const UserRecord *user,

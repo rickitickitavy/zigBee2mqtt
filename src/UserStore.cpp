@@ -778,7 +778,7 @@ bool UserStore::startSession(
     if (user->isAdmin) {
         slot->maxIdleMs = AUTH_ADMIN_IDLE_MS;
         if (maxAgeSec != nullptr) {
-            *maxAgeSec = AUTH_ADMIN_IDLE_MS / 1000UL;
+            *maxAgeSec = 0;
         }
     } else if (rememberMe) {
         slot->maxIdleMs = AUTH_REMEMBER_MS;
@@ -822,7 +822,8 @@ const UserRecord *UserStore::sessionUser(
     const char *cookieHeader,
     uint32_t nowMs,
     char *tokenHexOut,
-    size_t tokenHexOutSize
+    size_t tokenHexOutSize,
+    bool touchActivity
 ) {
     if (cookieHeader == nullptr) {
         return nullptr;
@@ -856,7 +857,9 @@ const UserRecord *UserStore::sessionUser(
         memset(slot, 0, sizeof(*slot));
         return nullptr;
     }
-    slot->lastActivityMs = nowMs;
+    if (touchActivity) {
+        slot->lastActivityMs = nowMs;
+    }
     if (tokenHexOut != nullptr && tokenHexOutSize > hexIndex) {
         strncpy(tokenHexOut, tokenHex, tokenHexOutSize - 1);
         tokenHexOut[tokenHexOutSize - 1] = '\0';

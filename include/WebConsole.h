@@ -79,10 +79,10 @@ private:
     void handleThemeGet(AsyncWebServerRequest *request);
     void handleThemePost(AsyncWebServerRequest *request);
     bool applyThemeJson(const char *json, UserRecord *user, String *errorText);
-    const UserRecord *authenticatedUser(AsyncWebServerRequest *request);
-    bool requireUser(AsyncWebServerRequest *request, const UserRecord **userOut);
-    bool requireAdmin(AsyncWebServerRequest *request, const UserRecord **userOut);
-    bool requireEditUsers(AsyncWebServerRequest *request, const UserRecord **userOut);
+    const UserRecord *authenticatedUser(AsyncWebServerRequest *request, bool touchActivity = true);
+    bool requireUser(AsyncWebServerRequest *request, const UserRecord **userOut, bool touchActivity = true);
+    bool requireAdmin(AsyncWebServerRequest *request, const UserRecord **userOut, bool touchActivity = true);
+    bool requireEditUsers(AsyncWebServerRequest *request, const UserRecord **userOut, bool touchActivity = true);
     bool userCanAddDevices(const UserRecord *user) const;
     bool userCanEditDevices(const UserRecord *user) const;
     bool userCanRemoveDevices(const UserRecord *user) const;
@@ -90,6 +90,7 @@ private:
     void handleAuthLoginPost(AsyncWebServerRequest *request);
     void handleAuthLogoutPost(AsyncWebServerRequest *request);
     void handleAuthMeGet(AsyncWebServerRequest *request);
+    void handleAuthTouchPost(AsyncWebServerRequest *request);
     void handleUsersGet(AsyncWebServerRequest *request);
     void handleUsersPost(AsyncWebServerRequest *request);
     void handleUsersUpdatePost(AsyncWebServerRequest *request);
