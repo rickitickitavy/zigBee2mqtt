@@ -105,11 +105,11 @@ public:
     bool isRegistered(const uint8_t ieee[8]) const;
     const char *registeredName(const uint8_t ieee[8]) const;
 
-    static constexpr int kMaxBoundDevices = 16;
+    static constexpr int kMaxBoundDevices = DEVICE_MAP_SLOTS;
     static constexpr int kMaxDescriptorProbes = 32;
-    static constexpr int kMaxDestFlights = 16;
-    static constexpr int kMaxStatusReads = 80;
-    static constexpr int kMaxStatusIssued = 128;
+    static constexpr int kMaxDestFlights = 32;
+    static constexpr int kMaxStatusReads = DEVICE_MAP_SLOTS * 5;
+    static constexpr int kMaxStatusIssued = DEVICE_MAP_SLOTS;
     static constexpr int kMaxStatusAnswers = 32;
     static constexpr unsigned long kCommandInFlightTimeoutMs = 1500UL;
     static constexpr unsigned long kStatusReadGiveUpMs = 8000UL;

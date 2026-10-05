@@ -895,6 +895,54 @@ String DeviceTopicMap::listJson() {
     return listJson(nullptr, nullptr);
 }
 
+static void appendDeviceListEntryJson(
+    DeviceTopicMap *deviceMap,
+    String &json,
+    const DeviceTopicEntry *deviceEntry,
+    DeviceTopicMap::OnlineFn isOnline,
+    DeviceTopicMap::LastRssiFn lastRssi,
+    DeviceTopicMap::ListTelemetryFn telemetry
+) {
+    if (deviceEntry == nullptr) {
+        json += "null";
+        return;
+    }
+    json += "{\"ieee\":\"";
+    json += deviceMap->formatIeee(deviceEntry->ieee);
+    json += "\",\"name\":\"";
+    appendJsonEscaped(json, deviceEntry->friendlyName, sizeof(deviceEntry->friendlyName));
+    json += "\",\"state\":\"";
+    appendJsonEscaped(json, deviceEntry->stateTopic, sizeof(deviceEntry->stateTopic));
+    json += "\",\"command\":\"";
+    appendJsonEscaped(json, deviceEntry->commandTopic, sizeof(deviceEntry->commandTopic));
+    json += "\",\"availability\":\"";
+    appendJsonEscaped(json, deviceEntry->availabilityTopic, sizeof(deviceEntry->availabilityTopic));
+    json += "\",\"channels\":";
+    json += String(deviceEntry->channelCount);
+    json += ",\"fullControl\":";
+    json += deviceEntry->fullControl ? "true" : "false";
+    json += ",\"type\":\"";
+    json += zigbeeDeviceTypeJsonId(deviceEntry->zigbeeType);
+    json += "\",\"transport\":\"";
+    json += deviceTransportJsonId(deviceEntry->transport);
+    json += "\"";
+    if (isOnline != nullptr) {
+        json += ",\"online\":";
+        json += isOnline(deviceEntry->ieee) ? "true" : "false";
+    }
+    if (lastRssi != nullptr) {
+        int8_t rssiDbm = 0;
+        if (lastRssi(deviceEntry->ieee, &rssiDbm)) {
+            json += ",\"rssi\":";
+            json += String((int)rssiDbm);
+        }
+    }
+    if (telemetry != nullptr) {
+        telemetry(deviceEntry->ieee, json);
+    }
+    json += "}";
+}
+
 String DeviceTopicMap::listJson(OnlineFn isOnline) {
     return listJson(isOnline, nullptr);
 }
@@ -911,50 +959,32 @@ String DeviceTopicMap::listJson(OnlineFn isOnline, LastRssiFn lastRssi, ListTele
         return json;
     }
     for (int i = 0; i < DEVICE_MAP_SLOTS; i++) {
-        DeviceTopicEntry *entry = &slots[i];
-        if (!entry->used) {
+        DeviceTopicEntry *deviceEntry = &slots[i];
+        if (!deviceEntry->used) {
             continue;
         }
         if (!first) {
             json += ",";
         }
         first = false;
-        json += "{\"ieee\":\"";
-        json += formatIeee(entry->ieee);
-        json += "\",\"name\":\"";
-        appendJsonEscaped(json, entry->friendlyName, sizeof(entry->friendlyName));
-        json += "\",\"state\":\"";
-        appendJsonEscaped(json, entry->stateTopic, sizeof(entry->stateTopic));
-        json += "\",\"command\":\"";
-        appendJsonEscaped(json, entry->commandTopic, sizeof(entry->commandTopic));
-        json += "\",\"availability\":\"";
-        appendJsonEscaped(json, entry->availabilityTopic, sizeof(entry->availabilityTopic));
-        json += "\",\"channels\":";
-        json += String(entry->channelCount);
-        json += ",\"fullControl\":";
-        json += entry->fullControl ? "true" : "false";
-        json += ",\"type\":\"";
-        json += zigbeeDeviceTypeJsonId(entry->zigbeeType);
-        json += "\",\"transport\":\"";
-        json += deviceTransportJsonId(entry->transport);
-        json += "\"";
-        if (isOnline != nullptr) {
-            json += ",\"online\":";
-            json += isOnline(entry->ieee) ? "true" : "false";
-        }
-        if (lastRssi != nullptr) {
-            int8_t rssiDbm = 0;
-            if (lastRssi(entry->ieee, &rssiDbm)) {
-                json += ",\"rssi\":";
-                json += String((int)rssiDbm);
-            }
-        }
-        if (telemetry != nullptr) {
-            telemetry(entry->ieee, json);
-        }
-        json += "}";
+        appendDeviceListEntryJson(this, json, deviceEntry, isOnline, lastRssi, telemetry);
     }
     json += "]";
+    return json;
+}
+
+String DeviceTopicMap::entryJson(
+    const uint8_t ieee[8],
+    OnlineFn isOnline,
+    LastRssiFn lastRssi,
+    ListTelemetryFn telemetry
+) {
+    const DeviceTopicEntry *deviceEntry = findByIeee(ieee);
+    if (deviceEntry == nullptr || !deviceEntry->used) {
+        return String();
+    }
+    String json;
+    appendDeviceListEntryJson(this, json, deviceEntry, isOnline, lastRssi, telemetry);
     return json;
 }
 

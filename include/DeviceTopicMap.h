@@ -75,6 +75,7 @@ public:
     String listJson(OnlineFn isOnline);
     String listJson(OnlineFn isOnline, LastRssiFn lastRssi);
     String listJson(OnlineFn isOnline, LastRssiFn lastRssi, ListTelemetryFn telemetry);
+    String entryJson(const uint8_t ieee[8], OnlineFn isOnline, LastRssiFn lastRssi, ListTelemetryFn telemetry);
     String listStoreJson();
     void replaceFromJson(const String &json);
     bool loadFromFile(const char *path);
