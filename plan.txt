@@ -35,3 +35,14 @@ task: Lightweight MQTT server. this feature to optionally replace homeassist wit
 6) MQTT server must allow remote connections
 
 
+lets keep this idea for the future task. Now I want to develop a new big feature. In two words I wnt to make a separate web console for user withot specific role (simple user). Such users must after login see the new console that will have to take the
+  form the console to control devices (only as user: 0n, off, open, close, see values of sensor and so on). Such users will see Tabs on top of screen with names of available for him consoles. each Console is single tab with it's content. this content must
+  be editable by user with new role Console editor. User with role Content editor will see a new Tab at the left "menu" named "Consoles". PLace this tab after Sequrity. On this tab place a table with columns Console name, active, users. Add to user entity
+  attribute consoles (multiple) which user can see. When editing user there must be a gropup of checkbox with exidting consoles and user can check several so user be able to see these consoles when loggins. for edit console (new or existing) open a new
+  large dialog. In this dialog user can add content. Each console contains widgets stacked in grid (user can drag widget and drop on new place for change order, left/right order). Each widget contains added by user (editor) devices. Devices are vertically
+  stacked. If the device is On/Off device must have control for switch, for window control up, down and stop small buttons and current position, and so on. Make some button in widget stile by pressing which new widget will appear and button-widget moves
+  down. Each widget has global title, optionaly global On/Off switcher control (like in homeassist) for all On/Off items contained in widget. Come up with idia how to edit this parameters. Global On/Of is On if at least one devices is ON. Add a button in
+  each widget, in edit stage only, by click wich add device dialog appears. In this dialog user can choose device from registerd devices (drop down list), chennal number if device has more than 1 channel, title. If device is measure sensor propose choose
+  measure unit from drop-down list (base known units for pressure, temperature, speed, direction and so on according to device class). User can, at edit stage, change devices order by drag and drop them. Can edit added devices (for example by clickin by
+  them). At edit time don't send any commands to devices. When user finishes to edit console he press button save. Add button Export Console to edit dialog for user have ability to export console to JSON for later restore. Add button Import from Json to
+  edit dialog. This button may be enabled only if console user editing is empty. May be I'll add more later 
