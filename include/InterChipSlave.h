@@ -101,6 +101,7 @@ private:
         uint16_t attributeId = 0;
         uint8_t dataType = 0;
         uint32_t attributeValue = 0;
+        DeferredDeviceCommand *next = nullptr;
     };
 
     struct QueuedFrame {
@@ -139,7 +140,8 @@ private:
     uint8_t pendingChannel = 15;
     uint8_t pendingPermitJoinSec = 0;
     uint8_t deferredPermitSeconds = 0;
-    DeferredDeviceCommand deferredDeviceCommands[kMaxDeferredDeviceCommands]{};
+    DeferredDeviceCommand *deferredDeviceCommandHead = nullptr;
+    int deferredDeviceCommandCount = 0;
     uint32_t pendingUnixSec = 0;
     uint8_t firmwareOtaLastSeq = 0;
     bool firmwareOtaLastOk = false;

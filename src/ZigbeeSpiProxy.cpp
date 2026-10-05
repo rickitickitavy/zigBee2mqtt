@@ -9,9 +9,7 @@
 
 ZigbeeSpiProxy ZIGBEE_SPI_PROXY;
 
-ZigbeeSpiProxy::ZigbeeSpiProxy() : pullMap(pullSlots) {
-    memset(pullSlots, 0, sizeof(pullSlots));
-}
+ZigbeeSpiProxy::ZigbeeSpiProxy() {}
 
 void ZigbeeSpiProxy::begin() {}
 
@@ -287,16 +285,37 @@ bool ZigbeeSpiProxy::sendClusterCommand(
     return queued;
 }
 
-void ZigbeeSpiProxy::queueDeletedIeeesAndPushAll(const uint8_t (*deletedIeees)[8], int deletedCount) {
+void ZigbeeSpiProxy::clearPendingDeleteIeees() {
+    while (pendingDeleteHead != nullptr) {
+        PendingDeleteIeeeNode *next = pendingDeleteHead->next;
+        free(pendingDeleteHead);
+        pendingDeleteHead = next;
+    }
     pendingDeleteCount = 0;
     pendingDeleteIndex = 0;
+}
+
+void ZigbeeSpiProxy::queueDeletedIeeesAndPushAll(const uint8_t (*deletedIeees)[8], int deletedCount) {
+    clearPendingDeleteIeees();
     pendingUpsertWalk = 0;
     if (deletedIeees != nullptr) {
         const int bounded = deletedCount > DEVICE_MAP_SLOTS ? DEVICE_MAP_SLOTS : deletedCount;
+        PendingDeleteIeeeNode *tail = nullptr;
         for (int i = 0; i < bounded; i++) {
-            memcpy(pendingDeleteIeees[i], deletedIeees[i], 8);
+            PendingDeleteIeeeNode *node = (PendingDeleteIeeeNode *)malloc(sizeof(PendingDeleteIeeeNode));
+            if (node == nullptr) {
+                break;
+            }
+            memcpy(node->ieee, deletedIeees[i], 8);
+            node->next = nullptr;
+            if (tail == nullptr) {
+                pendingDeleteHead = node;
+            } else {
+                tail->next = node;
+            }
+            tail = node;
+            pendingDeleteCount++;
         }
-        pendingDeleteCount = bounded;
     }
     fullPushActive = true;
 }
@@ -423,9 +442,14 @@ bool ZigbeeSpiProxy::queueDeviceChange(uint8_t flags, const DeviceTopicEntry *en
         if (pendingChanges[i].used) {
             continue;
         }
+        DeviceTopicEntry *copy = (DeviceTopicEntry *)calloc(1, sizeof(DeviceTopicEntry));
+        if (copy == nullptr || !DeviceTopicMap::cloneEntry(copy, entry)) {
+            DeviceTopicMap::freeEntry(copy);
+            return false;
+        }
         pendingChanges[i].used = true;
         pendingChanges[i].flags = flags;
-        pendingChanges[i].entry = *entry;
+        pendingChanges[i].entry = copy;
         return true;
     }
     LOGGER.warning("Only one device record change at a time");
@@ -467,8 +491,7 @@ bool ZigbeeSpiProxy::enqueueDeviceDelete(const uint8_t ieee[8]) {
         return false;
     }
     forgetDeviceTelemetry(ieee);
-    DeviceTopicEntry entry;
-    memset(&entry, 0, sizeof(entry));
+    DeviceTopicEntry entry{};
     memcpy(entry.ieee, ieee, 8);
     entry.used = 1;
     return queueDeviceChange(SPI_DEVICE_SYNC_DELETE, &entry);
@@ -478,12 +501,15 @@ void ZigbeeSpiProxy::applyPendingChangeToMap(const PendingDeviceChange *change) 
     if (registryMap == nullptr || change == nullptr) {
         return;
     }
+    if (change->entry == nullptr) {
+        return;
+    }
     if ((change->flags & SPI_DEVICE_SYNC_DELETE) != 0) {
-        registryMap->removeByIeee(change->entry.ieee);
+        registryMap->removeByIeee(change->entry->ieee);
         return;
     }
     if ((change->flags & SPI_DEVICE_SYNC_ENTRY) != 0) {
-        registryMap->upsertFromEntry(&change->entry, false);
+        registryMap->upsertFromEntry(change->entry, false);
     }
 }
 
@@ -503,7 +529,9 @@ void ZigbeeSpiProxy::pumpPendingChanges() {
         if (!pendingChanges[i].used) {
             continue;
         }
-        if (enqueueRegistryFrame(pendingChanges[i].flags, &pendingChanges[i].entry)) {
+        if (enqueueRegistryFrame(pendingChanges[i].flags, pendingChanges[i].entry)) {
+            DeviceTopicMap::freeEntry(pendingChanges[i].entry);
+            pendingChanges[i].entry = nullptr;
             pendingChanges[i].used = false;
         }
         return;
@@ -511,21 +539,25 @@ void ZigbeeSpiProxy::pumpPendingChanges() {
     if (!fullPushActive || registryMap == nullptr) {
         return;
     }
-    if (pendingDeleteIndex < pendingDeleteCount) {
-        DeviceTopicEntry deletedEntry;
-        memset(&deletedEntry, 0, sizeof(deletedEntry));
-        memcpy(deletedEntry.ieee, pendingDeleteIeees[pendingDeleteIndex], 8);
-        deletedEntry.used = 1;
-        if (enqueueRegistryFrame(SPI_DEVICE_SYNC_DELETE, &deletedEntry)) {
-            pendingDeleteIndex++;
+    if (pendingDeleteHead != nullptr && pendingDeleteIndex < pendingDeleteCount) {
+        PendingDeleteIeeeNode *node = pendingDeleteHead;
+        for (int skip = 0; skip < pendingDeleteIndex && node != nullptr; skip++) {
+            node = node->next;
+        }
+        if (node != nullptr) {
+            DeviceTopicEntry deletedEntry{};
+            memcpy(deletedEntry.ieee, node->ieee, 8);
+            deletedEntry.used = 1;
+            if (enqueueRegistryFrame(SPI_DEVICE_SYNC_DELETE, &deletedEntry)) {
+                pendingDeleteIndex++;
+            }
         }
         return;
     }
     const int nextIndex = registryMap->nextUsedIndex(pendingUpsertWalk);
     if (nextIndex < 0) {
         fullPushActive = false;
-        pendingDeleteCount = 0;
-        pendingDeleteIndex = 0;
+        clearPendingDeleteIeees();
         pendingUpsertWalk = 0;
         return;
     }
@@ -762,7 +794,7 @@ void ZigbeeSpiProxy::applyPulledRegistry(const SpiFrame &frame) {
         return;
     }
     uint8_t flags = 0;
-    DeviceTopicEntry entry;
+    DeviceTopicEntry entry{};
     if (!DeviceTopicMap::unpackSyncPayload(frame.payload, frame.length, &flags, &entry)) {
         return;
     }
@@ -777,6 +809,7 @@ void ZigbeeSpiProxy::applyPulledRegistry(const SpiFrame &frame) {
             beginPullSnapshot();
         }
         pullMap.upsertFromEntry(&entry, false);
+        DeviceTopicMap::clearEntryStrings(&entry);
         registryPullCount++;
     }
     if ((flags & SPI_DEVICE_SYNC_LAST) != 0) {

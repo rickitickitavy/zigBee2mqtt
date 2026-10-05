@@ -10,11 +10,11 @@
 MqttClient::MqttClient(SettingsManager *settingsManager, DeviceTopicMap *topicMap)
     : settingsManager(settingsManager), topicMap(topicMap), client(nullptr) {
     client = new PubSubClient(wifiClient);
-    memset(subscribedTopics, 0, sizeof(subscribedTopics));
     bootMs = millis();
 }
 
 MqttClient::~MqttClient() {
+    clearTopicSubscriptions();
     delete client;
 }
 
@@ -79,55 +79,53 @@ bool MqttClient::isConnected() const {
 }
 
 void MqttClient::clearTopicSubscriptions() {
-    memset(subscribedTopics, 0, sizeof(subscribedTopics));
+    while (subscriptionHead != nullptr) {
+        TopicSubscription *next = subscriptionHead->next;
+        free(subscriptionHead->topic);
+        free(subscriptionHead);
+        subscriptionHead = next;
+    }
 }
 
-int MqttClient::findTopicSubscription(const char *topic) const {
+MqttClient::TopicSubscription *MqttClient::findTopicSubscription(const char *topic) const {
     if (topic == nullptr || topic[0] == '\0') {
-        return -1;
+        return nullptr;
     }
-    for (int i = 0; i < kMaxTopicSubscriptions; i++) {
-        if (subscribedTopics[i][0] != '\0' && strcmp(subscribedTopics[i], topic) == 0) {
-            return i;
+    for (TopicSubscription *node = subscriptionHead; node != nullptr; node = node->next) {
+        if (node->topic != nullptr && strcmp(node->topic, topic) == 0) {
+            return node;
         }
     }
-    return -1;
+    return nullptr;
 }
 
-int MqttClient::nextFreeTopicSubscription() const {
-    for (int i = 0; i < kMaxTopicSubscriptions; i++) {
-        if (subscribedTopics[i][0] == '\0') {
-            return i;
-        }
-    }
-    return -1;
-}
-
-void MqttClient::keepOrSubscribe(const String &subscribeTopic, bool *keepSubscription) {
-    if (subscribeTopic.length() == 0 || keepSubscription == nullptr) {
+void MqttClient::keepOrSubscribe(const String &subscribeTopic) {
+    if (subscribeTopic.length() == 0) {
         return;
     }
-    const int existing = findTopicSubscription(subscribeTopic.c_str());
-    if (existing >= 0) {
-        keepSubscription[existing] = true;
+    TopicSubscription *existing = findTopicSubscription(subscribeTopic.c_str());
+    if (existing != nullptr) {
+        existing->keepMarked = true;
         return;
     }
     if (!client->subscribe(subscribeTopic.c_str())) {
         LOGGER.warning("MQTT subscribe failed topic=" + subscribeTopic);
         return;
     }
-    const int freeIndex = nextFreeTopicSubscription();
-    if (freeIndex < 0) {
-        LOGGER.warning("MQTT subscribe table full topic=" + subscribeTopic);
+    TopicSubscription *node = (TopicSubscription *)calloc(1, sizeof(TopicSubscription));
+    if (node == nullptr) {
         return;
     }
-    strncpy(
-        subscribedTopics[freeIndex],
-        subscribeTopic.c_str(),
-        sizeof(subscribedTopics[freeIndex]) - 1
-    );
-    subscribedTopics[freeIndex][sizeof(subscribedTopics[freeIndex]) - 1] = '\0';
-    keepSubscription[freeIndex] = true;
+    const size_t topicLen = subscribeTopic.length();
+    node->topic = (char *)malloc(topicLen + 1);
+    if (node->topic == nullptr) {
+        free(node);
+        return;
+    }
+    memcpy(node->topic, subscribeTopic.c_str(), topicLen + 1);
+    node->keepMarked = true;
+    node->next = subscriptionHead;
+    subscriptionHead = node;
     LOGGER.info("MQTT subscribe topic=" + subscribeTopic);
 }
 
@@ -146,47 +144,54 @@ void MqttClient::subscribeDeviceCommands() {
         return;
     }
 
-    bool keepSubscription[kMaxTopicSubscriptions];
-    memset(keepSubscription, 0, sizeof(keepSubscription));
+    for (TopicSubscription *node = subscriptionHead; node != nullptr; node = node->next) {
+        node->keepMarked = false;
+    }
 
     if (topicServerBorn.length() > 0) {
-        keepOrSubscribe(topicServerBorn, keepSubscription);
+        keepOrSubscribe(topicServerBorn);
     }
 
-    for (int slotIndex = 0; slotIndex < DEVICE_MAP_SLOTS; slotIndex++) {
-        DeviceTopicEntry *entry = topicMap->slotAt(slotIndex);
-        if (entry == nullptr || !entry->used) {
+    for (DeviceTopicEntry *entry = topicMap->first(); entry != nullptr; entry = DeviceTopicMap::nextEntry(entry)) {
+        if (!entry->used) {
             continue;
         }
 
-        if (entry->transport != DeviceTransportWifi && entry->commandTopic[0] != '\0') {
-            keepOrSubscribe(String(entry->commandTopic), keepSubscription);
+        if (entry->transport != DeviceTransportWifi && !deviceTopicEmpty(entry->commandTopic)) {
+            keepOrSubscribe(String(entry->commandTopic));
             if (DeviceTopicMap::usesTopicSuffix(entry->channelCount)) {
-                keepOrSubscribe(String(entry->commandTopic) + "/+", keepSubscription);
+                keepOrSubscribe(String(entry->commandTopic) + "/+");
             }
         }
 
-        if (entry->stateTopic[0] != '\0'
+        if (!deviceTopicEmpty(entry->stateTopic)
             && (entry->transport == DeviceTransportWifi
                 || zigbeeDeviceTypeIsMeasurement(entry->zigbeeType))) {
-            keepOrSubscribe(String(entry->stateTopic), keepSubscription);
+            keepOrSubscribe(String(entry->stateTopic));
             if (entry->transport != DeviceTransportWifi
                 && DeviceTopicMap::usesTopicSuffix(entry->channelCount)) {
-                keepOrSubscribe(String(entry->stateTopic) + "/+", keepSubscription);
+                keepOrSubscribe(String(entry->stateTopic) + "/+");
             }
         }
-        if (entry->transport == DeviceTransportWifi && entry->availabilityTopic[0] != '\0') {
-            keepOrSubscribe(String(entry->availabilityTopic), keepSubscription);
+        if (entry->transport == DeviceTransportWifi && !deviceTopicEmpty(entry->availabilityTopic)) {
+            keepOrSubscribe(String(entry->availabilityTopic));
         }
     }
 
-    for (int i = 0; i < kMaxTopicSubscriptions; i++) {
-        if (subscribedTopics[i][0] == '\0' || keepSubscription[i]) {
+    TopicSubscription **link = &subscriptionHead;
+    while (*link != nullptr) {
+        TopicSubscription *node = *link;
+        if (node->keepMarked) {
+            link = &node->next;
             continue;
         }
-        client->unsubscribe(subscribedTopics[i]);
-        LOGGER.info("MQTT unsubscribe topic=" + String(subscribedTopics[i]));
-        subscribedTopics[i][0] = '\0';
+        if (node->topic != nullptr) {
+            client->unsubscribe(node->topic);
+            LOGGER.info("MQTT unsubscribe topic=" + String(node->topic));
+        }
+        *link = node->next;
+        free(node->topic);
+        free(node);
     }
 }
 
@@ -291,7 +296,7 @@ void MqttClient::publishDevices(const String &json) {
 }
 
 void MqttClient::publishDeviceState(const DeviceTopicEntry *entry, const char *message, uint8_t endpoint) {
-    if (entry == nullptr || entry->stateTopic[0] == '\0') {
+    if (entry == nullptr || deviceTopicEmpty(entry->stateTopic)) {
         return;
     }
     if (entry->transport == DeviceTransportWifi) {
@@ -312,7 +317,7 @@ void MqttClient::publishDeviceState(const DeviceTopicEntry *entry, const char *m
 }
 
 bool MqttClient::publishDeviceCommand(const DeviceTopicEntry *entry, const char *message, uint8_t endpoint) {
-    if (entry == nullptr || entry->commandTopic[0] == '\0' || message == nullptr) {
+    if (entry == nullptr || deviceTopicEmpty(entry->commandTopic) || message == nullptr) {
         return false;
     }
     if (entry->transport == DeviceTransportWifi) {

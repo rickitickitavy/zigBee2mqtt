@@ -45,4 +45,70 @@ lets keep this idea for the future task. Now I want to develop a new big feature
   each widget, in edit stage only, by click wich add device dialog appears. In this dialog user can choose device from registerd devices (drop down list), chennal number if device has more than 1 channel, title. If device is measure sensor propose choose
   measure unit from drop-down list (base known units for pressure, temperature, speed, direction and so on according to device class). User can, at edit stage, change devices order by drag and drop them. Can edit added devices (for example by clickin by
   them). At edit time don't send any commands to devices. When user finishes to edit console he press button save. Add button Export Console to edit dialog for user have ability to export console to JSON for later restore. Add button Import from Json to
-  edit dialog. This button may be enabled only if console user editing is empty. May be I'll add more later 
+  edit dialog. This button may be enabled only if console user editing is empty. May be I'll add more later
+
+0) console saved but opened but all titles are empty. Titles was not in lathinian
+1)  place "BLOCKED" after "THEME" user edit dialog
+2)  use broadcast web socket for consoles
+3)  consoles in web UI must be in the order from the user edit dialog
+4)  allow user editing another user to change order of consoles by drag them and drop in checkbox list of available consoles
+5)  Show "Assigned consoles" only for SIMPLE users (no one role checked)
+6)  decrease vertical gaps between roles in user edit dialog
+7)  After I added first device in widget it did not grow
+
+1) start dragging widget only if take widget by :: element
+2) what for is slider disabled "Group preview" on widget?
+3) I tried to edit user and add to him new console. and the router reboots with log
+Guru Meditation Error: Core  0 panic'ed (Load access fault). Exception was unhandled.
+
+Core  0 register dump:
+MEPC    : 0x420293f6  RA      : 0x42029416  SP      : 0x408582b0  GP      : 0x40817834
+TP      : 0x40858580  T0      : 0x7f7f7fff  T1      : 0x7f7f7f7f  T2      : 0xffffffff
+S0/FP   : 0x408583d4  S1      : 0x4085e2c4  A0      : 0x00000030  A1      : 0x4085e2c4
+A2      : 0x40858344  A3      : 0x0000006e  A4      : 0x00000000  A5      : 0x00000000
+A6      : 0xffffff9f  A7      : 0x00000001  S2      : 0x4083b000  S3      : 0x42180000
+S4      : 0x4085d24c  S5      : 0x00000001  S6      : 0x0000000a  S7      : 0x00000000
+S8      : 0x00000000  S9      : 0x00000000  S10     : 0x00000000  S11     : 0x00000000
+T3      : 0x00000000  T4      : 0x0fffffff  T5      : 0x00000019  T6      : 0x408585f8
+MSTATUS : 0x00001881  MTVEC   : 0x40800001  MCAUSE  : 0x00000005  MTVAL   : 0x0000003c
+MHARTID : 0x00000000
+
+Stack memory:
+408582b0: 0x4085d1e8 0x4085e2c4 0x40858344 0x42029416 0x4083bab0 0x00000020 0x40858344 0x4202def4
+408582d0: 0x4083b000 0x00000003 0x4083c198 0x0cb8330a 0x4085d1e8 0x4083b000 0x40858330 0x4202ef0a
+408582f0: 0x00001800 0x00000001 0x40844798 0x0cb8330a 0x00001800 0x00000000 0x408583cc 0x00000000
+40858310: 0x4085d1e8 0x4083b000 0x40852310 0x4202f23c 0x0000000a 0x00000000 0x00000000 0x40022498
+40858330: 0x40844798 0x40880000 0x4083bab0 0x40022574 0x4085e1e8 0x00000020 0x408583cc 0x40022498
+40858350: 0x4083bab0 0x00000030 0x4085f9a4 0x4080dde8 0x4083b000 0x00000003 0x4083c198 0x40800db0
+40858370: 0x0000000a 0x00001800 0x00000030 0x00000004 0x40880000 0x00000001 0x00000000 0x4083b000
+40858390: 0x00001800 0x00000000 0x4085845c 0x40800dec 0x40852be0 0x4083b000 0x00001800 0x00000030
+408583b0: 0x40852be0 0x4083b000 0x00000001 0x00000004 0x00001800 0x00000030 0x4085845c 0x40800fae
+408583d0: 0x42184060 0x00000030 0x4085845c 0x0cb8330a 0x000000dc 0x40860d45 0x4083b000 0x420122d8
+408583f0: 0x00000000 0x00000000 0x4085d1e8 0x42040eb2 0x0000000a 0x00000001 0x4085d24c 0x0cb8330a
+40858410: 0x000000dc 0x40860d45 0x4083b000 0x420124f8 0x000000dc 0x4085f9a4 0x40852494 0x4085d1e8
+40858430: 0x00000000 0x42012398 0x4201245c 0x0cb8330a 0x000000dc 0x40860d45 0x4083b000 0x4201264e
+40858450: 0x00000000 0x00000000 0x4085d214 0x4085d1e8 0x00000000 0x42012372 0x420124be 0x0cb8330a
+40858470: 0x00000002 0x40860d45 0x4085d1e8 0x4201545c 0x40858580 0x40022494 0x3ffffce2 0x00000004
+40858490: 0x4081e000 0x40852354 0x4085d1e8 0x4085f64c 0x00000000 0x00000000 0x00000000 0x4085bbc4
+408584b0: 0x00000001 0x4085c9c0 0x4085bb70 0x4200b4dc 0x00000000 0x00000000 0x4083b000 0x00000000
+408584d0: 0x4085d1e8 0x4085bb70 0x40860b82 0x0000029f 0x00000000 0x00000000 0x00000000 0x00000004
+408584f0: 0x4081e000 0x4085b878 0x4085b878 0x4200bf52 0x4081e000 0x4085d8c0 0x4081e0d4 0x4200c0d8
+40858510: 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000001
+40858530: 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x40809e28
+40858550: 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000
+40858570: 0x00000000 0xa5a5a5a5 0xa5a5a5a5 0xa5a5a5a5 0xa5a5a5a5 0xbaad5678 0x00000168 0xabba1234
+40858590: 0x0000015c 0x40858330 0x0000f2cd 0x40834850 0x40834850 0x40858594 0x40834848 0x0000000f
+408585b0: 0x00000000 0x00000000 0x40858594 0x00000000 0x0000000a 0x40854584 0x6e797361 0x63745f63
+408585d0: 0x00000070 0x00000000 0x40858580 0x0000000b 0x00000000 0x0000000a 0x00000000 0x4085bee8
+408585f0: 0x420a8956 0x00026e6f 0x0000000b 0x4083c4a0 0x4083c508 0x4083c570 0x00000000 0x00000000
+40858610: 0x00000001 0x00000000 0x00000000 0x00000000 0x420a84aa 0x00000000 0x00000000 0x00000000
+40858630: 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000
+40858650: 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000
+40858670: 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000
+40858690: 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000
+
+
+
+ELF file SHA256: 119eb4ef1
+
+Rebooting...

@@ -511,8 +511,7 @@ InterChipSlave::DeferredDeviceCommand *InterChipSlave::findDeferredDeviceCommand
     const uint8_t ieee[8],
     uint8_t endpoint
 ) {
-    for (int i = 0; i < kMaxDeferredDeviceCommands; i++) {
-        DeferredDeviceCommand *slot = &deferredDeviceCommands[i];
+    for (DeferredDeviceCommand *slot = deferredDeviceCommandHead; slot != nullptr; slot = slot->next) {
         if (slot->occupied && memcmp(slot->ieee, ieee, 8) == 0 && slot->endpoint == endpoint) {
             return slot;
         }
@@ -528,24 +527,21 @@ InterChipSlave::DeferredDeviceCommand *InterChipSlave::allocDeferredDeviceComman
     if (existing != nullptr) {
         return existing;
     }
-    for (int i = 0; i < kMaxDeferredDeviceCommands; i++) {
-        DeferredDeviceCommand *slot = &deferredDeviceCommands[i];
-        if (slot->occupied) {
-            continue;
-        }
-        *slot = DeferredDeviceCommand{};
-        slot->occupied = true;
-        memcpy(slot->ieee, ieee, 8);
-        slot->endpoint = endpoint;
-        return slot;
+    if (deferredDeviceCommandCount >= kMaxDeferredDeviceCommands) {
+        LOGGER.warning("Deferred device command table full");
+        return nullptr;
     }
-    LOGGER.warning("Deferred device command table full");
-    DeferredDeviceCommand *fallback = &deferredDeviceCommands[kMaxDeferredDeviceCommands - 1];
-    *fallback = DeferredDeviceCommand{};
-    fallback->occupied = true;
-    memcpy(fallback->ieee, ieee, 8);
-    fallback->endpoint = endpoint;
-    return fallback;
+    DeferredDeviceCommand *slot = (DeferredDeviceCommand *)calloc(1, sizeof(DeferredDeviceCommand));
+    if (slot == nullptr) {
+        return nullptr;
+    }
+    slot->occupied = true;
+    slot->endpoint = endpoint;
+    memcpy(slot->ieee, ieee, 8);
+    slot->next = deferredDeviceCommandHead;
+    deferredDeviceCommandHead = slot;
+    deferredDeviceCommandCount++;
+    return slot;
 }
 
 void InterChipSlave::stashDeferredOnOff(
@@ -745,11 +741,12 @@ void InterChipSlave::handleHostFrame(const SpiFrame &frame) {
     }
     if (frame.cmd == SpiCmdSetDevice && frame.length >= 1 && deviceSyncHandler != nullptr) {
         uint8_t flags = 0;
-        DeviceTopicEntry entry;
+        DeviceTopicEntry entry{};
         if (!DeviceTopicMap::unpackSyncPayload(frame.payload, frame.length, &flags, &entry)) {
             return;
         }
         deviceSyncHandler(flags, &entry);
+        DeviceTopicMap::clearEntryStrings(&entry);
         return;
     }
     if (frame.cmd == SpiCmdGetDevices || frame.cmd == SpiCmdGetDevicesFile) {
@@ -830,9 +827,11 @@ void InterChipSlave::applyDeferredRadioCommands() {
             permitJoinPending = false;
         }
     }
-    for (int i = 0; i < kMaxDeferredDeviceCommands; i++) {
-        DeferredDeviceCommand *slot = &deferredDeviceCommands[i];
+    DeferredDeviceCommand *slot = deferredDeviceCommandHead;
+    while (slot != nullptr) {
+        DeferredDeviceCommand *next = slot->next;
         if (!slot->occupied) {
+            slot = next;
             continue;
         }
         if (slot->kind == DeferredDeviceKind::OnOff && onOffHandler != nullptr) {
@@ -858,7 +857,16 @@ void InterChipSlave::applyDeferredRadioCommands() {
                 (uint8_t)slot->attributeValue
             );
         }
-        slot->occupied = false;
+        DeferredDeviceCommand **link = &deferredDeviceCommandHead;
+        while (*link != nullptr && *link != slot) {
+            link = &(*link)->next;
+        }
+        if (*link == slot) {
+            *link = slot->next;
+            deferredDeviceCommandCount--;
+        }
+        free(slot);
+        slot = next;
     }
 }
 

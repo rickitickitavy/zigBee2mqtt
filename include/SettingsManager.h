@@ -10,7 +10,6 @@ public:
 
     GlobalSettings *getSettings();
     DeviceTopicMap *deviceMap();
-    DeviceTopicEntry *devices();
     void readSettings();
     void saveSetting(bool restart);
     void saveMain(bool restart);
@@ -37,7 +36,6 @@ public:
 private:
     GlobalSettings settings;
     GlobalSettings committedMain;
-    DeviceTopicEntry deviceSlots[DEVICE_MAP_SLOTS];
     DeviceTopicMap topicMap;
     bool pendingRestart = false;
     unsigned long restartRequestedMs = 0;

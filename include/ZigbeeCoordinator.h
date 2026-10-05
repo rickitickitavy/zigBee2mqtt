@@ -14,8 +14,8 @@ struct BoundZigbeeDevice {
     uint8_t ieee[8];
     uint16_t shortAddr;
     uint8_t endpoint;
-    char manufacturer[32];
-    char model[32];
+    char *manufacturer;
+    char *model;
     uint8_t zigbeeType;
     uint8_t lastEmittedType;
     unsigned long typeProbeDeadlineMs;
@@ -33,6 +33,7 @@ struct BoundZigbeeDevice {
         uint8_t moveStatus;
     };
     CoveringStatus coveringStatus[DEVICE_CHANNEL_COUNT_MAX];
+    BoundZigbeeDevice *next;
 };
 
 class ZigbeeCoordinator {
@@ -169,11 +170,13 @@ private:
         uint16_t attributeId = 0;
         unsigned long giveUpMs = 0;
         unsigned long deadlineMs = 0;
+        StatusReadItem *next = nullptr;
     };
 
     struct StatusIssuedItem {
         bool used = false;
         uint8_t ieee[8]{};
+        StatusIssuedItem *next = nullptr;
     };
 
     struct StatusAnswerHold {
@@ -185,6 +188,7 @@ private:
         uint32_t value = 0;
         unsigned long answeredMs = 0;
         unsigned long untilMs = 0;
+        StatusAnswerHold *next = nullptr;
     };
 
     struct EndpointCommandStamp {
@@ -192,6 +196,7 @@ private:
         uint8_t ieee[8]{};
         uint8_t endpoint = 0;
         unsigned long atMs = 0;
+        EndpointCommandStamp *next = nullptr;
     };
 
     struct DestCommandSlot {
@@ -208,17 +213,19 @@ private:
         uint16_t nextAttribute = 0;
         uint8_t nextType = 0;
         uint32_t nextValue = 0;
+        DestCommandSlot *next = nullptr;
     };
 
     struct DescriptorProbe {
         bool occupied = false;
         ZigbeeCoordinator *owner = nullptr;
         uint16_t shortAddr = 0;
+        DescriptorProbe *next = nullptr;
     };
 
     CoordinatorSwitch zigbeeSwitch;
     IasCieEndpoint iasCie;
-    BoundZigbeeDevice boundDevices[kMaxBoundDevices];
+    BoundZigbeeDevice *boundDeviceHead = nullptr;
     DeviceTopicMap *registeredMap = nullptr;
     uint8_t nextIasZoneId = 1;
     LightStateFn lightStateHandler = nullptr;
@@ -231,12 +238,19 @@ private:
     unsigned long pairingLedToggleMs = 0;
     bool pairingLedOn = false;
     bool started = false;
-    StatusReadItem statusReads[kMaxStatusReads]{};
-    StatusIssuedItem statusIssued[kMaxStatusIssued]{};
-    StatusAnswerHold statusAnswers[kMaxStatusAnswers]{};
-    EndpointCommandStamp endpointCommands[kMaxStatusAnswers]{};
-    DestCommandSlot destFlights[kMaxDestFlights]{};
-    DescriptorProbe descriptorProbes[kMaxDescriptorProbes]{};
+    StatusReadItem *statusReadHead = nullptr;
+    StatusIssuedItem *statusIssuedHead = nullptr;
+    StatusAnswerHold *statusAnswerHead = nullptr;
+    EndpointCommandStamp *endpointCommandHead = nullptr;
+    DestCommandSlot *destFlightHead = nullptr;
+    DescriptorProbe *descriptorProbeHead = nullptr;
+    int statusReadCount = 0;
+    int statusIssuedCount = 0;
+    int statusAnswerCount = 0;
+    int endpointCommandCount = 0;
+    int destFlightCount = 0;
+    int descriptorProbeCount = 0;
+    int boundDeviceCount = 0;
 
     void startPairingWindow(uint8_t seconds);
     void stopPairingWindow();
@@ -325,6 +339,17 @@ private:
     );
     void pumpStatusReads();
     bool trySendStatusRead(StatusReadItem *item);
+    void clearBoundDevices();
+    void releaseBoundDevice(BoundZigbeeDevice *device);
+    BoundZigbeeDevice *allocateBoundDevice();
+    StatusReadItem *allocateStatusRead();
+    void releaseStatusRead(StatusReadItem *item);
+    StatusIssuedItem *allocateStatusIssued();
+    StatusAnswerHold *allocateStatusAnswer();
+    EndpointCommandStamp *allocateEndpointCommandStamp();
+    DestCommandSlot *allocateDestFlight();
+    DescriptorProbe *allocateDescriptorProbe(uint16_t shortAddr);
+    void releaseDescriptorProbe(DescriptorProbe *probe);
     bool ieeeHasInFlightStatusRead(const uint8_t ieee[8]) const;
     void completeStatusRead(const uint8_t ieee[8], uint16_t clusterId, uint8_t endpoint);
     bool ieeeHasStatusRead(const uint8_t ieee[8]) const;

@@ -14,7 +14,6 @@ public:
     void persistIfDue();
 
 private:
-    DeviceTopicEntry slots[DEVICE_MAP_SLOTS];
     DeviceTopicMap topicMap;
     bool persistEnabled = false;
     bool persistPending = false;

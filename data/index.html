@@ -57,6 +57,9 @@
             if (name == "security") {
                 loadUsers();
             }
+            if (name == "consoles") {
+                loadConsoles();
+            }
         }
 
         function showSystemTab(name) {
@@ -236,6 +239,16 @@
             return isAdminUser() || !!(signedInUser && signedInUser[roleName]);
         }
 
+        function isOperatorUser(user) {
+            if (!user) {
+                return false;
+            }
+            if (user.isAdmin) {
+                return true;
+            }
+            return !!(user.editDevices || user.addDevices || user.removeDevices || user.editUsers || user.editConsoles);
+        }
+
         function setHidden(element, hidden) {
             if (element) {
                 element.hidden = !!hidden;
@@ -252,6 +265,8 @@
             setHidden(document.querySelector('.system-tab-btn[data-tab="update"]'), !admin);
             setHidden(document.querySelector('.system-tab-btn[data-tab="hardware"]'), !admin);
             setHidden(document.querySelector('.sidebar-btn[data-section="security"]'), !canEditUsers);
+            var canEditConsoles = admin || hasRole("editConsoles");
+            setHidden(document.querySelector('.sidebar-btn[data-section="consoles"]'), !canEditConsoles);
             setHidden(document.querySelector('.system-tab-btn[data-tab="maintenance"]'), !admin);
             setHidden(document.getElementById("maintenanceSettingsCard"), !admin);
             setHidden(document.getElementById("addDeviceBtn"), !canAdd);
@@ -303,9 +318,14 @@
             stopStatusPolling();
             stopLogPolling();
             stopDevicesLive();
+            stopConsolesLive();
         }
 
         function enterSignedInConsole(user) {
+            if (!isOperatorUser(user)) {
+                window.location.href = "/user.html";
+                return;
+            }
             signedInUser = user;
             sessionIdleTouchMs = 0;
             setHidden(document.getElementById("loginOverlay"), true);
@@ -317,6 +337,7 @@
                 picker.value = normalizeThemeId(user && user.theme);
             }
             startSessionWatch();
+            startConsolesLive();
             showMainSection("status");
         }
 
@@ -414,6 +435,9 @@
             if (user && user.editUsers) {
                 roles.push("edit users");
             }
+            if (user && user.editConsoles) {
+                roles.push("console editor");
+            }
             return roles.length ? roles.join(", ") : "simple";
         }
 
@@ -488,6 +512,36 @@
             }
         }
 
+        function userDialogHasAnyRole() {
+            if (document.getElementById("userIsAdmin").checked) {
+                return true;
+            }
+            if (document.getElementById("userEditDevices").checked) {
+                return true;
+            }
+            if (document.getElementById("userAddDevices").checked) {
+                return true;
+            }
+            if (document.getElementById("userRemoveDevices").checked) {
+                return true;
+            }
+            if (document.getElementById("userEditUsers").checked) {
+                return true;
+            }
+            if (document.getElementById("userEditConsoles").checked) {
+                return true;
+            }
+            return false;
+        }
+
+        function updateUserAssignedConsolesVisibility() {
+            var field = document.getElementById("userAssignedConsolesField");
+            if (!field) {
+                return;
+            }
+            field.hidden = userDialogHasAnyRole();
+        }
+
         function openUserDialog(user) {
             var isEdit = !!(user && user.userName);
             userDialogIsEdit = isEdit;
@@ -503,6 +557,7 @@
             document.getElementById("userAddDevices").checked = !!(user && user.addDevices);
             document.getElementById("userRemoveDevices").checked = !!(user && user.removeDevices);
             document.getElementById("userEditUsers").checked = !!(user && user.editUsers);
+            document.getElementById("userEditConsoles").checked = !!(user && user.editConsoles);
             document.getElementById("userIsBlocked").checked = !!(user && user.isBlocked);
             document.getElementById("userTheme").value = user && user.theme === "light" ? "light" : "dark";
             document.getElementById("userDeleteBtn").hidden = !isEdit;
@@ -510,8 +565,122 @@
             if (!isAdminUser()) {
                 document.getElementById("userIsAdmin").checked = false;
             }
+            updateUserAssignedConsolesVisibility();
+            populateUserConsoleCheckboxes(user);
             document.getElementById("userDialog").hidden = false;
             userDialogBaseline = JSON.stringify(readUserDialogBody());
+        }
+
+        function buildUserConsoleAssignRow(consoleRow, checked) {
+            var label = document.createElement("label");
+            label.className = "field-check user-console-assign-row";
+            label.draggable = true;
+            label.ondragstart = function (event) {
+                userConsoleDragRow = label;
+                label.classList.add("is-dragging");
+                event.dataTransfer.effectAllowed = "move";
+            };
+            label.ondragend = function () {
+                label.classList.remove("is-dragging");
+                userConsoleDragRow = null;
+            };
+            label.ondragover = function (event) {
+                event.preventDefault();
+                label.classList.add("is-drag-over");
+            };
+            label.ondragleave = function () {
+                label.classList.remove("is-drag-over");
+            };
+            label.ondrop = function (event) {
+                event.preventDefault();
+                label.classList.remove("is-drag-over");
+                if (!userConsoleDragRow || userConsoleDragRow === label) {
+                    return;
+                }
+                var host = document.getElementById("userConsolesCheckboxes");
+                if (!host) {
+                    return;
+                }
+                var rows = Array.prototype.slice.call(host.querySelectorAll(".user-console-assign-row"));
+                var fromIndex = rows.indexOf(userConsoleDragRow);
+                var toIndex = rows.indexOf(label);
+                if (fromIndex < 0 || toIndex < 0) {
+                    return;
+                }
+                if (fromIndex < toIndex) {
+                    host.insertBefore(userConsoleDragRow, label.nextSibling);
+                } else {
+                    host.insertBefore(userConsoleDragRow, label);
+                }
+            };
+            var dragHandle = document.createElement("span");
+            dragHandle.className = "user-console-assign-drag";
+            dragHandle.textContent = "⋮";
+            var input = document.createElement("input");
+            input.type = "checkbox";
+            input.className = "user-console-assign-cb";
+            input.setAttribute("data-console-id", consoleRow.id || "");
+            input.checked = !!checked;
+            label.appendChild(dragHandle);
+            label.appendChild(input);
+            label.appendChild(document.createTextNode(consoleRow.name || consoleRow.id || "Console"));
+            return label;
+        }
+
+        function populateUserConsoleCheckboxes(user) {
+            var host = document.getElementById("userConsolesCheckboxes");
+            if (!host) {
+                return;
+            }
+            host.innerHTML = "";
+            var assigned = user && user.consoles ? user.consoles.slice() : [];
+            fetch("/api/consoles", { cache: "no-store" }).then(function (response) {
+                return response.text().then(function (text) {
+                    if (!response.ok) {
+                        throw new Error(text || ("HTTP " + response.status));
+                    }
+                    return JSON.parse(text || "[]");
+                });
+            }).then(function (rows) {
+                var list = Array.isArray(rows) ? rows : [];
+                var byId = {};
+                var index;
+                for (index = 0; index < list.length; index++) {
+                    byId[list[index].id] = list[index];
+                }
+                for (index = 0; index < assigned.length; index++) {
+                    var assignedRow = byId[assigned[index]];
+                    if (!assignedRow) {
+                        continue;
+                    }
+                    host.appendChild(buildUserConsoleAssignRow(assignedRow, true));
+                    delete byId[assigned[index]];
+                }
+                for (index = 0; index < list.length; index++) {
+                    if (!byId[list[index].id]) {
+                        continue;
+                    }
+                    host.appendChild(buildUserConsoleAssignRow(list[index], false));
+                }
+                userDialogBaseline = JSON.stringify(readUserDialogBody());
+            }).catch(function () {
+                host.textContent = "Could not load consoles.";
+            });
+        }
+
+        function readUserConsoleAssignments() {
+            if (userDialogHasAnyRole()) {
+                return [];
+            }
+            var boxes = document.querySelectorAll(".user-console-assign-cb");
+            var ids = [];
+            var index;
+            for (index = 0; index < boxes.length; index++) {
+                if (boxes[index].checked) {
+                    ids.push(boxes[index].getAttribute("data-console-id") || "");
+                }
+            }
+            return ids;
         }
 
         function closeUserDialog() {
@@ -522,6 +691,7 @@
 
         var userDialogBaseline = null;
         var userDialogIsEdit = false;
+        var userConsoleDragRow = null;
 
         function userDialogHasUnsavedChanges() {
             if (userDialogBaseline == null) {
@@ -547,8 +717,10 @@
                 addDevices: document.getElementById("userAddDevices").checked,
                 removeDevices: document.getElementById("userRemoveDevices").checked,
                 editUsers: document.getElementById("userEditUsers").checked,
+                editConsoles: document.getElementById("userEditConsoles").checked,
                 isBlocked: document.getElementById("userIsBlocked").checked,
-                theme: document.getElementById("userTheme").value
+                theme: document.getElementById("userTheme").value,
+                consoles: readUserConsoleAssignments()
             };
         }
 
@@ -2685,6 +2857,72 @@
             openDevicesLiveSocket();
         }
 
+        var consolesLiveWanted = false;
+        var consolesLiveSocket = null;
+        var consolesLiveReconnectTimer = null;
+
+        function applyConsolesLiveMessage(text) {
+            var message;
+            try {
+                message = JSON.parse(text);
+            } catch (parseError) {
+                return;
+            }
+            if (!message || message.op !== "reload") {
+                return;
+            }
+            var consolesSection = document.getElementById("section-consoles");
+            if (consolesSection && consolesSection.classList.contains("active")) {
+                loadConsoles();
+            }
+            var securitySection = document.getElementById("section-security");
+            if (securitySection && securitySection.classList.contains("active")) {
+                loadUsers();
+            }
+        }
+
+        function stopConsolesLive() {
+            consolesLiveWanted = false;
+            if (consolesLiveReconnectTimer != null) {
+                window.clearTimeout(consolesLiveReconnectTimer);
+                consolesLiveReconnectTimer = null;
+            }
+            if (consolesLiveSocket != null) {
+                consolesLiveSocket.onclose = null;
+                consolesLiveSocket.close();
+                consolesLiveSocket = null;
+            }
+        }
+
+        function openConsolesLiveSocket() {
+            if (!consolesLiveWanted || firmwareRebootWaitActive) {
+                return;
+            }
+            if (consolesLiveSocket != null
+                && (consolesLiveSocket.readyState === WebSocket.OPEN
+                    || consolesLiveSocket.readyState === WebSocket.CONNECTING)) {
+                return;
+            }
+            var protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+            var socket = new WebSocket(protocol + "//" + window.location.host + "/ws/consoles");
+            consolesLiveSocket = socket;
+            socket.onmessage = function (event) {
+                applyConsolesLiveMessage(event.data);
+            };
+            socket.onclose = function () {
+                consolesLiveSocket = null;
+                if (!consolesLiveWanted || firmwareRebootWaitActive) {
+                    return;
+                }
+                consolesLiveReconnectTimer = window.setTimeout(openConsolesLiveSocket, 2000);
+            };
+        }
+
+        function startConsolesLive() {
+            consolesLiveWanted = true;
+            openConsolesLiveSocket();
+        }
+
         function resumePairingDialog() {
             var searchDialog = document.getElementById("searchDialog");
             if (!pairingSessionActive || !searchDialog) {
@@ -3311,6 +3549,929 @@
             apIpField.hidden = document.getElementById("wifiMode").value != "AP";
         }
 
+        var consoleEditorDraft = null;
+        var consoleEditorBaseline = null;
+        var consoleEditorEditMode = false;
+        var consoleDeviceDialogWidgetIndex = -1;
+        var consoleDeviceDialogBindingIndex = -1;
+        var consoleDeviceDialogBaseline = null;
+        var consoleDragWidgetIndex = null;
+        var consoleDragBindingWidgetIndex = null;
+        var consoleDragBindingIndex = null;
+
+        function loadConsoles() {
+            var errorLine = document.getElementById("consolesSaveError");
+            if (errorLine) {
+                errorLine.hidden = true;
+            }
+            fetch("/api/consoles", { cache: "no-store" }).then(function (response) {
+                return response.text().then(function (text) {
+                    if (!response.ok) {
+                        throw new Error(text || ("HTTP " + response.status));
+                    }
+                    return JSON.parse(text || "[]");
+                });
+            }).then(function (rows) {
+                renderConsoleTable(Array.isArray(rows) ? rows : []);
+            }).catch(function (error) {
+                if (errorLine) {
+                    errorLine.hidden = false;
+                    errorLine.textContent = error && error.message ? error.message : "Consoles load failed";
+                }
+            });
+        }
+
+        function renderConsoleTable(rows) {
+            var body = document.getElementById("consoleTableBody");
+            if (!body) {
+                return;
+            }
+            body.innerHTML = "";
+            var index;
+            for (index = 0; index < rows.length; index++) {
+                var row = rows[index];
+                var tableRow = document.createElement("tr");
+                tableRow.onclick = (function (stored) {
+                    return function () {
+                        openConsoleEditDialog(stored.id);
+                    };
+                })(row);
+                var nameCell = document.createElement("td");
+                nameCell.textContent = row.name || "";
+                var activeCell = document.createElement("td");
+                activeCell.textContent = row.active ? "yes" : "no";
+                var usersCell = document.createElement("td");
+                var users = row.users || [];
+                usersCell.textContent = users.length ? users.join(", ") : "—";
+                tableRow.appendChild(nameCell);
+                tableRow.appendChild(activeCell);
+                tableRow.appendChild(usersCell);
+                body.appendChild(tableRow);
+            }
+        }
+
+        function cloneConsoleDraft(source) {
+            return JSON.parse(JSON.stringify(source || {
+                id: "",
+                name: "",
+                active: true,
+                columns: 2,
+                widgets: []
+            }));
+        }
+
+        function consoleDraftWidgetCount(draft) {
+            if (!draft || !draft.widgets) {
+                return 0;
+            }
+            var count = 0;
+            var index;
+            for (index = 0; index < draft.widgets.length; index++) {
+                if (!isConsoleSpacerWidget(draft.widgets[index])) {
+                    count++;
+                }
+            }
+            return count;
+        }
+
+        function openConsoleEditDialog(consoleId) {
+            var errorLine = document.getElementById("consoleEditError");
+            if (errorLine) {
+                errorLine.hidden = true;
+            }
+            fetch("/api/consoles/item?id=" + encodeURIComponent(consoleId), { cache: "no-store" }).then(function (response) {
+                return response.text().then(function (text) {
+                    if (!response.ok) {
+                        throw new Error(text || ("HTTP " + response.status));
+                    }
+                    return JSON.parse(text);
+                });
+            }).then(function (payload) {
+                if (!payload || typeof payload !== "object" || Array.isArray(payload) || !payload.id) {
+                    throw new Error("Bad console payload");
+                }
+                consoleEditorDraft = cloneConsoleDraft(payload);
+                if (!consoleEditorDraft.columns || consoleEditorDraft.columns < 1) {
+                    consoleEditorDraft.columns = 2;
+                }
+                consoleEditorBaseline = JSON.stringify(consoleEditorDraft);
+                consoleEditorEditMode = true;
+                document.getElementById("consoleEditDialog").hidden = false;
+                renderConsoleEditor();
+            }).catch(function (error) {
+                if (errorLine) {
+                    errorLine.hidden = false;
+                    errorLine.textContent = error && error.message ? error.message : "Load failed";
+                }
+            });
+        }
+
+        function createConsoleAndEdit() {
+            var errorLine = document.getElementById("consolesSaveError");
+            if (errorLine) {
+                errorLine.hidden = true;
+            }
+            fetch("/api/consoles", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ name: "Console", active: true })
+            }).then(function (response) {
+                return response.text().then(function (text) {
+                    if (!response.ok) {
+                        throw new Error(text || ("HTTP " + response.status));
+                    }
+                    return JSON.parse(text);
+                });
+            }).then(function (payload) {
+                loadConsoles();
+                openConsoleEditDialog(payload.id);
+            }).catch(function (error) {
+                if (errorLine) {
+                    errorLine.hidden = false;
+                    errorLine.textContent = error && error.message ? error.message : "Create failed";
+                }
+            });
+        }
+
+        function closeConsoleEditDialog() {
+            consoleEditorEditMode = false;
+            consoleEditorDraft = null;
+            consoleEditorBaseline = null;
+            document.getElementById("consoleEditDialog").hidden = true;
+        }
+
+        function consoleEditHasUnsavedChanges() {
+            if (consoleEditorBaseline == null || consoleEditorDraft == null) {
+                return false;
+            }
+            return consoleEditorBaseline !== JSON.stringify(consoleEditorDraft);
+        }
+
+        function requestCloseConsoleEditDialog() {
+            if (consoleEditHasUnsavedChanges()) {
+                openUnsavedChangesDialog(closeConsoleEditDialog);
+                return;
+            }
+            closeConsoleEditDialog();
+        }
+
+        function consoleEditorColumnCount() {
+            if (!consoleEditorDraft) {
+                return 2;
+            }
+            var columns = parseInt(consoleEditorDraft.columns, 10);
+            if (!columns || columns < 1) {
+                columns = 2;
+            }
+            if (columns > 6) {
+                columns = 6;
+            }
+            consoleEditorDraft.columns = columns;
+            return columns;
+        }
+
+        function applyConsoleEditorGridColumns() {
+            var grid = document.getElementById("consoleEditGrid");
+            if (!grid) {
+                return 1;
+            }
+            var columns = consoleEditorColumnCount();
+            grid.style.gridTemplateColumns = "repeat(" + String(columns) + ", minmax(0, 1fr))";
+            return columns;
+        }
+
+        function makeConsoleSpacerWidget() {
+            return {
+                spacer: true,
+                title: "",
+                showGroupOnOff: false,
+                devices: []
+            };
+        }
+
+        function isConsoleSpacerWidget(widget) {
+            return !!(widget && widget.spacer);
+        }
+
+        function trimTrailingConsoleSpacers(list) {
+            while (list.length > 0 && isConsoleSpacerWidget(list[list.length - 1])) {
+                list.pop();
+            }
+        }
+
+        function placeConsoleWidgetAtIndex(fromIndex, targetIndex) {
+            readConsoleEditorFields();
+            var list = consoleEditorDraft.widgets;
+            if (!list || fromIndex === null || fromIndex < 0 || fromIndex >= list.length) {
+                return;
+            }
+            if (targetIndex < 0) {
+                return;
+            }
+            if (fromIndex === targetIndex) {
+                consoleDragWidgetIndex = null;
+                return;
+            }
+            var slots = list.slice();
+            var moved = slots[fromIndex];
+            slots[fromIndex] = null;
+            while (slots.length <= targetIndex) {
+                slots.push(null);
+            }
+            var displaced = slots[targetIndex];
+            slots[targetIndex] = moved;
+            slots[fromIndex] = displaced;
+            var normalized = [];
+            var slotIndex;
+            for (slotIndex = 0; slotIndex < slots.length; slotIndex++) {
+                if (slots[slotIndex] === null) {
+                    normalized.push(makeConsoleSpacerWidget());
+                } else {
+                    normalized.push(slots[slotIndex]);
+                }
+            }
+            trimTrailingConsoleSpacers(normalized);
+            consoleEditorDraft.widgets = normalized;
+            consoleDragWidgetIndex = null;
+            renderConsoleEditor();
+        }
+
+        function consoleWidgetDropTargetIndex(overIndex, event) {
+            var columns = applyConsoleEditorGridColumns();
+            var card = event.currentTarget;
+            var rect = card.getBoundingClientRect();
+            var x = rect.width > 0 ? (event.clientX - rect.left) / rect.width : 0.5;
+            var y = rect.height > 0 ? (event.clientY - rect.top) / rect.height : 0.5;
+            var row = Math.floor(overIndex / columns);
+            var column = overIndex % columns;
+            if (y < 0.33) {
+                if (row > 0) {
+                    return (row - 1) * columns + column;
+                }
+            } else if (y > 0.67) {
+                return (row + 1) * columns + column;
+            }
+            if (x < 0.33 && column > 0) {
+                return overIndex - 1;
+            }
+            if (x > 0.67 && column < columns - 1) {
+                return overIndex + 1;
+            }
+            return overIndex;
+        }
+
+        function moveConsoleWidgetDirection(widgetIndex, direction) {
+            var list = consoleEditorDraft && consoleEditorDraft.widgets;
+            if (!list || widgetIndex < 0 || widgetIndex >= list.length) {
+                return;
+            }
+            var columns = applyConsoleEditorGridColumns();
+            var row = Math.floor(widgetIndex / columns);
+            var column = widgetIndex % columns;
+            var targetIndex = widgetIndex;
+            if (direction === "left") {
+                if (column === 0) {
+                    return;
+                }
+                targetIndex = widgetIndex - 1;
+            } else if (direction === "right") {
+                if (column >= columns - 1) {
+                    return;
+                }
+                targetIndex = widgetIndex + 1;
+            } else if (direction === "up") {
+                if (row === 0) {
+                    return;
+                }
+                targetIndex = (row - 1) * columns + column;
+            } else if (direction === "down") {
+                targetIndex = (row + 1) * columns + column;
+            } else {
+                return;
+            }
+            placeConsoleWidgetAtIndex(widgetIndex, targetIndex);
+        }
+
+        function buildConsoleWidgetMovePad(widgetIndex) {
+            var pad = document.createElement("div");
+            pad.className = "console-widget-move-pad";
+            pad.setAttribute("aria-label", "Move widget");
+            var directions = [
+                { key: "up", label: "▲", title: "Move up" },
+                { key: "left", label: "◀", title: "Move left" },
+                { key: "right", label: "▶", title: "Move right" },
+                { key: "down", label: "▼", title: "Move down" }
+            ];
+            var directionIndex;
+            for (directionIndex = 0; directionIndex < directions.length; directionIndex++) {
+                var item = directions[directionIndex];
+                var button = document.createElement("button");
+                button.type = "button";
+                button.className = "console-widget-move-btn console-widget-move-" + item.key;
+                button.textContent = item.label;
+                button.title = item.title;
+                button.setAttribute("aria-label", item.title);
+                button.onclick = (function (storedIndex, storedDirection) {
+                    return function (event) {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        moveConsoleWidgetDirection(storedIndex, storedDirection);
+                    };
+                })(widgetIndex, item.key);
+                pad.appendChild(button);
+            }
+            return pad;
+        }
+
+        function bindConsoleWidgetDropTarget(card, widgetIndex) {
+            card.ondragover = function (event) {
+                event.preventDefault();
+                card.classList.add("is-drag-over");
+            };
+            card.ondragleave = function () {
+                card.classList.remove("is-drag-over");
+            };
+            card.ondrop = function (event) {
+                event.preventDefault();
+                card.classList.remove("is-drag-over");
+                if (consoleDragWidgetIndex === null) {
+                    return;
+                }
+                var targetIndex = consoleWidgetDropTargetIndex(widgetIndex, event);
+                if (isConsoleSpacerWidget(consoleEditorDraft.widgets[widgetIndex])
+                    && targetIndex === widgetIndex) {
+                    placeConsoleWidgetAtIndex(consoleDragWidgetIndex, widgetIndex);
+                    return;
+                }
+                placeConsoleWidgetAtIndex(consoleDragWidgetIndex, targetIndex);
+            };
+        }
+
+        function renderConsoleEditor() {
+            if (!consoleEditorDraft) {
+                return;
+            }
+            document.getElementById("consoleEditName").value = consoleEditorDraft.name || "";
+            document.getElementById("consoleEditActive").checked = consoleEditorDraft.active !== false;
+            var importButton = document.getElementById("consoleImportBtn");
+            if (importButton) {
+                importButton.disabled = consoleDraftWidgetCount(consoleEditorDraft) > 0;
+            }
+            var grid = document.getElementById("consoleEditGrid");
+            grid.className = "console-grid";
+            grid.innerHTML = "";
+            var widgets = consoleEditorDraft.widgets || [];
+            var widgetIndex;
+            for (widgetIndex = 0; widgetIndex < widgets.length; widgetIndex++) {
+                grid.appendChild(buildEditorWidgetCard(widgetIndex));
+            }
+            applyConsoleEditorGridColumns();
+            var addRow = document.getElementById("consoleEditAddRow");
+            if (addRow) {
+                addRow.innerHTML = "";
+                var addTile = document.createElement("button");
+                addTile.type = "button";
+                addTile.className = "console-widget-add";
+                addTile.textContent = "+ Add widget";
+                addTile.onclick = addConsoleWidget;
+                addTile.ondragover = function (event) {
+                    event.preventDefault();
+                    addTile.classList.add("is-drag-over");
+                };
+                addTile.ondragleave = function () {
+                    addTile.classList.remove("is-drag-over");
+                };
+                addTile.ondrop = function (event) {
+                    event.preventDefault();
+                    addTile.classList.remove("is-drag-over");
+                    if (consoleDragWidgetIndex === null) {
+                        return;
+                    }
+                    readConsoleEditorFields();
+                    var list = consoleEditorDraft.widgets;
+                    var moved = list.splice(consoleDragWidgetIndex, 1)[0];
+                    list.push(moved);
+                    trimTrailingConsoleSpacers(list);
+                    consoleDragWidgetIndex = null;
+                    renderConsoleEditor();
+                };
+                addRow.appendChild(addTile);
+            }
+            window.requestAnimationFrame(function () {
+                applyConsoleEditorGridColumns();
+            });
+        }
+
+        function addConsoleWidget() {
+            readConsoleEditorFields();
+            if (!consoleEditorDraft.widgets) {
+                consoleEditorDraft.widgets = [];
+            }
+            consoleEditorDraft.widgets.push({
+                title: "Widget",
+                showGroupOnOff: false,
+                devices: []
+            });
+            renderConsoleEditor();
+        }
+
+        function removeConsoleWidget(widgetIndex) {
+            readConsoleEditorFields();
+            consoleEditorDraft.widgets.splice(widgetIndex, 1);
+            trimTrailingConsoleSpacers(consoleEditorDraft.widgets);
+            renderConsoleEditor();
+        }
+
+        function confirmRemoveConsoleWidget(widgetIndex) {
+            if (!window.confirm("Delete this widget?")) {
+                return;
+            }
+            removeConsoleWidget(widgetIndex);
+        }
+
+        function buildEditorWidgetCard(widgetIndex) {
+            var widget = consoleEditorDraft.widgets[widgetIndex];
+            var card = document.createElement("article");
+            card.setAttribute("data-widget-index", String(widgetIndex));
+            if (isConsoleSpacerWidget(widget)) {
+                card.className = "console-widget console-widget-spacer";
+                card.setAttribute("aria-hidden", "true");
+                bindConsoleWidgetDropTarget(card, widgetIndex);
+                return card;
+            }
+            card.className = "console-widget";
+            bindConsoleWidgetDropTarget(card, widgetIndex);
+            var header = document.createElement("div");
+            header.className = "console-widget-header";
+            var moveTools = document.createElement("div");
+            moveTools.className = "console-widget-move-tools";
+            var handle = document.createElement("span");
+            handle.className = "console-widget-drag-handle";
+            handle.textContent = "⋮⋮";
+            handle.title = "Drag to another cell";
+            handle.draggable = true;
+            handle.ondragstart = function (event) {
+                consoleDragWidgetIndex = widgetIndex;
+                event.dataTransfer.effectAllowed = "move";
+                event.stopPropagation();
+            };
+            handle.ondragend = function () {
+                consoleDragWidgetIndex = null;
+                var overCards = document.querySelectorAll(".console-widget.is-drag-over, .console-widget-add.is-drag-over");
+                var overIndex;
+                for (overIndex = 0; overIndex < overCards.length; overIndex++) {
+                    overCards[overIndex].classList.remove("is-drag-over");
+                }
+            };
+            moveTools.appendChild(handle);
+            moveTools.appendChild(buildConsoleWidgetMovePad(widgetIndex));
+            header.appendChild(moveTools);
+            var toolbar = document.createElement("div");
+            toolbar.className = "console-widget-toolbar";
+            var titleField = document.createElement("div");
+            titleField.className = "field";
+            var titleInput = document.createElement("input");
+            titleInput.type = "text";
+            titleInput.className = "console-widget-title-input";
+            titleInput.setAttribute("data-widget-index", String(widgetIndex));
+            titleInput.value = widget.title || "";
+            titleField.appendChild(titleInput);
+            toolbar.appendChild(titleField);
+            var groupLabel = document.createElement("label");
+            groupLabel.className = "field-check";
+            var groupCheck = document.createElement("input");
+            groupCheck.type = "checkbox";
+            groupCheck.className = "console-widget-group-cb";
+            groupCheck.setAttribute("data-widget-index", String(widgetIndex));
+            groupCheck.checked = !!widget.showGroupOnOff;
+            groupLabel.appendChild(groupCheck);
+            groupLabel.appendChild(document.createTextNode("Group On/Off"));
+            toolbar.appendChild(groupLabel);
+            var deleteButton = document.createElement("button");
+            deleteButton.type = "button";
+            deleteButton.className = "btn btn-secondary btn-inline";
+            deleteButton.textContent = "Delete";
+            deleteButton.onclick = (function (storedIndex) {
+                return function () {
+                    confirmRemoveConsoleWidget(storedIndex);
+                };
+            })(widgetIndex);
+            toolbar.appendChild(deleteButton);
+            header.appendChild(toolbar);
+            card.appendChild(header);
+            var list = document.createElement("div");
+            list.className = "console-device-list";
+            var bindings = widget.devices || [];
+            var bindingIndex;
+            for (bindingIndex = 0; bindingIndex < bindings.length; bindingIndex++) {
+                list.appendChild(buildEditorBindingRow(widgetIndex, bindingIndex));
+            }
+            card.appendChild(list);
+            var addDeviceButton = document.createElement("button");
+            addDeviceButton.type = "button";
+            addDeviceButton.className = "btn btn-secondary btn-inline";
+            addDeviceButton.textContent = "Add device";
+            addDeviceButton.onclick = (function (storedIndex) {
+                return function () {
+                    openConsoleDeviceDialog(storedIndex, -1);
+                };
+            })(widgetIndex);
+            card.appendChild(addDeviceButton);
+            return card;
+        }
+
+        function buildEditorBindingRow(widgetIndex, bindingIndex) {
+            var binding = consoleEditorDraft.widgets[widgetIndex].devices[bindingIndex];
+            var row = document.createElement("div");
+            row.className = "console-device-row is-edit";
+            row.draggable = true;
+            row.setAttribute("data-widget-index", String(widgetIndex));
+            row.setAttribute("data-binding-index", String(bindingIndex));
+            row.ondragstart = function (event) {
+                consoleDragBindingWidgetIndex = widgetIndex;
+                consoleDragBindingIndex = bindingIndex;
+                event.dataTransfer.effectAllowed = "move";
+            };
+            row.ondragover = function (event) {
+                event.preventDefault();
+                row.classList.add("is-drag-over");
+            };
+            row.ondragleave = function () {
+                row.classList.remove("is-drag-over");
+            };
+            row.ondrop = function (event) {
+                event.preventDefault();
+                row.classList.remove("is-drag-over");
+                if (consoleDragBindingWidgetIndex !== widgetIndex
+                    || consoleDragBindingIndex === null
+                    || consoleDragBindingIndex === bindingIndex) {
+                    return;
+                }
+                readConsoleEditorFields();
+                var deviceList = consoleEditorDraft.widgets[widgetIndex].devices;
+                var moved = deviceList.splice(consoleDragBindingIndex, 1)[0];
+                deviceList.splice(bindingIndex, 0, moved);
+                consoleDragBindingIndex = null;
+                renderConsoleEditor();
+            };
+            row.onclick = (function (wIndex, bIndex) {
+                return function (event) {
+                    if (event.target.closest && event.target.closest(".console-device-row-drag")) {
+                        return;
+                    }
+                    openConsoleDeviceDialog(wIndex, bIndex);
+                };
+            })(widgetIndex, bindingIndex);
+            var dragHandle = document.createElement("span");
+            dragHandle.className = "console-device-row-drag";
+            dragHandle.textContent = "⋮";
+            var title = document.createElement("span");
+            title.className = "console-device-row-title";
+            title.textContent = binding.title || binding.ieee || "Device";
+            row.appendChild(dragHandle);
+            row.appendChild(title);
+            return row;
+        }
+
+        function syncConsoleEditorDraftFromDom() {
+            if (!consoleEditorDraft) {
+                return;
+            }
+            consoleEditorDraft.name = document.getElementById("consoleEditName").value;
+            consoleEditorDraft.active = document.getElementById("consoleEditActive").checked;
+            var titleInputs = document.querySelectorAll(".console-widget-title-input");
+            var titleIndex;
+            for (titleIndex = 0; titleIndex < titleInputs.length; titleIndex++) {
+                var widgetIndex = parseInt(titleInputs[titleIndex].getAttribute("data-widget-index"), 10);
+                if (consoleEditorDraft.widgets[widgetIndex]) {
+                    consoleEditorDraft.widgets[widgetIndex].title = titleInputs[titleIndex].value;
+                }
+            }
+            var groupChecks = document.querySelectorAll(".console-widget-group-cb");
+            var groupIndex;
+            for (groupIndex = 0; groupIndex < groupChecks.length; groupIndex++) {
+                var groupWidgetIndex = parseInt(groupChecks[groupIndex].getAttribute("data-widget-index"), 10);
+                if (consoleEditorDraft.widgets[groupWidgetIndex]) {
+                    consoleEditorDraft.widgets[groupWidgetIndex].showGroupOnOff = groupChecks[groupIndex].checked;
+                }
+            }
+        }
+
+        function readConsoleEditorFields() {
+            syncConsoleEditorDraftFromDom();
+        }
+
+        function saveConsoleEditDialog() {
+            var errorLine = document.getElementById("consoleEditError");
+            errorLine.hidden = true;
+            readConsoleEditorFields();
+            consoleEditorDraft.columns = consoleEditorColumnCount();
+            trimTrailingConsoleSpacers(consoleEditorDraft.widgets || []);
+            fetch("/api/consoles/update", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(consoleEditorDraft)
+            }).then(function (response) {
+                return response.text().then(function (text) {
+                    if (!response.ok) {
+                        throw new Error(text || ("HTTP " + response.status));
+                    }
+                });
+            }).then(function () {
+                consoleEditorBaseline = JSON.stringify(consoleEditorDraft);
+                loadConsoles();
+                closeConsoleEditDialog();
+            }).catch(function (error) {
+                errorLine.hidden = false;
+                errorLine.textContent = error && error.message ? error.message : "Save failed";
+            });
+        }
+
+        function exportConsoleJson() {
+            readConsoleEditorFields();
+            var blob = new Blob([JSON.stringify(consoleEditorDraft, null, 2)], { type: "application/json" });
+            var link = document.createElement("a");
+            var fileName = (consoleEditorDraft.name || "console").replace(/[^\w.-]+/g, "_") + ".json";
+            link.href = URL.createObjectURL(blob);
+            link.download = fileName;
+            link.click();
+            URL.revokeObjectURL(link.href);
+        }
+
+        function chooseConsoleImportFile() {
+            document.getElementById("consoleImportFile").click();
+        }
+
+        function onConsoleImportFileSelected(event) {
+            var fileInput = event.target;
+            var file = fileInput.files && fileInput.files[0];
+            fileInput.value = "";
+            if (!file || consoleDraftWidgetCount(consoleEditorDraft) > 0) {
+                return;
+            }
+            var reader = new FileReader();
+            reader.onload = function () {
+                try {
+                    var imported = JSON.parse(String(reader.result || ""));
+                    if (!imported || !imported.widgets) {
+                        throw new Error("Invalid console JSON");
+                    }
+                    readConsoleEditorFields();
+                    consoleEditorDraft.widgets = imported.widgets;
+                    if (imported.name && !consoleEditorDraft.name) {
+                        consoleEditorDraft.name = imported.name;
+                    }
+                    if (imported.active !== undefined) {
+                        consoleEditorDraft.active = !!imported.active;
+                    }
+                    renderConsoleEditor();
+                } catch (importError) {
+                    var errorLine = document.getElementById("consoleEditError");
+                    errorLine.hidden = false;
+                    errorLine.textContent = importError && importError.message ? importError.message : "Import failed";
+                }
+            };
+            reader.readAsText(file);
+        }
+
+        function openConsoleDeleteConfirm() {
+            document.getElementById("consoleDeleteConfirmDialog").hidden = false;
+        }
+
+        function closeConsoleDeleteConfirm() {
+            document.getElementById("consoleDeleteConfirmDialog").hidden = true;
+        }
+
+        function confirmDeleteConsole() {
+            closeConsoleDeleteConfirm();
+            if (!consoleEditorDraft || !consoleEditorDraft.id) {
+                return;
+            }
+            fetch("/api/consoles", {
+                method: "DELETE",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ id: consoleEditorDraft.id })
+            }).then(function (response) {
+                return response.text().then(function (text) {
+                    if (!response.ok) {
+                        throw new Error(text || ("HTTP " + response.status));
+                    }
+                });
+            }).then(function () {
+                closeConsoleEditDialog();
+                loadConsoles();
+            }).catch(function (error) {
+                var errorLine = document.getElementById("consoleEditError");
+                errorLine.hidden = false;
+                errorLine.textContent = error && error.message ? error.message : "Delete failed";
+            });
+        }
+
+        function measurementUnitOptions(typeId) {
+            if (typeId == "temperatureMeasurement") {
+                return [{ id: "C", label: "°C" }, { id: "F", label: "°F" }, { id: "K", label: "K" }];
+            }
+            if (typeId == "relativeHumidity") {
+                return [{ id: "%", label: "%" }];
+            }
+            if (typeId == "pressureMeasurement") {
+                return [
+                    { id: "Pa", label: "Pa" },
+                    { id: "hPa", label: "hPa" },
+                    { id: "kPa", label: "kPa" },
+                    { id: "bar", label: "bar" },
+                    { id: "psi", label: "psi" }
+                ];
+            }
+            if (typeId == "illuminanceMeasurement" || typeId == "illuminanceLevelSensing") {
+                return [{ id: "lx", label: "lx" }];
+            }
+            if (typeId == "flowMeasurement") {
+                return [{ id: "m3/h", label: "m³/h" }, { id: "l/min", label: "L/min" }];
+            }
+            return [{ id: "", label: "—" }];
+        }
+
+        function deviceChannelCount(device) {
+            var channels = device && device.channels;
+            if (channels === undefined || channels === null || channels === "") {
+                return 1;
+            }
+            if (channels == 0) {
+                return 0;
+            }
+            return parseInt(channels, 10) || 1;
+        }
+
+        function openConsoleDeviceDialog(widgetIndex, bindingIndex) {
+            readConsoleEditorFields();
+            consoleDeviceDialogWidgetIndex = widgetIndex;
+            consoleDeviceDialogBindingIndex = bindingIndex;
+            var binding = bindingIndex >= 0
+                ? consoleEditorDraft.widgets[widgetIndex].devices[bindingIndex]
+                : { ieee: "", channel: 1, title: "", unit: "" };
+            document.getElementById("consoleDeviceDialogError").hidden = true;
+            fetch("/api/devices", { cache: "no-store" }).then(function (response) {
+                return response.json();
+            }).then(function (rows) {
+                var select = document.getElementById("consoleDeviceSelect");
+                select.innerHTML = "";
+                var list = Array.isArray(rows) ? rows : [];
+                var index;
+                for (index = 0; index < list.length; index++) {
+                    var option = document.createElement("option");
+                    option.value = list[index].ieee || "";
+                    option.textContent = (list[index].name || list[index].friendlyName || list[index].ieee || "Device")
+                        + " (" + zigbeeDeviceTypeLabel(list[index].type) + ")";
+                    option.setAttribute("data-type", list[index].type || "");
+                    option.setAttribute("data-channels", String(deviceChannelCount(list[index])));
+                    if (binding.ieee && binding.ieee === list[index].ieee) {
+                        option.selected = true;
+                    }
+                    select.appendChild(option);
+                }
+                document.getElementById("consoleDeviceTitle").value = binding.title || "";
+                updateConsoleDeviceChannelField();
+                var channelSelect = document.getElementById("consoleDeviceChannel");
+                if (binding.channel) {
+                    channelSelect.value = String(binding.channel);
+                }
+                updateConsoleDeviceUnitField();
+                var unitSelect = document.getElementById("consoleDeviceUnit");
+                if (binding.unit) {
+                    unitSelect.value = binding.unit;
+                }
+                document.getElementById("consoleDeviceDialog").hidden = false;
+                consoleDeviceDialogBaseline = JSON.stringify(readConsoleDeviceDialogBody());
+            }).catch(function () {
+                document.getElementById("consoleDeviceDialogError").hidden = false;
+                document.getElementById("consoleDeviceDialogError").textContent = "Could not load devices";
+            });
+        }
+
+        function updateConsoleDeviceChannelField() {
+            var select = document.getElementById("consoleDeviceSelect");
+            var channelField = document.getElementById("consoleDeviceChannelField");
+            var channelSelect = document.getElementById("consoleDeviceChannel");
+            if (!select || !select.options.length) {
+                channelField.hidden = true;
+                return;
+            }
+            var option = select.options[select.selectedIndex];
+            var channelCount = parseInt(option.getAttribute("data-channels"), 10);
+            channelSelect.innerHTML = "";
+            if (!(channelCount > 1)) {
+                channelField.hidden = true;
+                var single = document.createElement("option");
+                single.value = "1";
+                single.textContent = "1";
+                channelSelect.appendChild(single);
+                return;
+            }
+            channelField.hidden = false;
+            var channel;
+            for (channel = 1; channel <= channelCount; channel++) {
+                var channelOption = document.createElement("option");
+                channelOption.value = String(channel);
+                channelOption.textContent = String(channel);
+                channelSelect.appendChild(channelOption);
+            }
+        }
+
+        function updateConsoleDeviceUnitField() {
+            var select = document.getElementById("consoleDeviceSelect");
+            var unitField = document.getElementById("consoleDeviceUnitField");
+            var unitSelect = document.getElementById("consoleDeviceUnit");
+            if (!select || !select.options.length) {
+                unitField.hidden = true;
+                return;
+            }
+            var typeId = select.options[select.selectedIndex].getAttribute("data-type") || "";
+            if (!isMeasurementDeviceType(typeId)) {
+                unitField.hidden = true;
+                return;
+            }
+            unitField.hidden = false;
+            var options = measurementUnitOptions(typeId);
+            unitSelect.innerHTML = "";
+            var index;
+            for (index = 0; index < options.length; index++) {
+                var unitOption = document.createElement("option");
+                unitOption.value = options[index].id;
+                unitOption.textContent = options[index].label;
+                unitSelect.appendChild(unitOption);
+            }
+        }
+
+        function readConsoleDeviceDialogBody() {
+            var deviceSelect = document.getElementById("consoleDeviceSelect");
+            var channelSelect = document.getElementById("consoleDeviceChannel");
+            var unitSelect = document.getElementById("consoleDeviceUnit");
+            return {
+                ieee: deviceSelect ? deviceSelect.value : "",
+                channel: channelSelect ? parseInt(channelSelect.value, 10) || 1 : 1,
+                title: document.getElementById("consoleDeviceTitle").value,
+                unit: unitSelect && !document.getElementById("consoleDeviceUnitField").hidden ? unitSelect.value : ""
+            };
+        }
+
+        function consoleDeviceDialogHasUnsavedChanges() {
+            if (consoleDeviceDialogBaseline == null) {
+                return false;
+            }
+            return consoleDeviceDialogBaseline !== JSON.stringify(readConsoleDeviceDialogBody());
+        }
+
+        function closeConsoleDeviceDialog() {
+            consoleDeviceDialogBaseline = null;
+            consoleDeviceDialogWidgetIndex = -1;
+            consoleDeviceDialogBindingIndex = -1;
+            document.getElementById("consoleDeviceDialog").hidden = true;
+        }
+
+        function requestCloseConsoleDeviceDialog() {
+            if (consoleDeviceDialogHasUnsavedChanges()) {
+                openUnsavedChangesDialog(closeConsoleDeviceDialog);
+                return;
+            }
+            closeConsoleDeviceDialog();
+        }
+
+        function saveConsoleDeviceDialog() {
+            var errorLine = document.getElementById("consoleDeviceDialogError");
+            errorLine.hidden = true;
+            var body = readConsoleDeviceDialogBody();
+            if (!body.ieee) {
+                errorLine.hidden = false;
+                errorLine.textContent = "Choose a device";
+                return;
+            }
+            if (!body.title) {
+                body.title = body.ieee;
+            }
+            var widgetIndex = consoleDeviceDialogWidgetIndex;
+            if (!consoleEditorDraft.widgets[widgetIndex].devices) {
+                consoleEditorDraft.widgets[widgetIndex].devices = [];
+            }
+            if (consoleDeviceDialogBindingIndex >= 0) {
+                consoleEditorDraft.widgets[widgetIndex].devices[consoleDeviceDialogBindingIndex] = body;
+            } else {
+                consoleEditorDraft.widgets[widgetIndex].devices.push(body);
+            }
+            closeConsoleDeviceDialog();
+            renderConsoleEditor();
+        }
+
+        function removeConsoleDeviceBinding() {
+            if (consoleDeviceDialogBindingIndex < 0) {
+                closeConsoleDeviceDialog();
+                return;
+            }
+            consoleEditorDraft.widgets[consoleDeviceDialogWidgetIndex].devices.splice(consoleDeviceDialogBindingIndex, 1);
+            closeConsoleDeviceDialog();
+            renderConsoleEditor();
+        }
+
         function dismissFrontOverlayDialog() {
             var overlays = document.querySelectorAll(".dialog-overlay");
             var frontOverlay = null;
@@ -3342,6 +4503,18 @@
             }
             if (dialogId === "userDialog") {
                 requestCloseUserDialog();
+                return true;
+            }
+            if (dialogId === "consoleDeviceDialog") {
+                requestCloseConsoleDeviceDialog();
+                return true;
+            }
+            if (dialogId === "consoleEditDialog") {
+                requestCloseConsoleEditDialog();
+                return true;
+            }
+            if (dialogId === "consoleDeleteConfirmDialog") {
+                closeConsoleDeleteConfirm();
                 return true;
             }
             if (dialogId === "restoreSkippedDialog") {
@@ -3453,6 +4626,7 @@
         <button type="button" class="sidebar-btn" data-section="devices" onclick="showMainSection('devices')">Devices</button>
         <button type="button" class="sidebar-btn" data-section="appearance" onclick="showMainSection('appearance')">Appearance</button>
         <button type="button" class="sidebar-btn" data-section="security" onclick="showMainSection('security')">Security</button>
+        <button type="button" class="sidebar-btn" data-section="consoles" onclick="showMainSection('consoles')">Consoles</button>
         <button type="button" class="sidebar-btn" data-section="system" onclick="showMainSection('system')">System</button>
         <button type="button" class="sidebar-btn sidebar-signout" onclick="openSignOutConfirm()">Sign out</button>
     </nav>
@@ -4012,6 +5186,26 @@
                 <button type="button" class="btn btn-primary" onclick="openUserDialog(null)">Add user</button>
             </div>
         </section>
+
+        <section id="section-consoles" class="section-panel" aria-label="Consoles">
+            <h2 class="section-title">Consoles</h2>
+            <p id="consolesSaveError" class="save-error" hidden></p>
+            <div class="settings-scroll">
+                <table class="data-table selectable">
+                    <thead>
+                        <tr>
+                            <th>Console name</th>
+                            <th>Active</th>
+                            <th>Users</th>
+                        </tr>
+                    </thead>
+                    <tbody id="consoleTableBody"></tbody>
+                </table>
+            </div>
+            <div class="dialog-actions">
+                <button type="button" class="btn btn-primary" onclick="createConsoleAndEdit()">Add console</button>
+            </div>
+        </section>
     </div>
 </div>
 <div id="userDialog" class="dialog-overlay" hidden>
@@ -4027,30 +5221,36 @@
             <input id="userPassword" type="password" autocomplete="new-password">
             <p class="field-hint">Leave empty when editing to keep the current password. The stored hash is never shown.</p>
         </div>
-        <label class="field-check">
-            <input id="userIsAdmin" type="checkbox">
-            Admin
-        </label>
-        <label class="field-check">
-            <input id="userEditDevices" type="checkbox">
-            Edit devices
-        </label>
-        <label class="field-check">
-            <input id="userAddDevices" type="checkbox">
-            Add devices
-        </label>
-        <label class="field-check">
-            <input id="userRemoveDevices" type="checkbox">
-            Delete devices
-        </label>
-        <label class="field-check">
-            <input id="userEditUsers" type="checkbox">
-            Edit users
-        </label>
-        <label class="field-check">
-            <input id="userIsBlocked" type="checkbox">
-            Blocked
-        </label>
+        <div class="user-dialog-roles">
+            <label class="field-check">
+                <input id="userIsAdmin" type="checkbox" onchange="updateUserAssignedConsolesVisibility()">
+                Admin
+            </label>
+            <label class="field-check">
+                <input id="userEditDevices" type="checkbox" onchange="updateUserAssignedConsolesVisibility()">
+                Edit devices
+            </label>
+            <label class="field-check">
+                <input id="userAddDevices" type="checkbox" onchange="updateUserAssignedConsolesVisibility()">
+                Add devices
+            </label>
+            <label class="field-check">
+                <input id="userRemoveDevices" type="checkbox" onchange="updateUserAssignedConsolesVisibility()">
+                Delete devices
+            </label>
+            <label class="field-check">
+                <input id="userEditUsers" type="checkbox" onchange="updateUserAssignedConsolesVisibility()">
+                Edit users
+            </label>
+            <label class="field-check">
+                <input id="userEditConsoles" type="checkbox" onchange="updateUserAssignedConsolesVisibility()">
+                Console editor
+            </label>
+        </div>
+        <div id="userAssignedConsolesField" class="field">
+            <label>Assigned consoles</label>
+            <div id="userConsolesCheckboxes" class="user-consoles-checkboxes"></div>
+        </div>
         <div class="field">
             <label for="userTheme">Theme</label>
             <select id="userTheme">
@@ -4058,6 +5258,10 @@
                 <option value="light">Light</option>
             </select>
         </div>
+        <label class="field-check">
+            <input id="userIsBlocked" type="checkbox">
+            Blocked
+        </label>
         <div class="dialog-actions">
             <button type="button" id="userSaveBtn" class="btn btn-primary" onclick="saveUserDialog()">Save</button>
             <button type="button" id="userDeleteBtn" class="btn btn-secondary" hidden onclick="openUserDeleteConfirm()">Delete</button>
@@ -4082,6 +5286,69 @@
         <div class="dialog-actions">
             <button type="button" class="btn btn-primary" onclick="signOut()">Sign out</button>
             <button type="button" class="btn btn-secondary" onclick="closeSignOutConfirm()">Cancel</button>
+        </div>
+    </div>
+</div>
+<div id="consoleEditDialog" class="dialog-overlay console-edit-overlay" hidden>
+    <div class="dialog-panel console-edit-panel" role="dialog" aria-label="Edit console">
+        <h3 class="upload-title">Edit console</h3>
+        <p id="consoleEditError" class="save-error" hidden></p>
+        <div class="field">
+            <label for="consoleEditName">Name</label>
+            <input id="consoleEditName" type="text" autocomplete="off">
+        </div>
+        <label class="field-check">
+            <input id="consoleEditActive" type="checkbox">
+            Active
+        </label>
+        <div class="console-edit-grid-wrap">
+            <div id="consoleEditGrid" class="console-grid"></div>
+        </div>
+        <div id="consoleEditAddRow" class="console-widget-add-row"></div>
+        <input id="consoleImportFile" type="file" accept="application/json,.json" hidden onchange="onConsoleImportFileSelected(event)">
+        <div class="dialog-actions">
+            <button type="button" class="btn btn-secondary btn-inline" onclick="exportConsoleJson()">Export JSON</button>
+            <button type="button" id="consoleImportBtn" class="btn btn-secondary btn-inline" onclick="chooseConsoleImportFile()">Import JSON</button>
+            <button type="button" class="btn btn-primary" onclick="saveConsoleEditDialog()">Save</button>
+            <button type="button" class="btn btn-secondary" onclick="openConsoleDeleteConfirm()">Delete</button>
+            <button type="button" class="btn btn-secondary" onclick="requestCloseConsoleEditDialog()">Cancel</button>
+        </div>
+    </div>
+</div>
+<div id="consoleDeleteConfirmDialog" class="dialog-overlay dialog-overlay-front" hidden>
+    <div class="dialog-panel" role="dialog" aria-label="Delete console">
+        <h3 class="upload-title">Delete console</h3>
+        <p class="field-hint">Delete this console permanently?</p>
+        <div class="dialog-actions">
+            <button type="button" class="btn btn-primary" onclick="confirmDeleteConsole()">Delete</button>
+            <button type="button" class="btn btn-secondary" onclick="closeConsoleDeleteConfirm()">Cancel</button>
+        </div>
+    </div>
+</div>
+<div id="consoleDeviceDialog" class="dialog-overlay dialog-overlay-front" hidden>
+    <div class="dialog-panel" role="dialog" aria-label="Console device">
+        <h3 class="upload-title">Device binding</h3>
+        <p id="consoleDeviceDialogError" class="save-error" hidden></p>
+        <div class="field">
+            <label for="consoleDeviceSelect">Device</label>
+            <select id="consoleDeviceSelect" onchange="updateConsoleDeviceChannelField(); updateConsoleDeviceUnitField();"></select>
+        </div>
+        <div id="consoleDeviceChannelField" class="field" hidden>
+            <label for="consoleDeviceChannel">Channel</label>
+            <select id="consoleDeviceChannel"></select>
+        </div>
+        <div class="field">
+            <label for="consoleDeviceTitle">Title</label>
+            <input id="consoleDeviceTitle" type="text" autocomplete="off">
+        </div>
+        <div id="consoleDeviceUnitField" class="field" hidden>
+            <label for="consoleDeviceUnit">Unit</label>
+            <select id="consoleDeviceUnit"></select>
+        </div>
+        <div class="dialog-actions">
+            <button type="button" class="btn btn-primary" onclick="saveConsoleDeviceDialog()">Save</button>
+            <button type="button" class="btn btn-secondary" onclick="removeConsoleDeviceBinding()">Remove</button>
+            <button type="button" class="btn btn-secondary" onclick="requestCloseConsoleDeviceDialog()">Cancel</button>
         </div>
     </div>
 </div>

@@ -11,37 +11,195 @@
 #include <stdlib.h>
 #include <string.h>
 
-DeviceTopicMap::DeviceTopicMap(DeviceTopicEntry *deviceSlots) : slots(deviceSlots) {}
+static size_t jsonEscapeCap(const char *value) {
+    if (value == nullptr) {
+        return 0;
+    }
+    return strlen(value) + 1;
+}
+
+DeviceTopicMap::DeviceTopicMap() : head(nullptr) {}
+
+DeviceTopicMap::~DeviceTopicMap() {
+    clearAll();
+}
+
+DeviceTopicEntry *DeviceTopicMap::first() {
+    return head;
+}
+
+const DeviceTopicEntry *DeviceTopicMap::first() const {
+    return head;
+}
+
+DeviceTopicEntry *DeviceTopicMap::nextEntry(const DeviceTopicEntry *entry) {
+    return entry != nullptr ? entry->next : nullptr;
+}
+
+char *DeviceTopicMap::duplicateBoundedString(const char *source, size_t maxLen) {
+    if (maxLen == 0) {
+        return nullptr;
+    }
+    if (source == nullptr) {
+        source = "";
+    }
+    size_t copyLen = strlen(source);
+    if (copyLen >= maxLen) {
+        copyLen = maxLen - 1;
+    }
+    char *copy = (char *)malloc(copyLen + 1);
+    if (copy == nullptr) {
+        return nullptr;
+    }
+    memcpy(copy, source, copyLen);
+    copy[copyLen] = '\0';
+    return copy;
+}
+
+void DeviceTopicMap::clearEntryStrings(DeviceTopicEntry *entry) {
+    if (entry == nullptr) {
+        return;
+    }
+    free(entry->friendlyName);
+    free(entry->stateTopic);
+    free(entry->commandTopic);
+    free(entry->availabilityTopic);
+    entry->friendlyName = nullptr;
+    entry->stateTopic = nullptr;
+    entry->commandTopic = nullptr;
+    entry->availabilityTopic = nullptr;
+}
+
+void DeviceTopicMap::freeEntry(DeviceTopicEntry *entry) {
+    if (entry == nullptr) {
+        return;
+    }
+    clearEntryStrings(entry);
+    free(entry);
+}
+
+bool DeviceTopicMap::cloneEntry(DeviceTopicEntry *destination, const DeviceTopicEntry *source) {
+    if (destination == nullptr || source == nullptr) {
+        return false;
+    }
+    clearEntryStrings(destination);
+    memcpy(destination->ieee, source->ieee, 8);
+    destination->friendlyName =
+        duplicateBoundedString(source->friendlyName, SPI_DEVICE_SYNC_NAME_LEN);
+    destination->stateTopic =
+        duplicateBoundedString(source->stateTopic, SPI_DEVICE_SYNC_TOPIC_LEN);
+    destination->commandTopic =
+        duplicateBoundedString(source->commandTopic, SPI_DEVICE_SYNC_TOPIC_LEN);
+    destination->availabilityTopic =
+        duplicateBoundedString(source->availabilityTopic, SPI_DEVICE_SYNC_TOPIC_LEN);
+    if ((source->friendlyName != nullptr && source->friendlyName[0] != '\0' && destination->friendlyName == nullptr)
+        || (source->stateTopic != nullptr && source->stateTopic[0] != '\0' && destination->stateTopic == nullptr)
+        || (source->commandTopic != nullptr && source->commandTopic[0] != '\0' && destination->commandTopic == nullptr)
+        || (source->availabilityTopic != nullptr
+            && source->availabilityTopic[0] != '\0'
+            && destination->availabilityTopic == nullptr)) {
+        clearEntryStrings(destination);
+        return false;
+    }
+    destination->channelCount = source->channelCount;
+    destination->fullControl = source->fullControl;
+    destination->zigbeeType = source->zigbeeType;
+    destination->transport = source->transport;
+    destination->used = source->used;
+    destination->next = nullptr;
+    return true;
+}
+
+void DeviceTopicMap::assignEntryStrings(
+    DeviceTopicEntry *entry,
+    const char *friendlyName,
+    const char *stateTopic,
+    const char *commandTopic,
+    const char *availabilityTopic
+) {
+    if (entry == nullptr) {
+        return;
+    }
+    free(entry->friendlyName);
+    free(entry->stateTopic);
+    free(entry->commandTopic);
+    free(entry->availabilityTopic);
+    entry->friendlyName = duplicateBoundedString(friendlyName, SPI_DEVICE_SYNC_NAME_LEN);
+    entry->stateTopic = duplicateBoundedString(stateTopic, SPI_DEVICE_SYNC_TOPIC_LEN);
+    entry->commandTopic = duplicateBoundedString(commandTopic, SPI_DEVICE_SYNC_TOPIC_LEN);
+    entry->availabilityTopic = duplicateBoundedString(availabilityTopic, SPI_DEVICE_SYNC_TOPIC_LEN);
+}
+
+DeviceTopicEntry *DeviceTopicMap::allocateEntry() {
+    if (usedCount() >= DEVICE_MAP_SLOTS) {
+        return nullptr;
+    }
+    DeviceTopicEntry *entry = (DeviceTopicEntry *)calloc(1, sizeof(DeviceTopicEntry));
+    if (entry == nullptr) {
+        return nullptr;
+    }
+    entry->next = head;
+    head = entry;
+    return entry;
+}
+
+void DeviceTopicMap::unlinkEntry(DeviceTopicEntry *entry) {
+    if (entry == nullptr || head == nullptr) {
+        return;
+    }
+    if (head == entry) {
+        head = entry->next;
+        entry->next = nullptr;
+        return;
+    }
+    DeviceTopicEntry *previous = head;
+    while (previous->next != nullptr && previous->next != entry) {
+        previous = previous->next;
+    }
+    if (previous->next == entry) {
+        previous->next = entry->next;
+        entry->next = nullptr;
+    }
+}
 
 bool DeviceTopicMap::ieeeEqual(const uint8_t left[8], const uint8_t right[8]) {
     return memcmp(left, right, 8) == 0;
 }
 
 DeviceTopicEntry *DeviceTopicMap::slotAt(int index) {
-    if (slots == nullptr || index < 0 || index >= DEVICE_MAP_SLOTS) {
+    if (index < 0) {
         return nullptr;
     }
-    return &slots[index];
+    int ordinal = 0;
+    for (DeviceTopicEntry *entry = head; entry != nullptr; entry = entry->next) {
+        if (!entry->used) {
+            continue;
+        }
+        if (ordinal == index) {
+            return entry;
+        }
+        ordinal++;
+    }
+    return nullptr;
 }
 
 int DeviceTopicMap::slotIndex(const DeviceTopicEntry *entry) const {
-    if (slots == nullptr || entry == nullptr) {
+    if (entry == nullptr) {
         return -1;
     }
-    const ptrdiff_t offset = entry - slots;
-    if (offset < 0 || offset >= DEVICE_MAP_SLOTS) {
-        return -1;
+    int index = 0;
+    for (const DeviceTopicEntry *cursor = head; cursor != nullptr; cursor = cursor->next, index++) {
+        if (cursor == entry) {
+            return index;
+        }
     }
-    return (int)offset;
+    return -1;
 }
 
 int DeviceTopicMap::usedCount() const {
     int count = 0;
-    if (slots == nullptr) {
-        return 0;
-    }
-    for (int i = 0; i < DEVICE_MAP_SLOTS; i++) {
-        if (slots[i].used) {
+    for (const DeviceTopicEntry *entry = head; entry != nullptr; entry = entry->next) {
+        if (entry->used) {
             count++;
         }
     }
@@ -51,20 +209,14 @@ int DeviceTopicMap::usedCount() const {
 int DeviceTopicMap::uniqueMqttTopicCount() const {
     const char *uniqueTopics[DEVICE_MAP_SLOTS * 2];
     int uniqueCount = 0;
-    if (slots == nullptr) {
-        return 0;
-    }
-    for (int slotIndex = 0; slotIndex < DEVICE_MAP_SLOTS; slotIndex++) {
-        if (!slots[slotIndex].used) {
+    for (const DeviceTopicEntry *entry = head; entry != nullptr; entry = entry->next) {
+        if (!entry->used) {
             continue;
         }
-        const char *candidateTopics[2] = {
-            slots[slotIndex].stateTopic,
-            slots[slotIndex].commandTopic
-        };
+        const char *candidateTopics[2] = {entry->stateTopic, entry->commandTopic};
         for (int topicIndex = 0; topicIndex < 2; topicIndex++) {
             const char *topic = candidateTopics[topicIndex];
-            if (topic == nullptr || topic[0] == '\0') {
+            if (deviceTopicEmpty(topic)) {
                 continue;
             }
             bool alreadySeen = false;
@@ -90,11 +242,7 @@ DeviceTopicEntry *DeviceTopicMap::findByIeee(const uint8_t ieee[8]) {
 }
 
 const DeviceTopicEntry *DeviceTopicMap::findByIeee(const uint8_t ieee[8]) const {
-    if (slots == nullptr) {
-        return nullptr;
-    }
-    for (int i = 0; i < DEVICE_MAP_SLOTS; i++) {
-        const DeviceTopicEntry *entry = &slots[i];
+    for (const DeviceTopicEntry *entry = head; entry != nullptr; entry = entry->next) {
         if (entry->used && ieeeEqual(entry->ieee, ieee)) {
             return entry;
         }
@@ -125,7 +273,7 @@ bool DeviceTopicMap::isUsableEndpoint(uint8_t endpoint) {
 }
 
 String DeviceTopicMap::statePublishTopic(const DeviceTopicEntry *entry, uint8_t endpoint) {
-    if (entry == nullptr || entry->stateTopic[0] == '\0') {
+    if (entry == nullptr || deviceTopicEmpty(entry->stateTopic)) {
         return "";
     }
     if (usesTopicSuffix(entry->channelCount) && isUsableEndpoint(endpoint)) {
@@ -135,7 +283,7 @@ String DeviceTopicMap::statePublishTopic(const DeviceTopicEntry *entry, uint8_t 
 }
 
 String DeviceTopicMap::commandPublishTopic(const DeviceTopicEntry *entry, uint8_t endpoint) {
-    if (entry == nullptr || entry->commandTopic[0] == '\0') {
+    if (entry == nullptr || deviceTopicEmpty(entry->commandTopic)) {
         return "";
     }
     if (usesTopicSuffix(entry->channelCount) && isUsableEndpoint(endpoint)) {
@@ -421,24 +569,23 @@ static bool mappedTopicEquals(const char *mappedTopic, const char *topic) {
 }
 
 static DeviceTopicEntry *findByMappedTopic(
-    DeviceTopicEntry *slots,
+    DeviceTopicEntry *listHead,
     const char *topic,
     uint8_t *topicEndpoint,
     bool useStateTopic
 ) {
-    if (slots == nullptr || topic == nullptr || topic[0] == '\0') {
+    if (topic == nullptr || topic[0] == '\0') {
         return nullptr;
     }
     if (topicEndpoint != nullptr) {
         *topicEndpoint = 0;
     }
-    for (int i = 0; i < DEVICE_MAP_SLOTS; i++) {
-        DeviceTopicEntry *entry = &slots[i];
+    for (DeviceTopicEntry *entry = listHead; entry != nullptr; entry = entry->next) {
         if (!entry->used) {
             continue;
         }
         const char *mappedTopic = useStateTopic ? entry->stateTopic : entry->commandTopic;
-        if (mappedTopic[0] == '\0') {
+        if (deviceTopicEmpty(mappedTopic)) {
             continue;
         }
         if (mappedTopicEquals(mappedTopic, topic)) {
@@ -468,7 +615,7 @@ DeviceTopicEntry *DeviceTopicMap::findByCommandTopic(const char *topic) {
 }
 
 DeviceTopicEntry *DeviceTopicMap::findByCommandTopic(const char *topic, uint8_t *topicEndpoint) {
-    return findByMappedTopic(slots, topic, topicEndpoint, false);
+    return findByMappedTopic(head, topic, topicEndpoint, false);
 }
 
 DeviceTopicEntry *DeviceTopicMap::findByStateTopic(const char *topic) {
@@ -476,16 +623,15 @@ DeviceTopicEntry *DeviceTopicMap::findByStateTopic(const char *topic) {
 }
 
 DeviceTopicEntry *DeviceTopicMap::findByStateTopic(const char *topic, uint8_t *topicEndpoint) {
-    return findByMappedTopic(slots, topic, topicEndpoint, true);
+    return findByMappedTopic(head, topic, topicEndpoint, true);
 }
 
 DeviceTopicEntry *DeviceTopicMap::findByAvailabilityTopic(const char *topic) {
-    if (slots == nullptr || topic == nullptr || topic[0] == '\0') {
+    if (topic == nullptr || topic[0] == '\0') {
         return nullptr;
     }
-    for (int i = 0; i < DEVICE_MAP_SLOTS; i++) {
-        DeviceTopicEntry *entry = &slots[i];
-        if (!entry->used || entry->availabilityTopic[0] == '\0') {
+    for (DeviceTopicEntry *entry = head; entry != nullptr; entry = entry->next) {
+        if (!entry->used || deviceTopicEmpty(entry->availabilityTopic)) {
             continue;
         }
         if (mappedTopicEquals(entry->availabilityTopic, topic)) {
@@ -503,9 +649,6 @@ DeviceTopicEntry *DeviceTopicMap::upsert(
     const char *availabilityTopic,
     uint8_t channelCount
 ) {
-    if (slots == nullptr) {
-        return nullptr;
-    }
     DeviceTopicEntry *entry = findByIeee(ieee);
     uint8_t preservedFullControl = 0;
     uint8_t preservedZigbeeType = ZigbeeDeviceTypeUnknown;
@@ -516,32 +659,15 @@ DeviceTopicEntry *DeviceTopicMap::upsert(
         preservedTransport = clampDeviceTransport(entry->transport);
     }
     if (entry == nullptr) {
-        for (int i = 0; i < DEVICE_MAP_SLOTS; i++) {
-            if (!slots[i].used) {
-                entry = &slots[i];
-                break;
-            }
-        }
+        entry = allocateEntry();
     }
     if (entry == nullptr) {
         return nullptr;
     }
 
-    memset(entry, 0, sizeof(DeviceTopicEntry));
     memcpy(entry->ieee, ieee, 8);
     entry->used = 1;
-    if (friendlyName != nullptr) {
-        strncpy(entry->friendlyName, friendlyName, sizeof(entry->friendlyName) - 1);
-    }
-    if (stateTopic != nullptr) {
-        strncpy(entry->stateTopic, stateTopic, sizeof(entry->stateTopic) - 1);
-    }
-    if (commandTopic != nullptr) {
-        strncpy(entry->commandTopic, commandTopic, sizeof(entry->commandTopic) - 1);
-    }
-    if (availabilityTopic != nullptr) {
-        strncpy(entry->availabilityTopic, availabilityTopic, sizeof(entry->availabilityTopic) - 1);
-    }
+    assignEntryStrings(entry, friendlyName, stateTopic, commandTopic, availabilityTopic);
     entry->channelCount = normalizeChannelCount(channelCount);
     entry->fullControl = preservedFullControl;
     entry->zigbeeType = preservedZigbeeType;
@@ -579,34 +705,38 @@ bool DeviceTopicMap::removeByIeee(const uint8_t ieee[8]) {
     if (entry == nullptr) {
         return false;
     }
-    memset(entry, 0, sizeof(DeviceTopicEntry));
+    unlinkEntry(entry);
+    freeEntry(entry);
     return true;
 }
 
 void DeviceTopicMap::clearAll() {
-    if (slots == nullptr) {
-        return;
+    while (head != nullptr) {
+        DeviceTopicEntry *next = head->next;
+        freeEntry(head);
+        head = next;
     }
-    memset(slots, 0, sizeof(DeviceTopicEntry) * DEVICE_MAP_SLOTS);
+    head = nullptr;
 }
 
 void DeviceTopicMap::replaceFrom(const DeviceTopicMap *source) {
-    if (slots == nullptr) {
+    clearAll();
+    if (source == nullptr) {
         return;
     }
-    if (source == nullptr || source->slots == nullptr) {
-        clearAll();
-        return;
+    for (const DeviceTopicEntry *sourceEntry = source->head; sourceEntry != nullptr; sourceEntry = sourceEntry->next) {
+        if (!sourceEntry->used) {
+            continue;
+        }
+        upsertFromEntry(sourceEntry, false);
     }
-    memcpy(slots, source->slots, sizeof(DeviceTopicEntry) * DEVICE_MAP_SLOTS);
 }
 
 void DeviceTopicMap::copyFullControlFrom(const DeviceTopicMap *source) {
-    if (slots == nullptr || source == nullptr) {
+    if (source == nullptr) {
         return;
     }
-    for (int i = 0; i < DEVICE_MAP_SLOTS; i++) {
-        DeviceTopicEntry *entry = &slots[i];
+    for (DeviceTopicEntry *entry = head; entry != nullptr; entry = entry->next) {
         if (!entry->used) {
             continue;
         }
@@ -618,11 +748,10 @@ void DeviceTopicMap::copyFullControlFrom(const DeviceTopicMap *source) {
 }
 
 void DeviceTopicMap::copyZigbeeTypeFrom(const DeviceTopicMap *source) {
-    if (slots == nullptr || source == nullptr) {
+    if (source == nullptr) {
         return;
     }
-    for (int i = 0; i < DEVICE_MAP_SLOTS; i++) {
-        DeviceTopicEntry *entry = &slots[i];
+    for (DeviceTopicEntry *entry = head; entry != nullptr; entry = entry->next) {
         if (!entry->used) {
             continue;
         }
@@ -635,12 +764,11 @@ void DeviceTopicMap::copyZigbeeTypeFrom(const DeviceTopicMap *source) {
 }
 
 void DeviceTopicMap::keepTransportEntriesFrom(const DeviceTopicMap *source, uint8_t transport) {
-    if (slots == nullptr || source == nullptr || source->slots == nullptr) {
+    if (source == nullptr) {
         return;
     }
     const uint8_t wantedTransport = clampDeviceTransport(transport);
-    for (int i = 0; i < DEVICE_MAP_SLOTS; i++) {
-        const DeviceTopicEntry *entry = &source->slots[i];
+    for (const DeviceTopicEntry *entry = source->head; entry != nullptr; entry = entry->next) {
         if (!entry->used || clampDeviceTransport(entry->transport) != wantedTransport) {
             continue;
         }
@@ -649,13 +777,18 @@ void DeviceTopicMap::keepTransportEntriesFrom(const DeviceTopicMap *source, uint
 }
 
 int DeviceTopicMap::nextUsedIndex(int startIndex) const {
-    if (slots == nullptr) {
-        return -1;
+    if (startIndex < 0) {
+        startIndex = 0;
     }
-    for (int i = startIndex; i < DEVICE_MAP_SLOTS; i++) {
-        if (slots[i].used) {
-            return i;
+    int ordinal = 0;
+    for (const DeviceTopicEntry *entry = head; entry != nullptr; entry = entry->next) {
+        if (!entry->used) {
+            continue;
         }
+        if (ordinal >= startIndex) {
+            return ordinal;
+        }
+        ordinal++;
     }
     return -1;
 }
@@ -775,10 +908,10 @@ size_t DeviceTopicMap::packSyncPayload(
     out[0] = flags;
     if (hasEntry) {
         memcpy(out + 1, entry->ieee, 8);
-        strncpy((char *)out + 9, entry->friendlyName, SPI_DEVICE_SYNC_NAME_LEN - 1);
-        strncpy((char *)out + 33, entry->stateTopic, SPI_DEVICE_SYNC_TOPIC_LEN - 1);
-        strncpy((char *)out + 97, entry->commandTopic, SPI_DEVICE_SYNC_TOPIC_LEN - 1);
-        strncpy((char *)out + 161, entry->availabilityTopic, SPI_DEVICE_SYNC_TOPIC_LEN - 1);
+        strncpy((char *)out + 9, deviceTopicCStr(entry->friendlyName), SPI_DEVICE_SYNC_NAME_LEN - 1);
+        strncpy((char *)out + 33, deviceTopicCStr(entry->stateTopic), SPI_DEVICE_SYNC_TOPIC_LEN - 1);
+        strncpy((char *)out + 97, deviceTopicCStr(entry->commandTopic), SPI_DEVICE_SYNC_TOPIC_LEN - 1);
+        strncpy((char *)out + 161, deviceTopicCStr(entry->availabilityTopic), SPI_DEVICE_SYNC_TOPIC_LEN - 1);
         out[SPI_DEVICE_SYNC_ENTRY_LEN_NO_CHANNELS] = entry->channelCount;
         out[SPI_DEVICE_SYNC_ENTRY_LEN_WITH_CHANNELS] = entry->fullControl ? 1 : 0;
         out[SPI_DEVICE_SYNC_ENTRY_LEN_WITH_FULL_CONTROL] = entry->zigbeeType;
@@ -797,6 +930,7 @@ bool DeviceTopicMap::unpackSyncPayload(
     }
     *flags = in[0];
     if (entry != nullptr) {
+        // Callers pass a fresh/zeroed entry; do not free() garbage stack pointers.
         memset(entry, 0, sizeof(DeviceTopicEntry));
     }
     if ((*flags & (SPI_DEVICE_SYNC_ENTRY | SPI_DEVICE_SYNC_DELETE)) == 0) {
@@ -806,10 +940,10 @@ bool DeviceTopicMap::unpackSyncPayload(
         return false;
     }
     memcpy(entry->ieee, in + 1, 8);
-    strncpy(entry->friendlyName, (const char *)in + 9, sizeof(entry->friendlyName) - 1);
-    strncpy(entry->stateTopic, (const char *)in + 33, sizeof(entry->stateTopic) - 1);
-    strncpy(entry->commandTopic, (const char *)in + 97, sizeof(entry->commandTopic) - 1);
-    strncpy(entry->availabilityTopic, (const char *)in + 161, sizeof(entry->availabilityTopic) - 1);
+    entry->friendlyName = duplicateBoundedString((const char *)in + 9, SPI_DEVICE_SYNC_NAME_LEN);
+    entry->stateTopic = duplicateBoundedString((const char *)in + 33, SPI_DEVICE_SYNC_TOPIC_LEN);
+    entry->commandTopic = duplicateBoundedString((const char *)in + 97, SPI_DEVICE_SYNC_TOPIC_LEN);
+    entry->availabilityTopic = duplicateBoundedString((const char *)in + 161, SPI_DEVICE_SYNC_TOPIC_LEN);
     if (length >= SPI_DEVICE_SYNC_ENTRY_LEN_WITH_CHANNELS) {
         entry->channelCount = normalizeChannelCount(in[SPI_DEVICE_SYNC_ENTRY_LEN_NO_CHANNELS]);
     } else {
@@ -910,13 +1044,13 @@ static void appendDeviceListEntryJson(
     json += "{\"ieee\":\"";
     json += deviceMap->formatIeee(deviceEntry->ieee);
     json += "\",\"name\":\"";
-    appendJsonEscaped(json, deviceEntry->friendlyName, sizeof(deviceEntry->friendlyName));
+    appendJsonEscaped(json, deviceEntry->friendlyName, jsonEscapeCap(deviceEntry->friendlyName));
     json += "\",\"state\":\"";
-    appendJsonEscaped(json, deviceEntry->stateTopic, sizeof(deviceEntry->stateTopic));
+    appendJsonEscaped(json, deviceEntry->stateTopic, jsonEscapeCap(deviceEntry->stateTopic));
     json += "\",\"command\":\"";
-    appendJsonEscaped(json, deviceEntry->commandTopic, sizeof(deviceEntry->commandTopic));
+    appendJsonEscaped(json, deviceEntry->commandTopic, jsonEscapeCap(deviceEntry->commandTopic));
     json += "\",\"availability\":\"";
-    appendJsonEscaped(json, deviceEntry->availabilityTopic, sizeof(deviceEntry->availabilityTopic));
+    appendJsonEscaped(json, deviceEntry->availabilityTopic, jsonEscapeCap(deviceEntry->availabilityTopic));
     json += "\",\"channels\":";
     json += String(deviceEntry->channelCount);
     json += ",\"fullControl\":";
@@ -954,12 +1088,7 @@ String DeviceTopicMap::listJson(OnlineFn isOnline, LastRssiFn lastRssi) {
 String DeviceTopicMap::listJson(OnlineFn isOnline, LastRssiFn lastRssi, ListTelemetryFn telemetry) {
     String json = "[";
     bool first = true;
-    if (slots == nullptr) {
-        json += "]";
-        return json;
-    }
-    for (int i = 0; i < DEVICE_MAP_SLOTS; i++) {
-        DeviceTopicEntry *deviceEntry = &slots[i];
+    for (DeviceTopicEntry *deviceEntry = head; deviceEntry != nullptr; deviceEntry = deviceEntry->next) {
         if (!deviceEntry->used) {
             continue;
         }

@@ -6,6 +6,11 @@
 #include <stddef.h>
 #include <stdint.h>
 
+struct UserConsoleIdNode {
+    char id[CONSOLE_ID_BUF];
+    UserConsoleIdNode *next;
+};
+
 struct UserRecord {
     char userName[USER_NAME_MAX];
     char passwordSaltHex[USER_PASSWORD_SALT_LEN * 2 + 1];
@@ -16,8 +21,11 @@ struct UserRecord {
     bool addDevices;
     bool removeDevices;
     bool editUsers;
+    bool editConsoles;
     bool isBlocked;
     uint8_t theme;
+    UserConsoleIdNode *consoleIds;
+    UserRecord *next;
 };
 
 enum UserWriteResult {
@@ -28,7 +36,8 @@ enum UserWriteResult {
     UserWriteFull,
     UserWriteBadName,
     UserWriteNeedPassword,
-    UserWriteLastAdmin
+    UserWriteLastAdmin,
+    UserWriteOutOfMemory
 };
 
 enum UserChangeKind {
@@ -41,6 +50,7 @@ public:
     using ChangedFn = void (*)(UserChangeKind kind, const UserRecord *user);
 
     UserStore();
+    ~UserStore();
 
     bool begin(bool persistToLittleFs);
     bool saveToFile() const;
@@ -78,6 +88,13 @@ public:
     static bool nameEquals(const char *left, const char *right);
     static size_t packSyncPayload(uint8_t *out, size_t outMax, uint8_t flags, const UserRecord *user);
     static bool unpackSyncPayload(const uint8_t *in, uint16_t length, uint8_t *flags, UserRecord *user);
+    static void freeConsoleIdList(UserConsoleIdNode *&head);
+    static bool cloneConsoleIdList(UserConsoleIdNode **destination, const UserConsoleIdNode *source);
+    static bool parseConsoleIdListFromObject(const char *objectJson, UserConsoleIdNode **outHead);
+    static bool userHasConsole(const UserRecord *user, const char *consoleId);
+    static int consoleIdCount(const UserRecord *user);
+    static bool heapAllowsAllocation(size_t bytes);
+    static void clearUserRecord(UserRecord *user);
 
     const UserRecord *sessionUser(
         const char *cookieHeader,
@@ -98,7 +115,7 @@ public:
     void touchSession(const char *tokenHex, uint32_t nowMs);
 
 private:
-    UserRecord users[USER_STORE_MAX];
+    UserRecord *usersHead;
     int storedCount;
     bool persistEnabled;
     bool persistPending;
@@ -113,6 +130,8 @@ private:
     SessionSlot sessions[AUTH_SESSION_MAX];
 
     void clearUsers();
+    UserRecord *allocateUserRecord();
+    void freeUserRecord(UserRecord *user);
     void seedAdmin();
     bool loadFromFile();
     bool persistNow();
@@ -125,6 +144,7 @@ private:
     static void hashPassword(const uint8_t *salt, const char *password, uint8_t *hashOut);
     static bool hashesEqual(const uint8_t *left, const uint8_t *right, size_t length);
     static bool actorMayEditUsers(const UserRecord *actor);
-    static void copyRolesAndFlags(UserRecord *destination, const UserRecord *source);
+    static void copyRolesAndFlags(UserRecord *destination, const UserRecord *source, bool replaceConsoles);
+    static void appendConsolesJson(String &json, const UserRecord *user);
     SessionSlot *findSession(const uint8_t token[AUTH_SESSION_TOKEN_LEN]);
 };

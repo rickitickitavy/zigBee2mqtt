@@ -32,6 +32,12 @@ public:
     const String &serverBornTopic() const { return topicServerBorn; }
 
 private:
+    struct TopicSubscription {
+        char *topic;
+        bool keepMarked;
+        TopicSubscription *next;
+    };
+
     SettingsManager *settingsManager;
     DeviceTopicMap *topicMap;
     MqttBroker *localBroker = nullptr;
@@ -51,8 +57,7 @@ private:
     String topicConfigDevice;
     String topicServerBorn;
     String lastDevicesJson;
-    static constexpr int kMaxTopicSubscriptions = DEVICE_MAP_SLOTS * 4;
-    char subscribedTopics[kMaxTopicSubscriptions][64];
+    TopicSubscription *subscriptionHead = nullptr;
 
     void rebuildTopics();
     bool usesLocalBroker() const;
@@ -61,8 +66,7 @@ private:
     void reconnect();
     void subscribeBridge();
     void clearTopicSubscriptions();
-    int findTopicSubscription(const char *topic) const;
-    int nextFreeTopicSubscription() const;
-    void keepOrSubscribe(const String &subscribeTopic, bool *keepSubscription);
+    TopicSubscription *findTopicSubscription(const char *topic) const;
+    void keepOrSubscribe(const String &subscribeTopic);
     bool publishMessage(const char *topic, const char *payload, bool retained);
 };

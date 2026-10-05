@@ -28,6 +28,12 @@ def generate_embedded_web_assets():
             "mime": "text/html",
         },
         {
+            "source": project_dir / "data" / "user.html",
+            "symbol": "kEmbeddedUserHtmlGz",
+            "length_symbol": "kEmbeddedUserHtmlGzLen",
+            "mime": "text/html",
+        },
+        {
             "source": project_dir / "data" / "css" / "all.css",
             "symbol": "kEmbeddedAllCssGz",
             "length_symbol": "kEmbeddedAllCssGzLen",

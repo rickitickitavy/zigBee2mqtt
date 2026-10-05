@@ -273,9 +273,158 @@ void ZigbeeCoordinator::IasCieEndpoint::zbIASZoneEnrollRequest(
     }
 }
 
-ZigbeeCoordinator::ZigbeeCoordinator() : zigbeeSwitch(kSwitchEndpoint, this), iasCie(1, this) {
-    memset(boundDevices, 0, sizeof(boundDevices));
+void ZigbeeCoordinator::releaseBoundDevice(BoundZigbeeDevice *device) {
+    if (device == nullptr) {
+        return;
+    }
+    free(device->manufacturer);
+    free(device->model);
+    free(device);
 }
+
+void ZigbeeCoordinator::clearBoundDevices() {
+    while (boundDeviceHead != nullptr) {
+        BoundZigbeeDevice *next = boundDeviceHead->next;
+        releaseBoundDevice(boundDeviceHead);
+        boundDeviceHead = next;
+    }
+    boundDeviceCount = 0;
+}
+
+BoundZigbeeDevice *ZigbeeCoordinator::allocateBoundDevice() {
+    if (boundDeviceCount >= kMaxBoundDevices) {
+        return nullptr;
+    }
+    BoundZigbeeDevice *device = (BoundZigbeeDevice *)calloc(1, sizeof(BoundZigbeeDevice));
+    if (device == nullptr) {
+        return nullptr;
+    }
+    device->lastEmittedType = kZigbeeDeviceTypeNeverEmitted;
+    device->next = boundDeviceHead;
+    boundDeviceHead = device;
+    boundDeviceCount++;
+    return device;
+}
+
+void ZigbeeCoordinator::releaseStatusRead(StatusReadItem *item) {
+    if (item == nullptr) {
+        return;
+    }
+    StatusReadItem **link = &statusReadHead;
+    while (*link != nullptr && *link != item) {
+        link = &(*link)->next;
+    }
+    if (*link == item) {
+        *link = item->next;
+        statusReadCount--;
+    }
+    free(item);
+}
+
+ZigbeeCoordinator::StatusReadItem *ZigbeeCoordinator::allocateStatusRead() {
+    if (statusReadCount >= kMaxStatusReads) {
+        return nullptr;
+    }
+    StatusReadItem *item = (StatusReadItem *)calloc(1, sizeof(StatusReadItem));
+    if (item == nullptr) {
+        return nullptr;
+    }
+    item->next = statusReadHead;
+    statusReadHead = item;
+    statusReadCount++;
+    return item;
+}
+
+ZigbeeCoordinator::StatusIssuedItem *ZigbeeCoordinator::allocateStatusIssued() {
+    if (statusIssuedCount >= kMaxStatusIssued) {
+        return nullptr;
+    }
+    StatusIssuedItem *item = (StatusIssuedItem *)calloc(1, sizeof(StatusIssuedItem));
+    if (item == nullptr) {
+        return nullptr;
+    }
+    item->next = statusIssuedHead;
+    statusIssuedHead = item;
+    statusIssuedCount++;
+    return item;
+}
+
+ZigbeeCoordinator::StatusAnswerHold *ZigbeeCoordinator::allocateStatusAnswer() {
+    if (statusAnswerCount >= kMaxStatusAnswers) {
+        return nullptr;
+    }
+    StatusAnswerHold *hold = (StatusAnswerHold *)calloc(1, sizeof(StatusAnswerHold));
+    if (hold == nullptr) {
+        return nullptr;
+    }
+    hold->next = statusAnswerHead;
+    statusAnswerHead = hold;
+    statusAnswerCount++;
+    return hold;
+}
+
+ZigbeeCoordinator::EndpointCommandStamp *ZigbeeCoordinator::allocateEndpointCommandStamp() {
+    if (endpointCommandCount >= kMaxStatusAnswers) {
+        return nullptr;
+    }
+    EndpointCommandStamp *stamp = (EndpointCommandStamp *)calloc(1, sizeof(EndpointCommandStamp));
+    if (stamp == nullptr) {
+        return nullptr;
+    }
+    stamp->next = endpointCommandHead;
+    endpointCommandHead = stamp;
+    endpointCommandCount++;
+    return stamp;
+}
+
+ZigbeeCoordinator::DestCommandSlot *ZigbeeCoordinator::allocateDestFlight() {
+    if (destFlightCount >= kMaxDestFlights) {
+        return nullptr;
+    }
+    DestCommandSlot *slot = (DestCommandSlot *)calloc(1, sizeof(DestCommandSlot));
+    if (slot == nullptr) {
+        return nullptr;
+    }
+    slot->endpoint = 255;
+    slot->next = destFlightHead;
+    destFlightHead = slot;
+    destFlightCount++;
+    return slot;
+}
+
+ZigbeeCoordinator::DescriptorProbe *ZigbeeCoordinator::allocateDescriptorProbe(uint16_t shortAddr) {
+    if (descriptorProbeCount >= kMaxDescriptorProbes) {
+        return nullptr;
+    }
+    DescriptorProbe *probe = (DescriptorProbe *)calloc(1, sizeof(DescriptorProbe));
+    if (probe == nullptr) {
+        return nullptr;
+    }
+    probe->occupied = true;
+    probe->owner = this;
+    probe->shortAddr = shortAddr;
+    probe->next = descriptorProbeHead;
+    descriptorProbeHead = probe;
+    descriptorProbeCount++;
+    return probe;
+}
+
+void ZigbeeCoordinator::releaseDescriptorProbe(DescriptorProbe *probe) {
+    if (probe == nullptr) {
+        return;
+    }
+    DescriptorProbe **link = &descriptorProbeHead;
+    while (*link != nullptr && *link != probe) {
+        link = &(*link)->next;
+    }
+    if (*link == probe) {
+        *link = probe->next;
+        descriptorProbeCount--;
+    }
+    free(probe);
+}
+
+ZigbeeCoordinator::ZigbeeCoordinator() : zigbeeSwitch(kSwitchEndpoint, this), iasCie(1, this) {}
 
 void ZigbeeCoordinator::setLightStateHandler(LightStateFn handler) {
     lightStateHandler = handler;
@@ -366,8 +515,8 @@ void ZigbeeCoordinator::startPairingWindow(uint8_t seconds) {
     pairingLedToggleMs = 0;
     pairingLedOn = false;
     STATUS_RGB.setPairingHeld(true);
-    for (int i = 0; i < kMaxBoundDevices; i++) {
-        boundDevices[i].pairingOffered = false;
+    for (BoundZigbeeDevice *device = boundDeviceHead; device != nullptr; device = device->next) {
+        device->pairingOffered = false;
     }
 }
 
@@ -408,12 +557,7 @@ void ZigbeeCoordinator::storeBoundDevice(zb_device_params_t *device) {
     BoundZigbeeDevice *slot = findByIeee(device->ieee_addr);
     const bool isNewDevice = slot == nullptr;
     if (slot == nullptr) {
-        for (int i = 0; i < kMaxBoundDevices; i++) {
-            if (!boundDevices[i].occupied) {
-                slot = &boundDevices[i];
-                break;
-            }
-        }
+        slot = allocateBoundDevice();
     }
     if (slot == nullptr) {
         LOGGER.warning("Bound device table full");
@@ -435,7 +579,11 @@ void ZigbeeCoordinator::storeBoundDevice(zb_device_params_t *device) {
         if (!isNewDevice) {
             return;
         }
+        BoundZigbeeDevice *savedNext = slot->next;
+        free(slot->manufacturer);
+        free(slot->model);
         memset(slot, 0, sizeof(BoundZigbeeDevice));
+        slot->next = savedNext;
         memcpy(slot->ieee, device->ieee_addr, 8);
         slot->shortAddr = shortAddr;
         slot->endpoint = endpoint;
@@ -449,7 +597,11 @@ void ZigbeeCoordinator::storeBoundDevice(zb_device_params_t *device) {
     }
 
     if (isNewDevice) {
+        BoundZigbeeDevice *savedNext = slot->next;
+        free(slot->manufacturer);
+        free(slot->model);
         memset(slot, 0, sizeof(BoundZigbeeDevice));
+        slot->next = savedNext;
         memcpy(slot->ieee, device->ieee_addr, 8);
         slot->lastEmittedType = kZigbeeDeviceTypeNeverEmitted;
     }
@@ -539,15 +691,7 @@ void ZigbeeCoordinator::mergeBoundDeviceType(BoundZigbeeDevice *slot, uint8_t in
 }
 
 ZigbeeCoordinator::DescriptorProbe *ZigbeeCoordinator::allocDescriptorProbe(uint16_t shortAddr) {
-    for (int i = 0; i < kMaxDescriptorProbes; i++) {
-        if (!descriptorProbes[i].occupied) {
-            descriptorProbes[i].occupied = true;
-            descriptorProbes[i].owner = this;
-            descriptorProbes[i].shortAddr = shortAddr;
-            return &descriptorProbes[i];
-        }
-    }
-    return nullptr;
+    return allocateDescriptorProbe(shortAddr);
 }
 
 void ZigbeeCoordinator::requestSimpleDescriptor(uint16_t shortAddr, uint8_t endpoint) {
@@ -595,8 +739,7 @@ void ZigbeeCoordinator::startDescriptorProbe(BoundZigbeeDevice *slot) {
 
 void ZigbeeCoordinator::serviceTypeProbes() {
     const unsigned long nowMs = millis();
-    for (int i = 0; i < kMaxBoundDevices; i++) {
-        BoundZigbeeDevice *slot = &boundDevices[i];
+    for (BoundZigbeeDevice *slot = boundDeviceHead; slot != nullptr; slot = slot->next) {
         if (!slot->occupied || slot->typeProbeDeadlineMs == 0) {
             continue;
         }
@@ -620,7 +763,7 @@ void ZigbeeCoordinator::onActiveEndpoints(
     }
     ZigbeeCoordinator *coordinator = probe->owner;
     const uint16_t shortAddr = probe->shortAddr;
-    probe->occupied = false;
+    coordinator->releaseDescriptorProbe(probe);
     BoundZigbeeDevice *slot = coordinator->findByShortAddr(shortAddr);
     if (zdoStatus != ESP_ZB_ZDP_STATUS_SUCCESS || epIdList == nullptr || epCount == 0) {
         if (slot != nullptr) {
@@ -645,7 +788,7 @@ void ZigbeeCoordinator::onSimpleDescriptor(
     }
     ZigbeeCoordinator *coordinator = probe->owner;
     const uint16_t shortAddr = probe->shortAddr;
-    probe->occupied = false;
+    coordinator->releaseDescriptorProbe(probe);
     if (zdoStatus != ESP_ZB_ZDP_STATUS_SUCCESS || simpleDesc == nullptr) {
         return;
     }
@@ -728,18 +871,18 @@ void ZigbeeCoordinator::dispatch() {
 }
 
 BoundZigbeeDevice *ZigbeeCoordinator::findByIeee(const uint8_t ieee[8]) {
-    for (int i = 0; i < kMaxBoundDevices; i++) {
-        if (boundDevices[i].occupied && memcmp(boundDevices[i].ieee, ieee, 8) == 0) {
-            return &boundDevices[i];
+    for (BoundZigbeeDevice *device = boundDeviceHead; device != nullptr; device = device->next) {
+        if (device->occupied && memcmp(device->ieee, ieee, 8) == 0) {
+            return device;
         }
     }
     return nullptr;
 }
 
 BoundZigbeeDevice *ZigbeeCoordinator::findByShortAddr(uint16_t shortAddr) {
-    for (int i = 0; i < kMaxBoundDevices; i++) {
-        if (boundDevices[i].occupied && boundDevices[i].shortAddr == shortAddr) {
-            return &boundDevices[i];
+    for (BoundZigbeeDevice *device = boundDeviceHead; device != nullptr; device = device->next) {
+        if (device->occupied && device->shortAddr == shortAddr) {
+            return device;
         }
     }
     return nullptr;
@@ -754,14 +897,7 @@ void ZigbeeCoordinator::rememberShortIeee(uint16_t shortAddr, const uint8_t ieee
         slot = findByShortAddr(shortAddr);
     }
     if (slot == nullptr) {
-        for (int i = 0; i < kMaxBoundDevices; i++) {
-            if (!boundDevices[i].occupied) {
-                slot = &boundDevices[i];
-                memset(slot, 0, sizeof(BoundZigbeeDevice));
-                slot->lastEmittedType = kZigbeeDeviceTypeNeverEmitted;
-                break;
-            }
-        }
+        slot = allocateBoundDevice();
     }
     if (slot == nullptr) {
         return;
@@ -867,14 +1003,14 @@ void ZigbeeCoordinator::resolveIeeeFromSource(esp_zb_zcl_addr_t source, uint8_t 
                 slotIndex = registeredMap->nextUsedIndex(slotIndex + 1);
             }
         }
-        for (int i = 0; i < kMaxBoundDevices; i++) {
-            if (!boundDevices[i].occupied || isZeroIeee(boundDevices[i].ieee)) {
+        for (BoundZigbeeDevice *device = boundDeviceHead; device != nullptr; device = device->next) {
+            if (!device->occupied || isZeroIeee(device->ieee)) {
                 continue;
             }
-            if (boundDevices[i].shortAddr == 0 || boundDevices[i].shortAddr == 0xFFFF) {
-                const uint16_t mappedShort = esp_zb_address_short_by_ieee(boundDevices[i].ieee);
+            if (device->shortAddr == 0 || device->shortAddr == 0xFFFF) {
+                const uint16_t mappedShort = esp_zb_address_short_by_ieee(device->ieee);
                 if (mappedShort == *shortAddr) {
-                    memcpy(ieee, boundDevices[i].ieee, 8);
+                    memcpy(ieee, device->ieee, 8);
                     rememberShortIeee(*shortAddr, ieee, 0);
                     return;
                 }
@@ -966,7 +1102,7 @@ const char *ZigbeeCoordinator::registeredName(const uint8_t ieee[8]) const {
     if (entry == nullptr) {
         return nullptr;
     }
-    return entry->friendlyName;
+    return deviceTopicCStr(entry->friendlyName);
 }
 
 void ZigbeeCoordinator::handleIasZoneStatus(
@@ -1445,8 +1581,8 @@ bool ZigbeeCoordinator::statusReadAlreadyIssued(const uint8_t ieee[8]) const {
     if (ieee == nullptr) {
         return false;
     }
-    for (int i = 0; i < kMaxStatusIssued; i++) {
-        if (statusIssued[i].used && memcmp(statusIssued[i].ieee, ieee, 8) == 0) {
+    for (StatusIssuedItem *item = statusIssuedHead; item != nullptr; item = item->next) {
+        if (item->used && memcmp(item->ieee, ieee, 8) == 0) {
             return true;
         }
     }
@@ -1457,15 +1593,13 @@ void ZigbeeCoordinator::markStatusReadIssued(const uint8_t ieee[8]) {
     if (ieee == nullptr || statusReadAlreadyIssued(ieee)) {
         return;
     }
-    for (int i = 0; i < kMaxStatusIssued; i++) {
-        if (statusIssued[i].used) {
-            continue;
-        }
-        statusIssued[i].used = true;
-        memcpy(statusIssued[i].ieee, ieee, 8);
+    StatusIssuedItem *item = allocateStatusIssued();
+    if (item == nullptr) {
+        LOGGER.warning("Status read issued table full");
         return;
     }
-    LOGGER.warning("Status read issued table full");
+    item->used = true;
+    memcpy(item->ieee, ieee, 8);
 }
 
 bool ZigbeeCoordinator::enqueueStatusRead(
@@ -1477,8 +1611,7 @@ bool ZigbeeCoordinator::enqueueStatusRead(
     if (ieee == nullptr || !DeviceTopicMap::isUsableEndpoint(endpoint)) {
         return false;
     }
-    for (int i = 0; i < kMaxStatusReads; i++) {
-        StatusReadItem *item = &statusReads[i];
+    for (StatusReadItem *item = statusReadHead; item != nullptr; item = item->next) {
         if (!item->used) {
             continue;
         }
@@ -1487,30 +1620,26 @@ bool ZigbeeCoordinator::enqueueStatusRead(
             return true;
         }
     }
-    for (int i = 0; i < kMaxStatusReads; i++) {
-        StatusReadItem *item = &statusReads[i];
-        if (item->used) {
-            continue;
-        }
-        *item = StatusReadItem{};
-        item->used = true;
-        memcpy(item->ieee, ieee, 8);
-        item->endpoint = endpoint;
-        item->clusterId = clusterId;
-        item->attributeId = attributeId;
-        item->giveUpMs = millis() + kStatusReadGiveUpMs;
-        return true;
+    StatusReadItem *item = allocateStatusRead();
+    if (item == nullptr) {
+        LOGGER.warning("Status read queue full");
+        return false;
     }
-    LOGGER.warning("Status read queue full");
-    return false;
+    item->used = true;
+    memcpy(item->ieee, ieee, 8);
+    item->endpoint = endpoint;
+    item->clusterId = clusterId;
+    item->attributeId = attributeId;
+    item->giveUpMs = millis() + kStatusReadGiveUpMs;
+    return true;
 }
 
 bool ZigbeeCoordinator::ieeeHasInFlightStatusRead(const uint8_t ieee[8]) const {
     if (ieee == nullptr) {
         return false;
     }
-    for (int i = 0; i < kMaxStatusReads; i++) {
-        if (statusReads[i].used && statusReads[i].inFlight && memcmp(statusReads[i].ieee, ieee, 8) == 0) {
+    for (StatusReadItem *item = statusReadHead; item != nullptr; item = item->next) {
+        if (item->used && item->inFlight && memcmp(item->ieee, ieee, 8) == 0) {
             return true;
         }
     }
@@ -1522,24 +1651,26 @@ void ZigbeeCoordinator::pumpStatusReads() {
         return;
     }
     const unsigned long nowMs = millis();
-    for (int i = 0; i < kMaxStatusReads; i++) {
-        StatusReadItem *item = &statusReads[i];
+    StatusReadItem *item = statusReadHead;
+    while (item != nullptr) {
+        StatusReadItem *next = item->next;
         if (!item->used) {
+            item = next;
             continue;
         }
         if (item->inFlight && (long)(nowMs - item->deadlineMs) >= 0) {
             LOGGER.warning("Status read timeout ep=" + String(item->endpoint));
-            item->used = false;
-            item->inFlight = false;
+            releaseStatusRead(item);
+            item = next;
             continue;
         }
         if (!item->inFlight && (long)(nowMs - item->giveUpMs) >= 0) {
             LOGGER.warning("Status read dropped ep=" + String(item->endpoint));
-            item->used = false;
+            releaseStatusRead(item);
         }
+        item = next;
     }
-    for (int i = 0; i < kMaxStatusReads; i++) {
-        StatusReadItem *item = &statusReads[i];
+    for (item = statusReadHead; item != nullptr; item = item->next) {
         if (!item->used || item->inFlight) {
             continue;
         }
@@ -1558,8 +1689,8 @@ bool ZigbeeCoordinator::ieeeHasStatusRead(const uint8_t ieee[8]) const {
     if (ieee == nullptr) {
         return false;
     }
-    for (int i = 0; i < kMaxStatusReads; i++) {
-        if (statusReads[i].used && memcmp(statusReads[i].ieee, ieee, 8) == 0) {
+    for (StatusReadItem *item = statusReadHead; item != nullptr; item = item->next) {
+        if (item->used && memcmp(item->ieee, ieee, 8) == 0) {
             return true;
         }
     }
@@ -1571,25 +1702,21 @@ void ZigbeeCoordinator::noteEndpointCommand(const uint8_t ieee[8], uint8_t endpo
         return;
     }
     const unsigned long nowMs = millis();
-    for (int i = 0; i < kMaxStatusAnswers; i++) {
-        EndpointCommandStamp *stamp = &endpointCommands[i];
+    for (EndpointCommandStamp *stamp = endpointCommandHead; stamp != nullptr; stamp = stamp->next) {
         if (!stamp->used || stamp->endpoint != endpoint || memcmp(stamp->ieee, ieee, 8) != 0) {
             continue;
         }
         stamp->atMs = nowMs;
         return;
     }
-    for (int i = 0; i < kMaxStatusAnswers; i++) {
-        EndpointCommandStamp *stamp = &endpointCommands[i];
-        if (stamp->used) {
-            continue;
-        }
-        stamp->used = true;
-        memcpy(stamp->ieee, ieee, 8);
-        stamp->endpoint = endpoint;
-        stamp->atMs = nowMs;
+    EndpointCommandStamp *stamp = allocateEndpointCommandStamp();
+    if (stamp == nullptr) {
         return;
     }
+    stamp->used = true;
+    memcpy(stamp->ieee, ieee, 8);
+    stamp->endpoint = endpoint;
+    stamp->atMs = nowMs;
 }
 
 bool ZigbeeCoordinator::endpointCommandAfter(
@@ -1600,8 +1727,7 @@ bool ZigbeeCoordinator::endpointCommandAfter(
     if (ieee == nullptr) {
         return false;
     }
-    for (int i = 0; i < kMaxStatusAnswers; i++) {
-        const EndpointCommandStamp *stamp = &endpointCommands[i];
+    for (const EndpointCommandStamp *stamp = endpointCommandHead; stamp != nullptr; stamp = stamp->next) {
         if (!stamp->used || stamp->endpoint != endpoint || memcmp(stamp->ieee, ieee, 8) != 0) {
             continue;
         }
@@ -1621,8 +1747,7 @@ bool ZigbeeCoordinator::suppressStatusReplacement(
     }
     const unsigned long nowMs = millis();
     const bool statusReadActive = ieeeHasStatusRead(ieee);
-    for (int i = 0; i < kMaxStatusAnswers; i++) {
-        StatusAnswerHold *hold = &statusAnswers[i];
+    for (StatusAnswerHold *hold = statusAnswerHead; hold != nullptr; hold = hold->next) {
         if (!hold->used || hold->endpoint != endpoint || hold->clusterId != clusterId) {
             continue;
         }
@@ -1643,26 +1768,19 @@ bool ZigbeeCoordinator::suppressStatusReplacement(
         hold->fromStatusRead = hold->fromStatusRead || statusReadActive;
         LOGGER.info("Kept channel status ep=" + String(endpoint) + "; ignored a later reply");
         return true;
-        hold->value = value;
-        hold->answeredMs = nowMs;
-        hold->fromStatusRead = false;
+    }
+    StatusAnswerHold *hold = allocateStatusAnswer();
+    if (hold == nullptr) {
         return false;
     }
-    for (int i = 0; i < kMaxStatusAnswers; i++) {
-        StatusAnswerHold *hold = &statusAnswers[i];
-        if (hold->used) {
-            continue;
-        }
-        hold->used = true;
-        hold->fromStatusRead = statusReadActive;
-        memcpy(hold->ieee, ieee, 8);
-        hold->endpoint = endpoint;
-        hold->clusterId = clusterId;
-        hold->value = value;
-        hold->answeredMs = nowMs;
-        hold->untilMs = nowMs + kStatusReadGiveUpMs;
-        return false;
-    }
+    hold->used = true;
+    hold->fromStatusRead = statusReadActive;
+    memcpy(hold->ieee, ieee, 8);
+    hold->endpoint = endpoint;
+    hold->clusterId = clusterId;
+    hold->value = value;
+    hold->answeredMs = nowMs;
+    hold->untilMs = nowMs + kStatusReadGiveUpMs;
     return false;
 }
 
@@ -1674,16 +1792,14 @@ void ZigbeeCoordinator::completeStatusRead(
     if (ieee == nullptr) {
         return;
     }
-    for (int i = 0; i < kMaxStatusReads; i++) {
-        StatusReadItem *item = &statusReads[i];
+    for (StatusReadItem *item = statusReadHead; item != nullptr; item = item->next) {
         if (!item->used || !item->inFlight) {
             continue;
         }
         if (memcmp(item->ieee, ieee, 8) != 0 || item->clusterId != clusterId || item->endpoint != endpoint) {
             continue;
         }
-        item->used = false;
-        item->inFlight = false;
+        releaseStatusRead(item);
         pumpStatusReads();
         return;
     }
@@ -1700,8 +1816,7 @@ uint8_t ZigbeeCoordinator::statusReportEndpoint(
     if (ieee == nullptr) {
         return srcEndpoint;
     }
-    for (int i = 0; i < kMaxStatusReads; i++) {
-        const StatusReadItem *item = &statusReads[i];
+    for (const StatusReadItem *item = statusReadHead; item != nullptr; item = item->next) {
         if (!item->used || !item->inFlight) {
             continue;
         }
@@ -1892,8 +2007,7 @@ ZigbeeCoordinator::DestCommandSlot *ZigbeeCoordinator::destSlotFor(
     uint8_t endpoint,
     bool allocate
 ) {
-    for (int i = 0; i < kMaxDestFlights; i++) {
-        DestCommandSlot *slot = &destFlights[i];
+    for (DestCommandSlot *slot = destFlightHead; slot != nullptr; slot = slot->next) {
         if (slot->occupied && memcmp(slot->ieee, ieee, 8) == 0 && slot->endpoint == endpoint) {
             return slot;
         }
@@ -1901,19 +2015,15 @@ ZigbeeCoordinator::DestCommandSlot *ZigbeeCoordinator::destSlotFor(
     if (!allocate) {
         return nullptr;
     }
-    for (int i = 0; i < kMaxDestFlights; i++) {
-        DestCommandSlot *slot = &destFlights[i];
-        if (slot->occupied) {
-            continue;
-        }
-        *slot = DestCommandSlot{};
-        slot->occupied = true;
-        memcpy(slot->ieee, ieee, 8);
-        slot->endpoint = endpoint;
-        return slot;
+    DestCommandSlot *slot = allocateDestFlight();
+    if (slot == nullptr) {
+        LOGGER.warning("Dest command table full");
+        return nullptr;
     }
-    LOGGER.warning("Dest command table full");
-    return nullptr;
+    slot->occupied = true;
+    memcpy(slot->ieee, ieee, 8);
+    slot->endpoint = endpoint;
+    return slot;
 }
 
 void ZigbeeCoordinator::markInFlight(DestCommandSlot *slot, uint16_t clusterId) {
@@ -2308,8 +2418,7 @@ void ZigbeeCoordinator::sendNextIfReady(DestCommandSlot *slot) {
 
 void ZigbeeCoordinator::serviceCommandFlights() {
     const unsigned long nowMs = millis();
-    for (int i = 0; i < kMaxDestFlights; i++) {
-        DestCommandSlot *slot = &destFlights[i];
+    for (DestCommandSlot *slot = destFlightHead; slot != nullptr; slot = slot->next) {
         if (!slot->occupied) {
             continue;
         }
@@ -2326,8 +2435,7 @@ void ZigbeeCoordinator::serviceCommandFlights() {
 
 void ZigbeeCoordinator::noteDefaultResponse(uint8_t endpoint, uint16_t cluster) {
     DestCommandSlot *bestSlot = nullptr;
-    for (int i = 0; i < kMaxDestFlights; i++) {
-        DestCommandSlot *slot = &destFlights[i];
+    for (DestCommandSlot *slot = destFlightHead; slot != nullptr; slot = slot->next) {
         if (!slot->occupied || !slot->inFlight) {
             continue;
         }
@@ -2347,8 +2455,7 @@ void ZigbeeCoordinator::noteDefaultResponse(uint8_t endpoint, uint16_t cluster) 
 String ZigbeeCoordinator::devicesJson(DeviceTopicMap *topicMap) {
     String json = "[";
     bool first = true;
-    for (int i = 0; i < kMaxBoundDevices; i++) {
-        BoundZigbeeDevice *device = &boundDevices[i];
+    for (BoundZigbeeDevice *device = boundDeviceHead; device != nullptr; device = device->next) {
         if (!device->occupied) {
             continue;
         }
@@ -2363,19 +2470,19 @@ String ZigbeeCoordinator::devicesJson(DeviceTopicMap *topicMap) {
         json += "\",\"endpoint\":";
         json += String(device->endpoint);
         json += ",\"manufacturer\":\"";
-        json += device->manufacturer;
+        json += deviceTopicCStr(device->manufacturer);
         json += "\",\"model\":\"";
-        json += device->model;
+        json += deviceTopicCStr(device->model);
         json += "\"";
 
         DeviceTopicEntry *mapped = topicMap->findByIeee(device->ieee);
         if (mapped != nullptr) {
             json += ",\"name\":\"";
-            json += mapped->friendlyName;
+            json += deviceTopicCStr(mapped->friendlyName);
             json += "\",\"state\":\"";
-            json += mapped->stateTopic;
+            json += deviceTopicCStr(mapped->stateTopic);
             json += "\",\"command\":\"";
-            json += mapped->commandTopic;
+            json += deviceTopicCStr(mapped->commandTopic);
             json += "\"";
         }
         json += "}";

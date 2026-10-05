@@ -101,7 +101,7 @@ private:
     struct PendingDeviceChange {
         bool used;
         uint8_t flags;
-        DeviceTopicEntry entry;
+        DeviceTopicEntry *entry;
     };
 
     struct PendingUserChange {
@@ -114,7 +114,6 @@ private:
     LightStateFn lightStateHandler = nullptr;
     DeviceLiveChangedFn deviceLiveChanged = nullptr;
     DeviceTopicMap *registryMap = nullptr;
-    DeviceTopicEntry pullSlots[DEVICE_MAP_SLOTS]{};
     DeviceTopicMap pullMap;
     PendingDeviceChange pendingChanges[kPendingChangeSlots]{};
     UserStore *userMap = nullptr;
@@ -150,7 +149,11 @@ private:
     uint32_t packetsRx = 0;
     uint32_t packetsTx = 0;
     bool pairingOpen = false;
-    uint8_t pendingDeleteIeees[DEVICE_MAP_SLOTS][8]{};
+    struct PendingDeleteIeeeNode {
+        uint8_t ieee[8];
+        PendingDeleteIeeeNode *next;
+    };
+    PendingDeleteIeeeNode *pendingDeleteHead = nullptr;
     int pendingDeleteCount = 0;
     int pendingDeleteIndex = 0;
     int pendingUpsertWalk = 0;
@@ -172,6 +175,7 @@ private:
     void beginPullSnapshot();
     void applyPulledRegistry(const SpiFrame &frame);
     void finishRegistryPull();
+    void clearPendingDeleteIeees();
     void applyDevicesFile(const SpiFrame &frame);
     bool enqueueUserFrame(uint8_t flags, const UserRecord *user);
     bool queueUserChange(uint8_t flags, const UserRecord *user);

@@ -13,13 +13,197 @@ static_assert(USER_NAME_MAX == SPI_USER_SYNC_NAME_LEN, "user name SPI width must
 static_assert(USER_PASSWORD_SALT_LEN == SPI_USER_SYNC_SALT_LEN, "user salt SPI width must match store");
 static_assert(USER_PASSWORD_HASH_LEN == SPI_USER_SYNC_HASH_LEN, "user hash SPI width must match store");
 
-UserStore::UserStore() : storedCount(0), persistEnabled(false), persistPending(false), changedHandler(nullptr) {
+UserStore::UserStore()
+    : usersHead(nullptr), storedCount(0), persistEnabled(false), persistPending(false), changedHandler(nullptr) {
     clearUsers();
     memset(sessions, 0, sizeof(sessions));
 }
 
+UserStore::~UserStore() {
+    clearUsers();
+}
+
+bool UserStore::heapAllowsAllocation(size_t bytes) {
+    if (bytes == 0) {
+        return true;
+    }
+    const size_t freeHeap = ESP.getFreeHeap();
+    const size_t maxBlock = ESP.getMaxAllocHeap();
+    if (maxBlock < bytes || freeHeap < bytes) {
+        return false;
+    }
+    if (freeHeap - bytes < CONSOLE_HEAP_RESERVE_BYTES) {
+        return false;
+    }
+    return true;
+}
+
+void UserStore::freeConsoleIdList(UserConsoleIdNode *&listHead) {
+    while (listHead != nullptr) {
+        UserConsoleIdNode *next = listHead->next;
+        free(listHead);
+        listHead = next;
+    }
+    listHead = nullptr;
+}
+
+void UserStore::clearUserRecord(UserRecord *user) {
+    if (user == nullptr) {
+        return;
+    }
+    UserConsoleIdNode *consoleIds = user->consoleIds;
+    user->consoleIds = nullptr;
+    freeConsoleIdList(consoleIds);
+    memset(user, 0, sizeof(*user));
+}
+
+bool UserStore::cloneConsoleIdList(UserConsoleIdNode **destination, const UserConsoleIdNode *source) {
+    if (destination == nullptr) {
+        return false;
+    }
+    *destination = nullptr;
+    UserConsoleIdNode *tail = nullptr;
+    for (const UserConsoleIdNode *node = source; node != nullptr; node = node->next) {
+        if (!heapAllowsAllocation(sizeof(UserConsoleIdNode))) {
+            freeConsoleIdList(*destination);
+            return false;
+        }
+        UserConsoleIdNode *copy = (UserConsoleIdNode *)malloc(sizeof(UserConsoleIdNode));
+        if (copy == nullptr) {
+            freeConsoleIdList(*destination);
+            return false;
+        }
+        memset(copy, 0, sizeof(*copy));
+        strncpy(copy->id, node->id, sizeof(copy->id) - 1);
+        copy->next = nullptr;
+        if (tail == nullptr) {
+            *destination = copy;
+        } else {
+            tail->next = copy;
+        }
+        tail = copy;
+    }
+    return true;
+}
+
+bool UserStore::parseConsoleIdListFromObject(const char *objectJson, UserConsoleIdNode **outHead) {
+    if (outHead == nullptr) {
+        return false;
+    }
+    *outHead = nullptr;
+    String consolesJson;
+    if (!extractJsonKeyedSlice(objectJson, "consoles", '[', consolesJson)) {
+        return true;
+    }
+    UserConsoleIdNode *tail = nullptr;
+    int count = 0;
+    const char *cursor = consolesJson.c_str();
+    while (cursor != nullptr && *cursor != '\0' && count < CONSOLE_STORE_MAX) {
+        const char *quote = strchr(cursor, '"');
+        if (quote == nullptr) {
+            break;
+        }
+        quote++;
+        const char *end = strchr(quote, '"');
+        if (end == nullptr) {
+            freeConsoleIdList(*outHead);
+            return false;
+        }
+        String idText = String(quote).substring(0, (unsigned int)(end - quote));
+        if (idText.length() > 0 && idText.length() < CONSOLE_ID_BUF) {
+            if (!heapAllowsAllocation(sizeof(UserConsoleIdNode))) {
+                freeConsoleIdList(*outHead);
+                return false;
+            }
+            UserConsoleIdNode *node = (UserConsoleIdNode *)malloc(sizeof(UserConsoleIdNode));
+            if (node == nullptr) {
+                freeConsoleIdList(*outHead);
+                return false;
+            }
+            memset(node, 0, sizeof(*node));
+            strncpy(node->id, idText.c_str(), sizeof(node->id) - 1);
+            node->next = nullptr;
+            if (tail == nullptr) {
+                *outHead = node;
+            } else {
+                tail->next = node;
+            }
+            tail = node;
+            count++;
+        }
+        cursor = end + 1;
+    }
+    return true;
+}
+
+bool UserStore::userHasConsole(const UserRecord *user, const char *consoleId) {
+    if (user == nullptr || consoleId == nullptr || consoleId[0] == '\0') {
+        return false;
+    }
+    for (const UserConsoleIdNode *node = user->consoleIds; node != nullptr; node = node->next) {
+        if (strcmp(node->id, consoleId) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+int UserStore::consoleIdCount(const UserRecord *user) {
+    int count = 0;
+    if (user == nullptr) {
+        return 0;
+    }
+    for (const UserConsoleIdNode *node = user->consoleIds; node != nullptr; node = node->next) {
+        count++;
+    }
+    return count;
+}
+
+void UserStore::appendConsolesJson(String &json, const UserRecord *user) {
+    json += ",\"consoles\":[";
+    bool first = true;
+    if (user != nullptr) {
+        for (const UserConsoleIdNode *node = user->consoleIds; node != nullptr; node = node->next) {
+            if (!first) {
+                json += ",";
+            }
+            first = false;
+            json += "\"";
+            appendJsonEscaped(json, node->id, sizeof(node->id));
+            json += "\"";
+        }
+    }
+    json += "]";
+}
+
+void UserStore::freeUserRecord(UserRecord *user) {
+    if (user == nullptr) {
+        return;
+    }
+    clearUserRecord(user);
+    free(user);
+}
+
+UserRecord *UserStore::allocateUserRecord() {
+    if (storedCount >= USER_STORE_MAX) {
+        return nullptr;
+    }
+    UserRecord *user = (UserRecord *)calloc(1, sizeof(UserRecord));
+    if (user == nullptr) {
+        return nullptr;
+    }
+    user->next = usersHead;
+    usersHead = user;
+    storedCount++;
+    return user;
+}
+
 void UserStore::clearUsers() {
-    memset(users, 0, sizeof(users));
+    while (usersHead != nullptr) {
+        UserRecord *next = usersHead->next;
+        freeUserRecord(usersHead);
+        usersHead = next;
+    }
     storedCount = 0;
 }
 
@@ -31,10 +215,15 @@ int UserStore::nextUsedIndex(int startIndex) const {
     if (startIndex < 0) {
         startIndex = 0;
     }
-    for (int index = startIndex; index < storedCount; index++) {
-        if (users[index].userName[0] != '\0') {
-            return index;
+    int ordinal = 0;
+    for (const UserRecord *user = usersHead; user != nullptr; user = user->next) {
+        if (user->userName[0] == '\0') {
+            continue;
         }
+        if (ordinal >= startIndex) {
+            return ordinal;
+        }
+        ordinal++;
     }
     return -1;
 }
@@ -44,10 +233,20 @@ UserRecord *UserStore::userAt(int index) {
 }
 
 const UserRecord *UserStore::userAt(int index) const {
-    if (index < 0 || index >= storedCount) {
+    if (index < 0) {
         return nullptr;
     }
-    return &users[index];
+    int ordinal = 0;
+    for (const UserRecord *user = usersHead; user != nullptr; user = user->next) {
+        if (user->userName[0] == '\0') {
+            continue;
+        }
+        if (ordinal == index) {
+            return user;
+        }
+        ordinal++;
+    }
+    return nullptr;
 }
 
 void UserStore::setChangedHandler(ChangedFn handler) {
@@ -119,14 +318,19 @@ bool UserStore::actorMayEditUsers(const UserRecord *actor) {
     return actor != nullptr && (actor->isAdmin || actor->editUsers);
 }
 
-void UserStore::copyRolesAndFlags(UserRecord *destination, const UserRecord *source) {
+void UserStore::copyRolesAndFlags(UserRecord *destination, const UserRecord *source, bool replaceConsoles) {
     destination->isAdmin = source->isAdmin;
     destination->editDevices = source->editDevices;
     destination->addDevices = source->addDevices;
     destination->removeDevices = source->removeDevices;
     destination->editUsers = source->editUsers;
+    destination->editConsoles = source->editConsoles;
     destination->isBlocked = source->isBlocked;
     destination->theme = source->theme == UI_THEME_DARK ? UI_THEME_DARK : UI_THEME_LIGHT;
+    if (replaceConsoles) {
+        freeConsoleIdList(destination->consoleIds);
+        cloneConsoleIdList(&destination->consoleIds, source->consoleIds);
+    }
 }
 
 UserRecord *UserStore::findByName(const char *userName) {
@@ -137,9 +341,9 @@ const UserRecord *UserStore::findByName(const char *userName) const {
     if (userName == nullptr || userName[0] == '\0') {
         return nullptr;
     }
-    for (int index = 0; index < storedCount; index++) {
-        if (nameEquals(users[index].userName, userName)) {
-            return &users[index];
+    for (const UserRecord *user = usersHead; user != nullptr; user = user->next) {
+        if (nameEquals(user->userName, userName)) {
+            return user;
         }
     }
     return nullptr;
@@ -147,8 +351,8 @@ const UserRecord *UserStore::findByName(const char *userName) const {
 
 int UserStore::adminCount() const {
     int count = 0;
-    for (int index = 0; index < storedCount; index++) {
-        if (users[index].isAdmin) {
+    for (const UserRecord *user = usersHead; user != nullptr; user = user->next) {
+        if (user->isAdmin) {
             count++;
         }
     }
@@ -157,8 +361,8 @@ int UserStore::adminCount() const {
 
 int UserStore::unlockedAdminCount() const {
     int count = 0;
-    for (int index = 0; index < storedCount; index++) {
-        if (users[index].isAdmin && !users[index].isBlocked) {
+    for (const UserRecord *user = usersHead; user != nullptr; user = user->next) {
+        if (user->isAdmin && !user->isBlocked) {
             count++;
         }
     }
@@ -197,7 +401,10 @@ bool UserStore::passwordMatches(const UserRecord *user, const char *password) co
 
 void UserStore::seedAdmin() {
     clearUsers();
-    UserRecord *admin = &users[0];
+    UserRecord *admin = allocateUserRecord();
+    if (admin == nullptr) {
+        return;
+    }
     strncpy(admin->userName, "admin", sizeof(admin->userName) - 1);
     admin->isAdmin = true;
     admin->theme = UI_THEME_DARK;
@@ -205,7 +412,6 @@ void UserStore::seedAdmin() {
     time_t wallClock = time(nullptr);
     admin->addedAt = wallClock > 1600000000 ? (uint32_t)wallClock : 0;
     setPassword(admin, "admin");
-    storedCount = 1;
     LOGGER.info("Seeded console user admin");
 }
 
@@ -254,8 +460,11 @@ bool UserStore::parseUsersJson(const String &json, bool requireHashes) {
             cursor = objectEnd + 1;
             continue;
         }
-        UserRecord *user = &users[storedCount];
-        memset(user, 0, sizeof(*user));
+        UserRecord *user = allocateUserRecord();
+        if (user == nullptr) {
+            cursor = objectEnd + 1;
+            continue;
+        }
         strncpy(user->userName, userName.c_str(), sizeof(user->userName) - 1);
         strncpy(user->passwordSaltHex, saltHex.c_str(), sizeof(user->passwordSaltHex) - 1);
         strncpy(user->passwordHashHex, hashHex.c_str(), sizeof(user->passwordHashHex) - 1);
@@ -267,9 +476,14 @@ bool UserStore::parseUsersJson(const String &json, bool requireHashes) {
         extractJsonBool(object.c_str(), "addDevices", user->addDevices);
         extractJsonBool(object.c_str(), "removeDevices", user->removeDevices);
         extractJsonBool(object.c_str(), "editUsers", user->editUsers);
+        extractJsonBool(object.c_str(), "editConsoles", user->editConsoles);
         extractJsonBool(object.c_str(), "isBlocked", user->isBlocked);
         user->theme = themeFromJsonId(themeText.c_str());
-        storedCount++;
+        if (!parseConsoleIdListFromObject(object.c_str(), &user->consoleIds)) {
+            clearUserRecord(user);
+            cursor = objectEnd + 1;
+            continue;
+        }
         cursor = objectEnd + 1;
     }
     return storedCount > 0;
@@ -366,8 +580,10 @@ void UserStore::replaceFrom(const UserStore *source) {
     if (source == nullptr) {
         return;
     }
-    memcpy(users, source->users, sizeof(users));
-    storedCount = source->storedCount;
+    clearUsers();
+    for (const UserRecord *user = source->usersHead; user != nullptr; user = user->next) {
+        upsertFromRecord(user, false);
+    }
 }
 
 void UserStore::resetToEmpty() {
@@ -382,44 +598,58 @@ bool UserStore::upsertFromRecord(const UserRecord *source, bool notify) {
     }
     UserRecord *existing = findByName(source->userName);
     if (existing != nullptr) {
-        *existing = *source;
+        UserConsoleIdNode *keptConsoles = existing->consoleIds;
+        existing->consoleIds = nullptr;
+        strncpy(existing->userName, source->userName, sizeof(existing->userName) - 1);
+        strncpy(existing->passwordSaltHex, source->passwordSaltHex, sizeof(existing->passwordSaltHex) - 1);
+        strncpy(existing->passwordHashHex, source->passwordHashHex, sizeof(existing->passwordHashHex) - 1);
+        existing->addedAt = source->addedAt;
+        copyRolesAndFlags(existing, source, source->consoleIds != nullptr);
+        if (source->consoleIds == nullptr) {
+            existing->consoleIds = keptConsoles;
+        } else {
+            freeConsoleIdList(keptConsoles);
+        }
         if (notify) {
             afterMutation(UserChangeUpsert, existing);
         }
         return true;
     }
-    if (storedCount >= USER_STORE_MAX) {
+    UserRecord *user = allocateUserRecord();
+    if (user == nullptr) {
         return false;
     }
-    users[storedCount] = *source;
-    storedCount++;
+    strncpy(user->userName, source->userName, sizeof(user->userName) - 1);
+    strncpy(user->passwordSaltHex, source->passwordSaltHex, sizeof(user->passwordSaltHex) - 1);
+    strncpy(user->passwordHashHex, source->passwordHashHex, sizeof(user->passwordHashHex) - 1);
+    user->addedAt = source->addedAt;
+    copyRolesAndFlags(user, source, true);
     if (notify) {
-        afterMutation(UserChangeUpsert, &users[storedCount - 1]);
+        afterMutation(UserChangeUpsert, user);
     }
     return true;
 }
 
 bool UserStore::removeByName(const char *userName, bool notify) {
-    int foundIndex = -1;
-    for (int index = 0; index < storedCount; index++) {
-        if (nameEquals(users[index].userName, userName)) {
-            foundIndex = index;
-            break;
+    UserRecord **link = &usersHead;
+    while (*link != nullptr) {
+        UserRecord *user = *link;
+        if (!nameEquals(user->userName, userName)) {
+            link = &user->next;
+            continue;
         }
+        UserRecord removed = *user;
+        removed.consoleIds = nullptr;
+        removed.next = nullptr;
+        *link = user->next;
+        freeUserRecord(user);
+        storedCount--;
+        if (notify) {
+            afterMutation(UserChangeDelete, &removed);
+        }
+        return true;
     }
-    if (foundIndex < 0) {
-        return false;
-    }
-    UserRecord removed = users[foundIndex];
-    if (foundIndex < storedCount - 1) {
-        memmove(&users[foundIndex], &users[foundIndex + 1], sizeof(UserRecord) * (storedCount - foundIndex - 1));
-    }
-    storedCount--;
-    memset(&users[storedCount], 0, sizeof(UserRecord));
-    if (notify) {
-        afterMutation(UserChangeDelete, &removed);
-    }
-    return true;
+    return false;
 }
 
 bool UserStore::replaceFromExportJson(
@@ -433,12 +663,12 @@ bool UserStore::replaceFromExportJson(
         return false;
     }
     int collected = 0;
-    for (int index = 0; index < storedCount; index++) {
-        if (scratch.findByName(users[index].userName) != nullptr) {
+    for (const UserRecord *user = usersHead; user != nullptr; user = user->next) {
+        if (scratch.findByName(user->userName) != nullptr) {
             continue;
         }
         if (removedNames != nullptr && collected < removedMax) {
-            strncpy(removedNames[collected], users[index].userName, USER_NAME_MAX - 1);
+            strncpy(removedNames[collected], user->userName, USER_NAME_MAX - 1);
             removedNames[collected][USER_NAME_MAX - 1] = '\0';
             collected++;
         }
@@ -446,8 +676,10 @@ bool UserStore::replaceFromExportJson(
     if (removedCount != nullptr) {
         *removedCount = collected;
     }
-    memcpy(users, scratch.users, sizeof(users));
-    storedCount = scratch.storedCount;
+    clearUsers();
+    for (const UserRecord *user = scratch.usersHead; user != nullptr; user = user->next) {
+        upsertFromRecord(user, false);
+    }
     if (persistEnabled) {
         requestPersist();
     }
@@ -509,6 +741,9 @@ size_t UserStore::packSyncPayload(uint8_t *out, size_t outMax, uint8_t flags, co
     if (user->editUsers) {
         roleFlags |= SPI_USER_FLAG_EDIT_USERS;
     }
+    if (user->editConsoles) {
+        roleFlags |= SPI_USER_FLAG_EDIT_CONSOLES;
+    }
     if (user->isBlocked) {
         roleFlags |= SPI_USER_FLAG_BLOCKED;
     }
@@ -550,8 +785,10 @@ bool UserStore::unpackSyncPayload(const uint8_t *in, uint16_t length, uint8_t *f
     user->addDevices = (roleFlags & SPI_USER_FLAG_ADD_DEVICES) != 0;
     user->removeDevices = (roleFlags & SPI_USER_FLAG_REMOVE_DEVICES) != 0;
     user->editUsers = (roleFlags & SPI_USER_FLAG_EDIT_USERS) != 0;
+    user->editConsoles = (roleFlags & SPI_USER_FLAG_EDIT_CONSOLES) != 0;
     user->isBlocked = (roleFlags & SPI_USER_FLAG_BLOCKED) != 0;
     user->theme = in[addedAtOffset + 5] == UI_THEME_DARK ? UI_THEME_DARK : UI_THEME_LIGHT;
+    user->consoleIds = nullptr;
     return true;
 }
 
@@ -574,22 +811,39 @@ UserWriteResult UserStore::createUser(const UserRecord *actor, const UserRecord 
     if (password == nullptr || password[0] == '\0') {
         return UserWriteNeedPassword;
     }
-    UserRecord *user = &users[storedCount];
-    memset(user, 0, sizeof(*user));
+    UserRecord *user = allocateUserRecord();
+    if (user == nullptr) {
+        return UserWriteFull;
+    }
     strncpy(user->userName, source->userName, sizeof(user->userName) - 1);
-    copyRolesAndFlags(user, source);
+    copyRolesAndFlags(user, source, true);
     if (!actor->isAdmin) {
         user->isAdmin = false;
     }
     time_t wallClock = time(nullptr);
     user->addedAt = wallClock > 1600000000 ? (uint32_t)wallClock : 0;
     if (!setPassword(user, password)) {
+        UserRecord **link = &usersHead;
+        while (*link != user && *link != nullptr) {
+            link = &(*link)->next;
+        }
+        if (*link == user) {
+            *link = user->next;
+            storedCount--;
+        }
+        freeUserRecord(user);
         return UserWriteNeedPassword;
     }
-    storedCount++;
     if (unlockedAdminCount() < 1) {
-        storedCount--;
-        memset(user, 0, sizeof(*user));
+        UserRecord **link = &usersHead;
+        while (*link != user && *link != nullptr) {
+            link = &(*link)->next;
+        }
+        if (*link == user) {
+            *link = user->next;
+            storedCount--;
+        }
+        freeUserRecord(user);
         return UserWriteLastAdmin;
     }
     afterMutation(UserChangeUpsert, user);
@@ -615,21 +869,57 @@ UserWriteResult UserStore::updateUser(
     if (source->isAdmin && !actor->isAdmin) {
         return UserWriteForbidden;
     }
-    UserRecord previous = *user;
-    copyRolesAndFlags(user, source);
+    UserConsoleIdNode *previousConsoles = nullptr;
+    if (!cloneConsoleIdList(&previousConsoles, user->consoleIds)) {
+        return UserWriteOutOfMemory;
+    }
+    const bool previousAdmin = user->isAdmin;
+    const bool previousEditDevices = user->editDevices;
+    const bool previousAddDevices = user->addDevices;
+    const bool previousRemoveDevices = user->removeDevices;
+    const bool previousEditUsers = user->editUsers;
+    const bool previousEditConsoles = user->editConsoles;
+    const bool previousBlocked = user->isBlocked;
+    const uint8_t previousTheme = user->theme;
+    char previousSalt[sizeof(user->passwordSaltHex)];
+    char previousHash[sizeof(user->passwordHashHex)];
+    memcpy(previousSalt, user->passwordSaltHex, sizeof(previousSalt));
+    memcpy(previousHash, user->passwordHashHex, sizeof(previousHash));
+    copyRolesAndFlags(user, source, true);
     if (!actor->isAdmin) {
         user->isAdmin = false;
     }
     if (unlockedAdminCount() < 1) {
-        *user = previous;
+        freeConsoleIdList(user->consoleIds);
+        user->consoleIds = previousConsoles;
+        user->isAdmin = previousAdmin;
+        user->editDevices = previousEditDevices;
+        user->addDevices = previousAddDevices;
+        user->removeDevices = previousRemoveDevices;
+        user->editUsers = previousEditUsers;
+        user->editConsoles = previousEditConsoles;
+        user->isBlocked = previousBlocked;
+        user->theme = previousTheme;
         return UserWriteLastAdmin;
     }
     if (password != nullptr && password[0] != '\0') {
         if (!setPassword(user, password)) {
-            *user = previous;
+            freeConsoleIdList(user->consoleIds);
+            user->consoleIds = previousConsoles;
+            user->isAdmin = previousAdmin;
+            user->editDevices = previousEditDevices;
+            user->addDevices = previousAddDevices;
+            user->removeDevices = previousRemoveDevices;
+            user->editUsers = previousEditUsers;
+            user->editConsoles = previousEditConsoles;
+            user->isBlocked = previousBlocked;
+            user->theme = previousTheme;
+            memcpy(user->passwordSaltHex, previousSalt, sizeof(previousSalt));
+            memcpy(user->passwordHashHex, previousHash, sizeof(previousHash));
             return UserWriteNeedPassword;
         }
     }
+    freeConsoleIdList(previousConsoles);
     afterMutation(UserChangeUpsert, user);
     return UserWriteOk;
 }
@@ -638,33 +928,23 @@ UserWriteResult UserStore::deleteUser(const UserRecord *actor, const char *userN
     if (!actorMayEditUsers(actor)) {
         return UserWriteForbidden;
     }
-    int foundIndex = -1;
-    for (int index = 0; index < storedCount; index++) {
-        if (nameEquals(users[index].userName, userName)) {
-            foundIndex = index;
-            break;
-        }
-    }
-    if (foundIndex < 0) {
+    UserRecord *target = findByName(userName);
+    if (target == nullptr) {
         return UserWriteNotFound;
     }
-    if (users[foundIndex].isAdmin && !actor->isAdmin) {
+    if (target->isAdmin && !actor->isAdmin) {
         return UserWriteForbidden;
     }
     int remainingUnlockedAdmins = unlockedAdminCount();
-    if (users[foundIndex].isAdmin && !users[foundIndex].isBlocked) {
+    if (target->isAdmin && !target->isBlocked) {
         remainingUnlockedAdmins--;
     }
     if (remainingUnlockedAdmins < 1) {
         return UserWriteLastAdmin;
     }
-    UserRecord removed = users[foundIndex];
-    if (foundIndex < storedCount - 1) {
-        memmove(&users[foundIndex], &users[foundIndex + 1], sizeof(UserRecord) * (storedCount - foundIndex - 1));
+    if (!removeByName(userName, true)) {
+        return UserWriteNotFound;
     }
-    storedCount--;
-    memset(&users[storedCount], 0, sizeof(UserRecord));
-    afterMutation(UserChangeDelete, &removed);
     return UserWriteOk;
 }
 
@@ -683,11 +963,15 @@ void UserStore::appendUserPublicJson(String &json, const UserRecord *user) const
     json += user->removeDevices ? "true" : "false";
     json += ",\"editUsers\":";
     json += user->editUsers ? "true" : "false";
+    json += ",\"editConsoles\":";
+    json += user->editConsoles ? "true" : "false";
     json += ",\"isBlocked\":";
     json += user->isBlocked ? "true" : "false";
     json += ",\"theme\":\"";
     json += themeJsonId(user->theme);
-    json += "\"}";
+    json += "\"";
+    appendConsolesJson(json, user);
+    json += "}";
 }
 
 void UserStore::appendUserExportJson(String &json, const UserRecord *user) const {
@@ -705,11 +989,15 @@ void UserStore::appendUserExportJson(String &json, const UserRecord *user) const
     json += user->removeDevices ? "true" : "false";
     json += ",\"editUsers\":";
     json += user->editUsers ? "true" : "false";
+    json += ",\"editConsoles\":";
+    json += user->editConsoles ? "true" : "false";
     json += ",\"isBlocked\":";
     json += user->isBlocked ? "true" : "false";
     json += ",\"theme\":\"";
     json += themeJsonId(user->theme);
-    json += "\",\"passwordSalt\":\"";
+    json += "\"";
+    appendConsolesJson(json, user);
+    json += ",\"passwordSalt\":\"";
     json += user->passwordSaltHex;
     json += "\",\"passwordHash\":\"";
     json += user->passwordHashHex;
@@ -718,11 +1006,13 @@ void UserStore::appendUserExportJson(String &json, const UserRecord *user) const
 
 String UserStore::listPublicJson() const {
     String json = "[";
-    for (int index = 0; index < storedCount; index++) {
-        if (index > 0) {
+    bool first = true;
+    for (const UserRecord *user = usersHead; user != nullptr; user = user->next) {
+        if (!first) {
             json += ",";
         }
-        appendUserPublicJson(json, &users[index]);
+        first = false;
+        appendUserPublicJson(json, user);
     }
     json += "]";
     return json;
@@ -730,11 +1020,13 @@ String UserStore::listPublicJson() const {
 
 String UserStore::listExportJson() const {
     String json = "[";
-    for (int index = 0; index < storedCount; index++) {
-        if (index > 0) {
+    bool first = true;
+    for (const UserRecord *user = usersHead; user != nullptr; user = user->next) {
+        if (!first) {
             json += ",";
         }
-        appendUserExportJson(json, &users[index]);
+        first = false;
+        appendUserExportJson(json, user);
     }
     json += "]";
     return json;
