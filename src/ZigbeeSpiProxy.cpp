@@ -3,6 +3,7 @@
 #include "JsonField.h"
 #include "Logger.h"
 
+#include <new>
 #include <stdio.h>
 #include <string.h>
 
@@ -30,12 +31,66 @@ const ZigbeeSpiProxy::CachedDevice *ZigbeeSpiProxy::findByIeee(const uint8_t iee
     if (ieee == nullptr) {
         return nullptr;
     }
-    for (int i = 0; i < kMaxDevices; i++) {
-        if (devices[i].occupied && memcmp(devices[i].ieee, ieee, 8) == 0) {
-            return &devices[i];
+    for (const CachedDevice *slot = deviceHead; slot != nullptr; slot = slot->next) {
+        if (memcmp(slot->ieee, ieee, 8) == 0) {
+            return slot;
         }
     }
     return nullptr;
+}
+
+uint8_t ZigbeeSpiProxy::channelCapacityForIeee(const uint8_t ieee[8]) const {
+    if (ieee == nullptr) {
+        return 1;
+    }
+    const DeviceTopicEntry *entry = registryMap != nullptr ? registryMap->findByIeee(ieee) : nullptr;
+    if (entry == nullptr || !entry->used) {
+        return 1;
+    }
+    if (entry->channelCount == DEVICE_CHANNEL_PARSE) {
+        return DEVICE_CHANNEL_COUNT_MAX;
+    }
+    if (entry->channelCount >= 2) {
+        return entry->channelCount;
+    }
+    return 1;
+}
+
+bool ZigbeeSpiProxy::ensureChannelCapacity(CachedDevice *slot, uint8_t neededCapacity) {
+    if (slot == nullptr || neededCapacity == 0) {
+        return false;
+    }
+    if (neededCapacity > DEVICE_CHANNEL_COUNT_MAX) {
+        neededCapacity = DEVICE_CHANNEL_COUNT_MAX;
+    }
+    if (slot->channels != nullptr && slot->channelCapacity >= neededCapacity) {
+        return true;
+    }
+    EndpointStatus *grown = new (std::nothrow) EndpointStatus[neededCapacity];
+    if (grown == nullptr) {
+        LOGGER.warning("Host channel cache alloc failed");
+        return slot->channels != nullptr;
+    }
+    memset(grown, 0, sizeof(EndpointStatus) * neededCapacity);
+    if (slot->channels != nullptr) {
+        const uint8_t copyCount =
+            slot->channelCapacity < neededCapacity ? slot->channelCapacity : neededCapacity;
+        memcpy(grown, slot->channels, sizeof(EndpointStatus) * copyCount);
+        delete[] slot->channels;
+    }
+    slot->channels = grown;
+    slot->channelCapacity = neededCapacity;
+    return true;
+}
+
+void ZigbeeSpiProxy::releaseSlot(CachedDevice *slot) {
+    if (slot == nullptr) {
+        return;
+    }
+    delete[] slot->channels;
+    slot->channels = nullptr;
+    slot->channelCapacity = 0;
+    delete slot;
 }
 
 void ZigbeeSpiProxy::noteReportTelemetry(CachedDevice *slot, uint8_t endpoint, const char *message) {
@@ -54,24 +109,31 @@ void ZigbeeSpiProxy::noteReportTelemetry(CachedDevice *slot, uint8_t endpoint, c
     if (!DeviceTopicMap::isUsableEndpoint(endpoint)) {
         return;
     }
-    CachedDevice::EndpointStatus *statusSlot = nullptr;
-    for (int i = 0; i < DEVICE_CHANNEL_COUNT_MAX; i++) {
-        if (slot->endpointStatus[i].used && slot->endpointStatus[i].endpoint == endpoint) {
-            statusSlot = &slot->endpointStatus[i];
+    uint8_t neededCapacity = channelCapacityForIeee(slot->ieee);
+    if (endpoint > neededCapacity && neededCapacity < DEVICE_CHANNEL_COUNT_MAX) {
+        neededCapacity = endpoint;
+    }
+    if (!ensureChannelCapacity(slot, neededCapacity)) {
+        return;
+    }
+    EndpointStatus *statusSlot = nullptr;
+    for (uint8_t i = 0; i < slot->channelCapacity; i++) {
+        if (slot->channels[i].endpoint == endpoint && slot->channels[i].state[0] != '\0') {
+            statusSlot = &slot->channels[i];
             break;
         }
     }
     if (statusSlot == nullptr) {
-        for (int i = 0; i < DEVICE_CHANNEL_COUNT_MAX; i++) {
-            if (!slot->endpointStatus[i].used) {
-                statusSlot = &slot->endpointStatus[i];
-                statusSlot->used = true;
+        for (uint8_t i = 0; i < slot->channelCapacity; i++) {
+            if (slot->channels[i].state[0] == '\0') {
+                statusSlot = &slot->channels[i];
                 statusSlot->endpoint = endpoint;
                 break;
             }
         }
     }
     if (statusSlot == nullptr) {
+        LOGGER.warning("Host channel cache full for device");
         return;
     }
     strncpy(statusSlot->state, message, sizeof(statusSlot->state) - 1);
@@ -81,29 +143,39 @@ void ZigbeeSpiProxy::noteReportTelemetry(CachedDevice *slot, uint8_t endpoint, c
 ZigbeeSpiProxy::CachedDevice *ZigbeeSpiProxy::allocSlot(const uint8_t ieee[8]) {
     CachedDevice *existing = findByIeee(ieee);
     if (existing != nullptr) {
-        existing->lastSeenMs = millis();
+        ensureChannelCapacity(existing, channelCapacityForIeee(ieee));
         return existing;
     }
-    for (int i = 0; i < kMaxDevices; i++) {
-        if (!devices[i].occupied) {
-            memset(&devices[i], 0, sizeof(devices[i]));
-            memcpy(devices[i].ieee, ieee, 8);
-            devices[i].occupied = true;
-            devices[i].lastSeenMs = millis();
-            return &devices[i];
-        }
+    CachedDevice *slot = new (std::nothrow) CachedDevice();
+    if (slot == nullptr) {
+        LOGGER.warning("Host device cache alloc failed");
+        return nullptr;
     }
-    int oldestIndex = 0;
-    for (int i = 1; i < kMaxDevices; i++) {
-        if ((long)(devices[i].lastSeenMs - devices[oldestIndex].lastSeenMs) < 0) {
-            oldestIndex = i;
-        }
+    memset(slot, 0, sizeof(CachedDevice));
+    memcpy(slot->ieee, ieee, 8);
+    slot->lastSeenMs = millis();
+    if (!ensureChannelCapacity(slot, channelCapacityForIeee(ieee))) {
+        releaseSlot(slot);
+        return nullptr;
     }
-    memset(&devices[oldestIndex], 0, sizeof(devices[oldestIndex]));
-    memcpy(devices[oldestIndex].ieee, ieee, 8);
-    devices[oldestIndex].occupied = true;
-    devices[oldestIndex].lastSeenMs = millis();
-    return &devices[oldestIndex];
+    slot->next = deviceHead;
+    deviceHead = slot;
+    return slot;
+}
+
+void ZigbeeSpiProxy::retainRegisteredTelemetry(DeviceTopicMap *topicMap) {
+    registryMap = topicMap;
+    CachedDevice **link = &deviceHead;
+    while (*link != nullptr) {
+        CachedDevice *slot = *link;
+        if (topicMap != nullptr && topicMap->findByIeee(slot->ieee) != nullptr) {
+            ensureChannelCapacity(slot, channelCapacityForIeee(slot->ieee));
+            link = &slot->next;
+            continue;
+        }
+        *link = slot->next;
+        releaseSlot(slot);
+    }
 }
 
 bool ZigbeeSpiProxy::permitJoin(uint8_t seconds) {
@@ -288,7 +360,7 @@ void ZigbeeSpiProxy::requestRegistryPull(DeviceTopicMap *topicMap) {
 }
 
 void ZigbeeSpiProxy::publishHostStores(DeviceTopicMap *topicMap, UserStore *store) {
-    registryMap = topicMap;
+    retainRegisteredTelemetry(topicMap);
     userMap = store;
     registryPullRequested = false;
     registryPullActive = false;
@@ -341,16 +413,37 @@ bool ZigbeeSpiProxy::enqueueDeviceUpsert(const DeviceTopicEntry *entry) {
     if (entry == nullptr || !entry->used) {
         return false;
     }
+    CachedDevice *slot = findByIeee(entry->ieee);
+    if (slot != nullptr) {
+        ensureChannelCapacity(slot, channelCapacityForIeee(entry->ieee));
+    }
     if (entry->transport == DeviceTransportWifi) {
         return true;
     }
     return queueDeviceChange(SPI_DEVICE_SYNC_ENTRY, entry);
 }
 
+void ZigbeeSpiProxy::forgetDeviceTelemetry(const uint8_t ieee[8]) {
+    if (ieee == nullptr) {
+        return;
+    }
+    CachedDevice **link = &deviceHead;
+    while (*link != nullptr) {
+        CachedDevice *slot = *link;
+        if (memcmp(slot->ieee, ieee, 8) == 0) {
+            *link = slot->next;
+            releaseSlot(slot);
+            return;
+        }
+        link = &slot->next;
+    }
+}
+
 bool ZigbeeSpiProxy::enqueueDeviceDelete(const uint8_t ieee[8]) {
     if (ieee == nullptr) {
         return false;
     }
+    forgetDeviceTelemetry(ieee);
     DeviceTopicEntry entry;
     memset(&entry, 0, sizeof(entry));
     memcpy(entry.ieee, ieee, 8);
@@ -772,7 +865,10 @@ void ZigbeeSpiProxy::onSpiEvent(const SpiFrame &frame) {
 }
 
 void ZigbeeSpiProxy::noteSeen(const uint8_t ieee[8]) {
-    CachedDevice *slot = allocSlot(ieee);
+    CachedDevice *slot = findByIeee(ieee);
+    if (slot == nullptr) {
+        slot = allocSlot(ieee);
+    }
     if (slot != nullptr) {
         slot->lastSeenMs = millis();
     }
@@ -782,38 +878,44 @@ bool ZigbeeSpiProxy::isOnline(const uint8_t ieee[8]) const {
     if (ieee == nullptr) {
         return false;
     }
-    for (int i = 0; i < kMaxDevices; i++) {
-        if (!devices[i].occupied || memcmp(devices[i].ieee, ieee, 8) != 0) {
-            continue;
-        }
-        return (long)(millis() - devices[i].lastSeenMs) < (long)kOnlineWindowMs;
+    const CachedDevice *slot = findByIeee(ieee);
+    if (slot == nullptr || slot->lastSeenMs == 0) {
+        return false;
     }
-    return false;
+    return (long)(millis() - slot->lastSeenMs) < (long)kOnlineWindowMs;
 }
 
 bool ZigbeeSpiProxy::lastRssiDbm(const uint8_t ieee[8], int8_t *rssiDbm) const {
     if (ieee == nullptr || rssiDbm == nullptr) {
         return false;
     }
-    for (int i = 0; i < kMaxDevices; i++) {
-        if (!devices[i].occupied || memcmp(devices[i].ieee, ieee, 8) != 0) {
-            continue;
-        }
-        if (!devices[i].hasRssi) {
-            return false;
-        }
-        *rssiDbm = devices[i].lastRssiDbm;
-        return true;
+    const CachedDevice *slot = findByIeee(ieee);
+    if (slot == nullptr || !slot->hasRssi) {
+        return false;
     }
-    return false;
+    *rssiDbm = slot->lastRssiDbm;
+    return true;
 }
 
 void ZigbeeSpiProxy::noteMqttState(const uint8_t ieee[8], uint8_t endpoint, const char *message) {
     CachedDevice *slot = allocSlot(ieee);
     if (slot == nullptr) {
+        LOGGER.warning("Host device cache alloc failed; WiFi state not stored");
         return;
     }
+    slot->lastSeenMs = millis();
     noteReportTelemetry(slot, endpoint, message);
+}
+
+void ZigbeeSpiProxy::noteMqttOffline(const uint8_t ieee[8]) {
+    CachedDevice *slot = findByIeee(ieee);
+    if (slot == nullptr) {
+        slot = allocSlot(ieee);
+    }
+    if (slot == nullptr) {
+        return;
+    }
+    slot->lastSeenMs = 0;
 }
 
 void ZigbeeSpiProxy::appendListTelemetry(const uint8_t ieee[8], String &json) const {
@@ -825,9 +927,12 @@ void ZigbeeSpiProxy::appendListTelemetry(const uint8_t ieee[8], String &json) co
         json += ",\"battery\":";
         json += String((unsigned)slot->batteryPercent);
     }
+    if (slot->channels == nullptr || slot->channelCapacity == 0) {
+        return;
+    }
     bool anyStatus = false;
-    for (int i = 0; i < DEVICE_CHANNEL_COUNT_MAX; i++) {
-        if (slot->endpointStatus[i].used) {
+    for (uint8_t i = 0; i < slot->channelCapacity; i++) {
+        if (slot->channels[i].state[0] != '\0') {
             anyStatus = true;
             break;
         }
@@ -836,37 +941,41 @@ void ZigbeeSpiProxy::appendListTelemetry(const uint8_t ieee[8], String &json) co
         return;
     }
     json += ",\"status\":[";
-    bool emitted[DEVICE_CHANNEL_COUNT_MAX];
-    memset(emitted, 0, sizeof(emitted));
     bool first = true;
-    for (int pass = 0; pass < DEVICE_CHANNEL_COUNT_MAX; pass++) {
+    uint8_t lastEndpoint = 0;
+    bool haveLastEndpoint = false;
+    for (;;) {
         int bestIndex = -1;
-        for (int i = 0; i < DEVICE_CHANNEL_COUNT_MAX; i++) {
-            if (!slot->endpointStatus[i].used || emitted[i]) {
+        for (uint8_t i = 0; i < slot->channelCapacity; i++) {
+            if (slot->channels[i].state[0] == '\0') {
+                continue;
+            }
+            if (haveLastEndpoint && slot->channels[i].endpoint <= lastEndpoint) {
                 continue;
             }
             if (bestIndex < 0
-                || slot->endpointStatus[i].endpoint < slot->endpointStatus[bestIndex].endpoint) {
+                || slot->channels[i].endpoint < slot->channels[bestIndex].endpoint) {
                 bestIndex = i;
             }
         }
         if (bestIndex < 0) {
             break;
         }
-        emitted[bestIndex] = true;
         if (!first) {
             json += ",";
         }
         first = false;
         json += "{\"ep\":";
-        json += String((unsigned)slot->endpointStatus[bestIndex].endpoint);
+        json += String((unsigned)slot->channels[bestIndex].endpoint);
         json += ",\"state\":\"";
         appendJsonEscaped(
             json,
-            slot->endpointStatus[bestIndex].state,
-            sizeof(slot->endpointStatus[bestIndex].state)
+            slot->channels[bestIndex].state,
+            sizeof(slot->channels[bestIndex].state)
         );
         json += "\"}";
+        lastEndpoint = slot->channels[bestIndex].endpoint;
+        haveLastEndpoint = true;
     }
     json += "]";
 }
@@ -893,11 +1002,11 @@ bool ZigbeeSpiProxy::pairingActive() const {
 
 int ZigbeeSpiProxy::onlineCount() const {
     int count = 0;
-    for (int i = 0; i < kMaxDevices; i++) {
-        if (!devices[i].occupied) {
+    for (const CachedDevice *slot = deviceHead; slot != nullptr; slot = slot->next) {
+        if (slot->lastSeenMs == 0) {
             continue;
         }
-        if ((long)(millis() - devices[i].lastSeenMs) < (long)kOnlineWindowMs) {
+        if ((long)(millis() - slot->lastSeenMs) < (long)kOnlineWindowMs) {
             count++;
         }
     }
@@ -907,11 +1016,7 @@ int ZigbeeSpiProxy::onlineCount() const {
 String ZigbeeSpiProxy::devicesJson(DeviceTopicMap *topicMap) {
     String json = "[";
     bool first = true;
-    for (int i = 0; i < kMaxDevices; i++) {
-        CachedDevice *device = &devices[i];
-        if (!device->occupied) {
-            continue;
-        }
+    for (CachedDevice *device = deviceHead; device != nullptr; device = device->next) {
         if (!first) {
             json += ",";
         }

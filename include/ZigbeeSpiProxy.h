@@ -45,6 +45,7 @@ public:
     String devicesFileJson() const;
     void pumpRegistrySync();
     bool enqueueDeviceUpsert(const DeviceTopicEntry *entry);
+    void forgetDeviceTelemetry(const uint8_t ieee[8]);
     bool enqueueDeviceDelete(const uint8_t ieee[8]);
     bool enqueueUserUpsert(const UserRecord *user);
     bool enqueueUserDelete(const char *userName);
@@ -54,7 +55,9 @@ public:
     bool lastRssiDbm(const uint8_t ieee[8], int8_t *rssiDbm) const;
     void appendListTelemetry(const uint8_t ieee[8], String &json) const;
     void noteMqttState(const uint8_t ieee[8], uint8_t endpoint, const char *message);
+    void retainRegisteredTelemetry(DeviceTopicMap *topicMap);
     void noteSeen(const uint8_t ieee[8]);
+    void noteMqttOffline(const uint8_t ieee[8]);
     void notePacketReceived();
     void notePacketSent();
     uint32_t packetsReceived() const;
@@ -67,28 +70,28 @@ public:
     bool commandsAllowed() const;
 
 private:
-    static constexpr int kMaxDevices = 16;
     static constexpr int kPendingChangeSlots = 1;
     static constexpr unsigned long kOnlineWindowMs = 15UL * 60UL * 1000UL;
 
+    struct EndpointStatus {
+        uint8_t endpoint;
+        char state[SPI_DEVICE_MESSAGE_MAX];
+    };
+
     struct CachedDevice {
+        CachedDevice *next;
         uint8_t ieee[8];
         uint16_t shortAddr;
         uint8_t endpoint;
+        uint8_t channelCapacity;
+        EndpointStatus *channels;
         char manufacturer[32];
         char model[32];
-        bool occupied;
         unsigned long lastSeenMs;
         int8_t lastRssiDbm;
         bool hasRssi;
         bool hasBattery;
         unsigned batteryPercent;
-        struct EndpointStatus {
-            bool used;
-            uint8_t endpoint;
-            char state[SPI_DEVICE_MESSAGE_MAX];
-        };
-        EndpointStatus endpointStatus[DEVICE_CHANNEL_COUNT_MAX];
     };
 
     struct PendingDeviceChange {
@@ -103,7 +106,7 @@ private:
         UserRecord user;
     };
 
-    CachedDevice devices[kMaxDevices]{};
+    CachedDevice *deviceHead = nullptr;
     LightStateFn lightStateHandler = nullptr;
     DeviceTopicMap *registryMap = nullptr;
     DeviceTopicEntry pullSlots[DEVICE_MAP_SLOTS]{};
@@ -150,7 +153,10 @@ private:
 
     CachedDevice *findByIeee(const uint8_t ieee[8]);
     const CachedDevice *findByIeee(const uint8_t ieee[8]) const;
+    uint8_t channelCapacityForIeee(const uint8_t ieee[8]) const;
+    bool ensureChannelCapacity(CachedDevice *slot, uint8_t neededCapacity);
     CachedDevice *allocSlot(const uint8_t ieee[8]);
+    void releaseSlot(CachedDevice *slot);
     void noteReportTelemetry(CachedDevice *slot, uint8_t endpoint, const char *message);
     bool enqueueRegistryFrame(uint8_t flags, const DeviceTopicEntry *entry);
     bool queueDeviceChange(uint8_t flags, const DeviceTopicEntry *entry);

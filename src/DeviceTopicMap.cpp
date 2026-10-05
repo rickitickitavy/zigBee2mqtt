@@ -479,6 +479,22 @@ DeviceTopicEntry *DeviceTopicMap::findByStateTopic(const char *topic, uint8_t *t
     return findByMappedTopic(slots, topic, topicEndpoint, true);
 }
 
+DeviceTopicEntry *DeviceTopicMap::findByAvailabilityTopic(const char *topic) {
+    if (slots == nullptr || topic == nullptr || topic[0] == '\0') {
+        return nullptr;
+    }
+    for (int i = 0; i < DEVICE_MAP_SLOTS; i++) {
+        DeviceTopicEntry *entry = &slots[i];
+        if (!entry->used || entry->availabilityTopic[0] == '\0') {
+            continue;
+        }
+        if (mappedTopicEquals(entry->availabilityTopic, topic)) {
+            return entry;
+        }
+    }
+    return nullptr;
+}
+
 DeviceTopicEntry *DeviceTopicMap::upsert(
     const uint8_t ieee[8],
     const char *friendlyName,

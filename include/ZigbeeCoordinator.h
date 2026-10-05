@@ -108,7 +108,11 @@ public:
     static constexpr int kMaxBoundDevices = 16;
     static constexpr int kMaxDescriptorProbes = 32;
     static constexpr int kMaxDestFlights = 16;
+    static constexpr int kMaxStatusReads = 80;
+    static constexpr int kMaxStatusIssued = 128;
+    static constexpr int kMaxStatusAnswers = 32;
     static constexpr unsigned long kCommandInFlightTimeoutMs = 1500UL;
+    static constexpr unsigned long kStatusReadGiveUpMs = 8000UL;
     static constexpr unsigned long kTypeProbeTimeoutMs = 2000UL;
 
 private:
@@ -156,6 +160,40 @@ private:
         ClusterCmd = 4
     };
 
+    struct StatusReadItem {
+        bool used = false;
+        bool inFlight = false;
+        uint8_t ieee[8]{};
+        uint8_t endpoint = 0;
+        uint16_t clusterId = 0;
+        uint16_t attributeId = 0;
+        unsigned long giveUpMs = 0;
+        unsigned long deadlineMs = 0;
+    };
+
+    struct StatusIssuedItem {
+        bool used = false;
+        uint8_t ieee[8]{};
+    };
+
+    struct StatusAnswerHold {
+        bool used = false;
+        bool fromStatusRead = false;
+        uint8_t ieee[8]{};
+        uint8_t endpoint = 0;
+        uint16_t clusterId = 0;
+        uint32_t value = 0;
+        unsigned long answeredMs = 0;
+        unsigned long untilMs = 0;
+    };
+
+    struct EndpointCommandStamp {
+        bool used = false;
+        uint8_t ieee[8]{};
+        uint8_t endpoint = 0;
+        unsigned long atMs = 0;
+    };
+
     struct DestCommandSlot {
         bool occupied = false;
         bool inFlight = false;
@@ -193,7 +231,10 @@ private:
     unsigned long pairingLedToggleMs = 0;
     bool pairingLedOn = false;
     bool started = false;
-    bool statusRefreshStarted = false;
+    StatusReadItem statusReads[kMaxStatusReads]{};
+    StatusIssuedItem statusIssued[kMaxStatusIssued]{};
+    StatusAnswerHold statusAnswers[kMaxStatusAnswers]{};
+    EndpointCommandStamp endpointCommands[kMaxStatusAnswers]{};
     DestCommandSlot destFlights[kMaxDestFlights]{};
     DescriptorProbe descriptorProbes[kMaxDescriptorProbes]{};
 
@@ -272,6 +313,30 @@ private:
     );
     void addKnownEndpoint(BoundZigbeeDevice *slot, uint8_t endpoint);
     void maybeStartStatusRefresh();
+    void queueOutstandingStatusReads();
+    void queueDeviceStatusReads(const DeviceTopicEntry *entry);
+    bool statusReadAlreadyIssued(const uint8_t ieee[8]) const;
+    void markStatusReadIssued(const uint8_t ieee[8]);
+    bool enqueueStatusRead(
+        const uint8_t ieee[8],
+        uint8_t endpoint,
+        uint16_t clusterId,
+        uint16_t attributeId
+    );
+    void pumpStatusReads();
+    bool trySendStatusRead(StatusReadItem *item);
+    bool ieeeHasInFlightStatusRead(const uint8_t ieee[8]) const;
+    void completeStatusRead(const uint8_t ieee[8], uint16_t clusterId, uint8_t endpoint);
+    bool ieeeHasStatusRead(const uint8_t ieee[8]) const;
+    void noteEndpointCommand(const uint8_t ieee[8], uint8_t endpoint);
+    bool endpointCommandAfter(const uint8_t ieee[8], uint8_t endpoint, unsigned long answeredMs) const;
+    bool suppressStatusReplacement(
+        const uint8_t ieee[8],
+        uint8_t endpoint,
+        uint16_t clusterId,
+        uint32_t value
+    );
+    uint8_t statusReportEndpoint(const uint8_t ieee[8], uint16_t clusterId, uint8_t srcEndpoint) const;
     void enqueueRegisteredStatusReads();
     void enqueueTypeStatusRead(const DeviceTopicEntry *entry, uint8_t endpoint);
     BoundZigbeeDevice::CoveringStatus *coveringStatusFor(BoundZigbeeDevice *slot, uint8_t endpoint);

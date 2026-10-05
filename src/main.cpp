@@ -323,6 +323,9 @@ static void hostCollectZigbeeStatuses() {
         if (entry == nullptr || !entry->used || entry->transport == DeviceTransportWifi) {
             continue;
         }
+        if (entry->zigbeeType == ZigbeeDeviceTypeOnOff) {
+            continue;
+        }
         uint8_t endpoints[DEVICE_CHANNEL_COUNT_MAX];
         uint8_t endpointCount = 0;
         if (entry->channelCount == DEVICE_CHANNEL_PARSE) {
@@ -340,13 +343,9 @@ static void hostCollectZigbeeStatuses() {
         for (uint8_t i = 0; i < endpointCount; i++) {
             const uint8_t endpoint = endpoints[i];
             if (entry->zigbeeType == ZigbeeDeviceTypeOnOff) {
-                ZIGBEE_SPI_PROXY.readAttribute(
-                    entry->ieee,
-                    endpoint,
-                    kZigbeeClusterOnOff,
-                    0x0000
-                );
-            } else if (entry->zigbeeType == ZigbeeDeviceTypeIasZone) {
+                continue;
+            }
+            if (entry->zigbeeType == ZigbeeDeviceTypeIasZone) {
                 ZIGBEE_SPI_PROXY.readAttribute(
                     entry->ieee,
                     endpoint,
@@ -475,6 +474,39 @@ static void applyWifiMqttState(const char *topic, const char *payload) {
     ZIGBEE_SPI_PROXY.notePacketReceived();
 }
 
+static bool wifiAvailabilityIsOffline(const String &body) {
+    String lower = body;
+    lower.toLowerCase();
+    return lower == "offline" || lower == "off" || lower == "0" || lower == "false" || lower == "unavailable";
+}
+
+static bool wifiAvailabilityIsOnline(const String &body) {
+    String lower = body;
+    lower.toLowerCase();
+    return lower == "online" || lower == "on" || lower == "1" || lower == "true" || lower == "available";
+}
+
+static void applyWifiMqttAvailability(const char *topic, const char *payload) {
+    if (topicMap == nullptr || topic == nullptr) {
+        return;
+    }
+    DeviceTopicEntry *entry = topicMap->findByAvailabilityTopic(topic);
+    if (entry == nullptr || entry->transport != DeviceTransportWifi) {
+        return;
+    }
+    const String body = trimmedMqttText(payload);
+    if (wifiAvailabilityIsOffline(body)) {
+        LOGGER.info("WiFi availability " + String(topic) + " = " + body);
+        ZIGBEE_SPI_PROXY.noteMqttOffline(entry->ieee);
+        return;
+    }
+    if (wifiAvailabilityIsOnline(body) || body.length() > 0) {
+        LOGGER.info("WiFi availability " + String(topic) + " = " + body);
+        ZIGBEE_SPI_PROXY.noteSeen(entry->ieee);
+        ZIGBEE_SPI_PROXY.notePacketReceived();
+    }
+}
+
 static void applyMeasurementMqttState(const char *topic, const char *payload) {
     if (topicMap == nullptr || topic == nullptr) {
         return;
@@ -507,6 +539,7 @@ static void onMqttLogicalMessage(const char *topic, const char *payload) {
     }
 
     applyWifiMqttState(topic, payload);
+    applyWifiMqttAvailability(topic, payload);
     applyMeasurementMqttState(topic, payload);
 
     if (strcmp(topic, mqttClient->permitJoinTopic().c_str()) == 0) {
@@ -713,9 +746,6 @@ static bool onDeviceUpserted(const DeviceTopicEntry *entry) {
         mqttClient->subscribeDeviceCommands();
     }
     persistHostDeviceList();
-    if (entry != nullptr && entry->transport == DeviceTransportWifi) {
-        return true;
-    }
     return ZIGBEE_SPI_PROXY.enqueueDeviceUpsert(entry);
 }
 
@@ -725,6 +755,7 @@ static bool onDeviceRemoved(const uint8_t ieee[8], uint8_t transport) {
     }
     persistHostDeviceList();
     if (transport == DeviceTransportWifi) {
+        ZIGBEE_SPI_PROXY.forgetDeviceTelemetry(ieee);
         return true;
     }
     return ZIGBEE_SPI_PROXY.enqueueDeviceDelete(ieee);

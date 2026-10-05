@@ -488,7 +488,7 @@ The battery cell SHALL show an integer percentage when the registered list JSON 
 - **THEN** that row’s battery cell shows `N/A`
 
 ### Requirement: Devices table shows type-specific status
-The status cell SHALL show the last known state for the device type. For `onOff`, each channel SHALL be a small circle: dark for OFF and light for ON. For other types, each channel SHALL show the last report text for that endpoint. When `channels` is `1`, the cell SHALL show one indicator. When `channels` is `0` or `2` through `16`, the cell SHALL show one indicator per channel, bound to inbound reports by the packet `ep`. A channel with no report yet SHALL show an empty or unknown indicator, not a guessed ON.
+The status cell SHALL show the last known state for the device type. For `onOff`, each channel SHALL be a small circle: dark for OFF and light for ON. For other types, each channel SHALL show the last report text for that endpoint. When `channels` is `1`, the cell SHALL show one indicator. When `channels` is `0` or `2` through `16`, the cell SHALL show one indicator per channel, bound to inbound reports by the packet `ep`. A channel with no report yet SHALL show an empty or unknown indicator, not a guessed ON. After a boot status read, each `onOff` channel SHALL show the ON or OFF reported for that same endpoint.
 
 #### Scenario: Single-channel on/off on
 - **WHEN** a registered `onOff` device has `channels` `1` and last state ON
@@ -501,6 +501,10 @@ The status cell SHALL show the last known state for the device type. For `onOff`
 #### Scenario: IAS zone text
 - **WHEN** a registered `iasZone` device last reported `LEAK` on its status endpoint
 - **THEN** that row’s status cell shows `LEAK`
+
+#### Scenario: Four-channel relay after boot
+- **WHEN** a registered `onOff` device has `channels` `4` and the boot read reported ON on endpoints 1 and 3 and OFF on endpoints 2 and 4
+- **THEN** that row’s status cell shows light, dark, light, dark circles in channel order
 
 ### Requirement: Manual command terminal
 Beneath the registered-device table the console SHALL provide Manual command. The button SHALL be enabled only when a registered row is selected. Activating it SHALL open a terminal dialog for that IEEE. The dialog SHALL include a read-only answers pane and, below it, a command input. Pressing Enter in the input SHALL send the typed body through the same host command path as that device’s MQTT `set` topic and SHALL NOT require a broker. When the selected device has more than one channel (`channels` `0` or `2`–`16`), the dialog SHALL include a channel dropdown; the chosen channel SHALL select the destination endpoint the same way MQTT suffix or `ch-<ep>##` mapping would. Escape SHALL dismiss the dialog without sending. New inbound messages for that IEEE SHALL append to the answers pane while the dialog is open.
