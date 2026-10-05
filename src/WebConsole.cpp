@@ -48,6 +48,7 @@ void WebConsole::begin() {
         [this](AsyncWebServerRequest *request) { handleAuthLogoutPost(request); }
     );
     server.on("/api/auth/me", HTTP_GET, [this](AsyncWebServerRequest *request) { handleAuthMeGet(request); });
+    server.on("/api/auth/touch", HTTP_POST, [this](AsyncWebServerRequest *request) { handleAuthTouchPost(request); });
     server.on("/api/users", HTTP_GET, [this](AsyncWebServerRequest *request) { handleUsersGet(request); });
     server.on(
         "/api/users",
@@ -283,15 +284,15 @@ void WebConsole::handleRoot(AsyncWebServerRequest *request) {
     request->send(response);
 }
 
-const UserRecord *WebConsole::authenticatedUser(AsyncWebServerRequest *request) {
+const UserRecord *WebConsole::authenticatedUser(AsyncWebServerRequest *request, bool touchActivity) {
     if (userStore == nullptr || request == nullptr || !request->hasHeader("Cookie")) {
         return nullptr;
     }
-    return userStore->sessionUser(request->header("Cookie").c_str(), millis(), nullptr, 0);
+    return userStore->sessionUser(request->header("Cookie").c_str(), millis(), nullptr, 0, touchActivity);
 }
 
-bool WebConsole::requireUser(AsyncWebServerRequest *request, const UserRecord **userOut) {
-    const UserRecord *user = authenticatedUser(request);
+bool WebConsole::requireUser(AsyncWebServerRequest *request, const UserRecord **userOut, bool touchActivity) {
+    const UserRecord *user = authenticatedUser(request, touchActivity);
     if (user == nullptr) {
         request->send(401, "text/plain", "Unauthorized");
         return false;
@@ -302,9 +303,9 @@ bool WebConsole::requireUser(AsyncWebServerRequest *request, const UserRecord **
     return true;
 }
 
-bool WebConsole::requireAdmin(AsyncWebServerRequest *request, const UserRecord **userOut) {
+bool WebConsole::requireAdmin(AsyncWebServerRequest *request, const UserRecord **userOut, bool touchActivity) {
     const UserRecord *user = nullptr;
-    if (!requireUser(request, &user)) {
+    if (!requireUser(request, &user, touchActivity)) {
         return false;
     }
     if (!user->isAdmin) {
@@ -317,9 +318,9 @@ bool WebConsole::requireAdmin(AsyncWebServerRequest *request, const UserRecord *
     return true;
 }
 
-bool WebConsole::requireEditUsers(AsyncWebServerRequest *request, const UserRecord **userOut) {
+bool WebConsole::requireEditUsers(AsyncWebServerRequest *request, const UserRecord **userOut, bool touchActivity) {
     const UserRecord *user = nullptr;
-    if (!requireUser(request, &user)) {
+    if (!requireUser(request, &user, touchActivity)) {
         return false;
     }
     if (!user->isAdmin && !user->editUsers) {
@@ -452,7 +453,7 @@ void WebConsole::handleAuthLogoutPost(AsyncWebServerRequest *request) {
 
 void WebConsole::handleAuthMeGet(AsyncWebServerRequest *request) {
     const UserRecord *user = nullptr;
-    if (!requireUser(request, &user)) {
+    if (!requireUser(request, &user, false)) {
         return;
     }
     String json;
@@ -460,6 +461,13 @@ void WebConsole::handleAuthMeGet(AsyncWebServerRequest *request) {
     AsyncWebServerResponse *response = request->beginResponse(200, "application/json", json);
     response->addHeader("Cache-Control", "no-store");
     request->send(response);
+}
+
+void WebConsole::handleAuthTouchPost(AsyncWebServerRequest *request) {
+    if (!requireUser(request, nullptr, true)) {
+        return;
+    }
+    request->send(200, "text/plain", "Touched");
 }
 
 void WebConsole::handleUsersGet(AsyncWebServerRequest *request) {
@@ -1117,7 +1125,7 @@ void WebConsole::setDeviceServices(
 }
 
 void WebConsole::handleDevicesGet(AsyncWebServerRequest *request) {
-    if (!requireUser(request, nullptr)) {
+    if (!requireUser(request, nullptr, false)) {
         return;
     }
     DeviceTopicMap *deviceMap = settingsManager->deviceMap();
@@ -1353,7 +1361,7 @@ void WebConsole::handleDevicesCommandPost(AsyncWebServerRequest *request) {
 
 void WebConsole::handleDevicesFoundGet(AsyncWebServerRequest *request) {
     const UserRecord *user = nullptr;
-    if (!requireUser(request, &user)) {
+    if (!requireUser(request, &user, false)) {
         return;
     }
     if (!userCanAddDevices(user)) {
@@ -1399,7 +1407,7 @@ void WebConsole::handleDevicesStoreGet(AsyncWebServerRequest *request) {
 }
 
 void WebConsole::handleGatewayStatusGet(AsyncWebServerRequest *request) {
-    if (!requireUser(request, nullptr)) {
+    if (!requireUser(request, nullptr, false)) {
         return;
     }
     String json = gatewayStatusJson != nullptr ? gatewayStatusJson() : String("{}");
@@ -1424,7 +1432,7 @@ void WebConsole::handleDevicesSearchStopPost(AsyncWebServerRequest *request) {
 }
 
 void WebConsole::handleLogGet(AsyncWebServerRequest *request) {
-    if (!requireUser(request, nullptr)) {
+    if (!requireUser(request, nullptr, false)) {
         return;
     }
     size_t start = 0;
@@ -1453,7 +1461,7 @@ void WebConsole::handleVersionGet(AsyncWebServerRequest *request) {
 }
 
 void WebConsole::handleFirmwareUpdateStatusGet(AsyncWebServerRequest *request) {
-    if (!requireAdmin(request, nullptr)) {
+    if (!requireAdmin(request, nullptr, false)) {
         return;
     }
     AsyncWebServerResponse *response = request->beginResponse(200, "application/json", FIRMWARE_OTA.statusJson());
