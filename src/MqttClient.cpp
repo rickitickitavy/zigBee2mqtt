@@ -175,6 +175,9 @@ void MqttClient::subscribeDeviceCommands() {
                 keepOrSubscribe(String(entry->stateTopic) + "/+", keepSubscription);
             }
         }
+        if (entry->transport == DeviceTransportWifi && entry->availabilityTopic[0] != '\0') {
+            keepOrSubscribe(String(entry->availabilityTopic), keepSubscription);
+        }
     }
 
     for (int i = 0; i < kMaxTopicSubscriptions; i++) {

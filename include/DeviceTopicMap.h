@@ -15,6 +15,7 @@ public:
     DeviceTopicEntry *findByCommandTopic(const char *topic, uint8_t *topicEndpoint);
     DeviceTopicEntry *findByStateTopic(const char *topic);
     DeviceTopicEntry *findByStateTopic(const char *topic, uint8_t *topicEndpoint);
+    DeviceTopicEntry *findByAvailabilityTopic(const char *topic);
     DeviceTopicEntry *upsert(
         const uint8_t ieee[8],
         const char *friendlyName,

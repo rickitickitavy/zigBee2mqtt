@@ -2018,10 +2018,17 @@
 
         function appendOnOffCircle(cell, state) {
             var circle = document.createElement("span");
-            var isOn = String(state).toUpperCase() === "ON";
-            circle.className = isOn ? "device-channel-dot is-on" : "device-channel-dot";
-            if (state) {
-                circle.title = state;
+            var text = state ? String(state) : "";
+            var upper = text.toUpperCase();
+            var className = "device-channel-dot";
+            if (upper === "ON") {
+                className += " is-on";
+            } else if (upper !== "OFF") {
+                className += " is-unknown";
+            }
+            circle.className = className;
+            if (text) {
+                circle.title = text;
             }
             cell.appendChild(circle);
         }
