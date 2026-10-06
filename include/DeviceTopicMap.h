@@ -5,9 +5,41 @@
 #include <Arduino.h>
 #include <stddef.h>
 
+struct DeviceTopicEntry {
+    uint8_t ieee[8];
+    char *friendlyName;
+    char *stateTopic;
+    char *commandTopic;
+    char *availabilityTopic;
+    uint8_t channelCount;
+    uint8_t fullControl;
+    uint8_t zigbeeType;
+    uint8_t transport;
+    uint8_t used;
+    DeviceTopicEntry *next;
+};
+
+inline const char *deviceTopicCStr(const char *value) {
+    return value != nullptr ? value : "";
+}
+
+inline bool deviceTopicEmpty(const char *value) {
+    return value == nullptr || value[0] == '\0';
+}
+
 class DeviceTopicMap {
 public:
-    explicit DeviceTopicMap(DeviceTopicEntry *slots);
+    DeviceTopicMap();
+    ~DeviceTopicMap();
+
+    DeviceTopicEntry *first();
+    const DeviceTopicEntry *first() const;
+    static DeviceTopicEntry *nextEntry(const DeviceTopicEntry *entry);
+
+    static char *duplicateBoundedString(const char *source, size_t maxLen);
+    static void clearEntryStrings(DeviceTopicEntry *entry);
+    static void freeEntry(DeviceTopicEntry *entry);
+    static bool cloneEntry(DeviceTopicEntry *destination, const DeviceTopicEntry *source);
 
     DeviceTopicEntry *findByIeee(const uint8_t ieee[8]);
     const DeviceTopicEntry *findByIeee(const uint8_t ieee[8]) const;
@@ -91,5 +123,14 @@ public:
     );
 
 private:
-    DeviceTopicEntry *slots;
+    DeviceTopicEntry *head;
+    DeviceTopicEntry *allocateEntry();
+    void unlinkEntry(DeviceTopicEntry *entry);
+    void assignEntryStrings(
+        DeviceTopicEntry *entry,
+        const char *friendlyName,
+        const char *stateTopic,
+        const char *commandTopic,
+        const char *availabilityTopic
+    );
 };

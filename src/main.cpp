@@ -15,6 +15,8 @@
 #include "MqttBroker.h"
 #include "ZigbeeCoordinator.h"
 #include "WebConsole.h"
+#include "UserStore.h"
+#include "ConsoleStore.h"
 #include "JsonField.h"
 #include "InterChipHost.h"
 #include "InterChipSlave.h"
@@ -48,6 +50,7 @@ static MqttBroker *mqttBroker = nullptr;
 static ZigbeeCoordinator *zigbeeCoordinator = nullptr;
 static WebConsole *webConsole = nullptr;
 static UserStore *userStore = nullptr;
+static ConsoleStore *consoleStore = nullptr;
 static FoundDeviceList *foundDevices = nullptr;
 static DeviceStore *deviceStore = nullptr;
 static bool ntpStarted = false;
@@ -79,6 +82,9 @@ static void pumpHostDeferredStoreWork() {
     }
     if (userStore != nullptr) {
         userStore->persistIfDue();
+    }
+    if (consoleStore != nullptr) {
+        consoleStore->persistIfDue();
     }
 }
 static void applyRegisteredDeviceCommand(
@@ -167,7 +173,7 @@ static bool enqueueWifiDeviceCommand(const DeviceTopicEntry *entry, const char *
     if (entry == nullptr || action == nullptr || action[0] == '\0') {
         return false;
     }
-    if (entry->commandTopic[0] == '\0') {
+    if (deviceTopicEmpty(entry->commandTopic)) {
         LOGGER.warning("WiFi command topic is empty");
         return false;
     }
@@ -412,7 +418,7 @@ static DeviceTopicEntry *findWifiStateEntry(const char *topic, uint8_t *topicEnd
     while (slotIndex >= 0) {
         DeviceTopicEntry *entry = topicMap->slotAt(slotIndex);
         slotIndex = topicMap->nextUsedIndex(slotIndex + 1);
-        if (entry == nullptr || entry->transport != DeviceTransportWifi || entry->stateTopic[0] == '\0') {
+        if (entry == nullptr || entry->transport != DeviceTransportWifi || deviceTopicEmpty(entry->stateTopic)) {
             continue;
         }
         const size_t mappedLength = strlen(entry->stateTopic);
@@ -592,7 +598,7 @@ static void onLightState(const char *message, const uint8_t ieee[8], uint8_t end
         LOGGER.info("Unmapped device state; assign topics via map or MQTT bridge/config/device");
         return;
     }
-    if (entry->stateTopic[0] == '\0') {
+    if (deviceTopicEmpty(entry->stateTopic)) {
         LOGGER.info("Device has no state topic configured");
         return;
     }
@@ -846,7 +852,8 @@ static void runDeviceRegistryFixtures() {
         || classifyZigbeeDeviceTypeFromInClusters(iasWithOnOffClusters, 2) != ZigbeeDeviceTypeIasZone
         || classifyZigbeeDeviceTypeFromInClusters(leakDetectorClusters, 2) != ZigbeeDeviceTypeIasZone
         || classifyZigbeeDeviceTypeFromInClusters(batteryOnlyClusters, 1) != ZigbeeDeviceTypeUnknown
-        || classifyZigbeeDeviceTypeFromInClusters(tempOnlyClusters, 1) != ZigbeeDeviceTypeUnknown
+        || classifyZigbeeDeviceTypeFromInClusters(tempOnlyClusters, 1)
+            != zigbeeDeviceTypeFromCluster(kZigbeeClusterTemperature)
         || classifyZigbeeDeviceTypeFromInClusters(coveringClusters, 1) != ZigbeeDeviceTypeWindowCovering
         || classifyZigbeeDeviceTypeFromClusterList(coveringOutClusters, 0, 1) != ZigbeeDeviceTypeWindowCovering
         || zigbeeDeviceTypeFromCluster(kZigbeeClusterWindowCovering) != ZigbeeDeviceTypeWindowCovering
@@ -983,7 +990,7 @@ static void runDeviceRegistryFixtures() {
         } else {
             LOGGER.info("Registered unknown type fill fixture ok");
         }
-        memset(coveringEntry, 0, sizeof(DeviceTopicEntry));
+        topicMap->removeByIeee(coveringIeee);
     }
 
     uint8_t persistIeee[8];
@@ -1018,35 +1025,38 @@ static void runDeviceRegistryFixtures() {
         } else {
             LOGGER.info("Missing type JSON fixture ok");
         }
-        memset(legacyEntry, 0, sizeof(DeviceTopicEntry));
+        topicMap->removeByIeee(persistIeee);
     }
 
-    DeviceTopicEntry syncSource;
-    memset(&syncSource, 0, sizeof(syncSource));
-    syncSource.used = 1;
-    syncSource.ieee[0] = 0xAB;
-    strncpy(syncSource.friendlyName, "sync-type", sizeof(syncSource.friendlyName) - 1);
-    syncSource.channelCount = DEVICE_CHANNEL_COUNT_DEFAULT;
-    syncSource.zigbeeType = ZigbeeDeviceTypeIasZone;
+    uint8_t syncIeee[8] = {0xAB, 0, 0, 0, 0, 0, 0, 0};
+    DeviceTopicEntry *syncSource = topicMap->upsert(syncIeee, "sync-type", "", "", "");
+    if (syncSource != nullptr) {
+        syncSource->zigbeeType = ZigbeeDeviceTypeIasZone;
+    }
     uint8_t syncPacked[SPI_DEVICE_SYNC_ENTRY_LEN];
     const size_t syncPackedLen = DeviceTopicMap::packSyncPayload(
         syncPacked,
         sizeof(syncPacked),
         SPI_DEVICE_SYNC_ENTRY,
-        &syncSource
+        syncSource
     );
-    DeviceTopicEntry syncUnpacked;
+    DeviceTopicEntry syncUnpacked{};
     uint8_t syncFlags = 0;
-    if (syncPackedLen != SPI_DEVICE_SYNC_ENTRY_LEN
+    if (syncSource == nullptr
+        || syncPackedLen != SPI_DEVICE_SYNC_ENTRY_LEN
         || !DeviceTopicMap::unpackSyncPayload(syncPacked, (uint16_t)syncPackedLen, &syncFlags, &syncUnpacked)
         || syncUnpacked.zigbeeType != ZigbeeDeviceTypeIasZone) {
         LOGGER.error("Device type SPI sync fixture failed");
     } else {
         LOGGER.info("Device type SPI sync fixture ok");
     }
+    DeviceTopicMap::clearEntryStrings(&syncUnpacked);
+    if (syncSource != nullptr) {
+        topicMap->removeByIeee(syncSource->ieee);
+    }
 
     if (createdProbe && probe != nullptr) {
-        memset(probe, 0, sizeof(DeviceTopicEntry));
+        topicMap->removeByIeee(probe->ieee);
     }
     foundDevices->clear();
     topicMap->replaceFromJson(savedDeviceList);
@@ -1295,15 +1305,16 @@ static void setupHost() {
         } else {
             LOGGER.info("Full-control parse fixture ok");
         }
-        DeviceTopicEntry suffixEntry;
-        memset(&suffixEntry, 0, sizeof(suffixEntry));
-        strncpy(suffixEntry.stateTopic, "z2m/switch/state", sizeof(suffixEntry.stateTopic) - 1);
+        DeviceTopicEntry suffixEntry{};
+        suffixEntry.stateTopic =
+            DeviceTopicMap::duplicateBoundedString("z2m/switch/state", SPI_DEVICE_SYNC_TOPIC_LEN);
         suffixEntry.channelCount = 2;
         if (DeviceTopicMap::statePublishTopic(&suffixEntry, 1) != "z2m/switch/state/1") {
             LOGGER.error("Topic suffix fixture failed");
         } else {
             LOGGER.info("Topic suffix fixture ok");
         }
+        DeviceTopicMap::clearEntryStrings(&suffixEntry);
         uint8_t packedWrite[SPI_ZCL_WRITE_ATTR_LEN];
         const uint8_t fixtureIeee[8] = {1, 2, 3, 4, 5, 6, 7, 8};
         if (!spiPackZclWriteAttr(
@@ -1447,12 +1458,14 @@ static void setupHost() {
     userStore = new UserStore();
     userStore->begin(true);
     userStore->setChangedHandler(onHostUserChanged);
+    consoleStore = new ConsoleStore();
+    consoleStore->begin(true);
     topicMap = settingsManager->deviceMap();
     foundDevices = new FoundDeviceList();
     wifiController = new WiFiController(settingsManager, forceAp);
     mqttClient = new MqttClient(settingsManager, topicMap);
     mqttBroker = new MqttBroker(settingsManager);
-    webConsole = new WebConsole(settingsManager, userStore);
+    webConsole = new WebConsole(settingsManager, userStore, consoleStore);
     webConsole->setDeviceServices(
         foundDevices,
         startDeviceSearch,

@@ -9,8 +9,7 @@
 #include <string.h>
 #include <WiFi.h>
 
-SettingsManager::SettingsManager() : topicMap(deviceSlots) {
-    memset(deviceSlots, 0, sizeof(deviceSlots));
+SettingsManager::SettingsManager() {
     EEPROM.begin(4096);
     LOGGER.info("Load settings...");
 
@@ -73,7 +72,7 @@ SettingsManager::SettingsManager() : topicMap(deviceSlots) {
 
 void SettingsManager::applyDefaults() {
     memset(&settings, 0, sizeof(settings));
-    memset(deviceSlots, 0, sizeof(deviceSlots));
+    topicMap.clearAll();
     settings.initMarker[0] = GLOBAL_SETTINGS_MARKER_0;
     settings.initMarker[1] = GLOBAL_SETTINGS_MARKER_1;
     settings.initMarker[2] = GLOBAL_SETTINGS_MARKER_2;
@@ -108,7 +107,7 @@ void SettingsManager::upgradeLegacyMainFromEeprom() {
     settings.mqtt.bornIntervalMin = DEFAULT_MQTT_BORN_INTERVAL_MIN;
     memset(settings.alignPad, 0, sizeof(settings.alignPad));
     memset(settings.reserved, 0, sizeof(settings.reserved));
-    memset(deviceSlots, 0, sizeof(deviceSlots));
+    topicMap.clearAll();
     LOGGER.info("Legacy EEPROM main upgraded; devices stay on the slave");
 }
 
@@ -258,7 +257,7 @@ void SettingsManager::parseDevicesJson(const String &json) {
 }
 
 void SettingsManager::loadDeviceFile() {
-    memset(deviceSlots, 0, sizeof(deviceSlots));
+    topicMap.clearAll();
     if (!topicMap.loadFromFile(DEVICES_STORE_PATH)) {
         LOGGER.info("Host device list file missing; waiting for slave pull");
         return;
@@ -341,10 +340,6 @@ GlobalSettings *SettingsManager::getSettings() {
 
 DeviceTopicMap *SettingsManager::deviceMap() {
     return &topicMap;
-}
-
-DeviceTopicEntry *SettingsManager::devices() {
-    return deviceSlots;
 }
 
 void SettingsManager::logSettings() {

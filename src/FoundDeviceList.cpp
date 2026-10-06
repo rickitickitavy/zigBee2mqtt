@@ -2,30 +2,83 @@
 #include "JsonField.h"
 #include "ZigbeeDeviceType.h"
 
+#include <stdlib.h>
 #include <string.h>
 
+FoundDeviceList::FoundDeviceList() : foundHead(nullptr), foundCount(0) {}
+
+FoundDeviceList::~FoundDeviceList() {
+    clear();
+}
+
+void FoundDeviceList::freeFoundDevice(FoundDevice *device) {
+    if (device == nullptr) {
+        return;
+    }
+    free(device->manufacturer);
+    free(device->model);
+    free(device);
+}
+
+FoundDeviceList::FoundDevice *FoundDeviceList::allocateFoundDevice() {
+    if (foundCount >= kMaxFound) {
+        return nullptr;
+    }
+    FoundDevice *device = (FoundDevice *)calloc(1, sizeof(FoundDevice));
+    if (device == nullptr) {
+        return nullptr;
+    }
+    device->next = foundHead;
+    foundHead = device;
+    foundCount++;
+    return device;
+}
+
+FoundDeviceList::FoundDevice *FoundDeviceList::findByIeee(const uint8_t ieee[8]) {
+    return const_cast<FoundDevice *>(static_cast<const FoundDeviceList *>(this)->findByIeee(ieee));
+}
+
+const FoundDeviceList::FoundDevice *FoundDeviceList::findByIeee(const uint8_t ieee[8]) const {
+    if (ieee == nullptr) {
+        return nullptr;
+    }
+    for (const FoundDevice *device = foundHead; device != nullptr; device = device->next) {
+        if (device->used && DeviceTopicMap::ieeeEqual(device->ieee, ieee)) {
+            return device;
+        }
+    }
+    return nullptr;
+}
+
 void FoundDeviceList::clear() {
-    memset(found, 0, sizeof(found));
+    while (foundHead != nullptr) {
+        FoundDevice *next = foundHead->next;
+        freeFoundDevice(foundHead);
+        foundHead = next;
+    }
+    foundCount = 0;
 }
 
 void FoundDeviceList::removeIeee(const uint8_t ieee[8]) {
-    for (int i = 0; i < kMaxFound; i++) {
-        if (found[i].used && DeviceTopicMap::ieeeEqual(found[i].ieee, ieee)) {
-            found[i].used = false;
+    FoundDevice **link = &foundHead;
+    while (*link != nullptr) {
+        FoundDevice *device = *link;
+        if (device->used && DeviceTopicMap::ieeeEqual(device->ieee, ieee)) {
+            *link = device->next;
+            freeFoundDevice(device);
+            foundCount--;
+            return;
         }
+        link = &device->next;
     }
 }
 
 uint8_t FoundDeviceList::zigbeeTypeForIeee(const uint8_t ieee[8]) const {
-    if (ieee == nullptr) {
+    const FoundDevice *device = findByIeee(ieee);
+    if (device == nullptr) {
         return ZigbeeDeviceTypeUnknown;
     }
-    for (int i = 0; i < kMaxFound; i++) {
-        if (found[i].used && DeviceTopicMap::ieeeEqual(found[i].ieee, ieee)) {
-            return found[i].zigbeeType;
-        }
-    }
-    return ZigbeeDeviceTypeUnknown;
+    return device->zigbeeType;
 }
 
 bool FoundDeviceList::noteJoin(const SpiFrame &frame, DeviceTopicMap *registered) {
@@ -89,39 +142,38 @@ void FoundDeviceList::noteIdentity(
     if (registered->findByIeee(ieee) != nullptr) {
         return;
     }
-    FoundDevice *slot = nullptr;
-    for (int i = 0; i < kMaxFound; i++) {
-        if (found[i].used && DeviceTopicMap::ieeeEqual(found[i].ieee, ieee)) {
-            slot = &found[i];
-            break;
-        }
-    }
+    FoundDevice *slot = findByIeee(ieee);
     uint8_t preservedType = ZigbeeDeviceTypeUnknown;
     if (slot != nullptr) {
         preservedType = slot->zigbeeType;
     }
     if (slot == nullptr) {
-        for (int i = 0; i < kMaxFound; i++) {
-            if (!found[i].used) {
-                slot = &found[i];
-                break;
+        slot = allocateFoundDevice();
+        if (slot == nullptr && foundHead != nullptr) {
+            FoundDevice *oldest = foundHead;
+            while (oldest->next != nullptr) {
+                oldest = oldest->next;
             }
+            FoundDevice **link = &foundHead;
+            while (*link != oldest) {
+                link = &(*link)->next;
+            }
+            *link = nullptr;
+            freeFoundDevice(oldest);
+            foundCount--;
+            slot = allocateFoundDevice();
         }
     }
     if (slot == nullptr) {
-        slot = &found[0];
-        preservedType = ZigbeeDeviceTypeUnknown;
+        return;
     }
-    memset(slot, 0, sizeof(*slot));
+    free(slot->manufacturer);
+    free(slot->model);
+    slot->manufacturer = DeviceTopicMap::duplicateBoundedString(manufacturer, 32);
+    slot->model = DeviceTopicMap::duplicateBoundedString(model, 32);
     memcpy(slot->ieee, ieee, 8);
     slot->shortAddr = shortAddr;
     slot->endpoint = endpoint;
-    if (manufacturer != nullptr) {
-        strncpy(slot->manufacturer, manufacturer, sizeof(slot->manufacturer) - 1);
-    }
-    if (model != nullptr) {
-        strncpy(slot->model, model, sizeof(slot->model) - 1);
-    }
     slot->zigbeeType = mergeZigbeeDeviceType(preservedType, zigbeeType);
     slot->used = true;
 }
@@ -129,11 +181,11 @@ void FoundDeviceList::noteIdentity(
 String FoundDeviceList::listJson(DeviceTopicMap *formatter) {
     String json = "[";
     bool first = true;
-    for (int i = 0; i < kMaxFound; i++) {
-        if (!found[i].used) {
+    for (const FoundDevice *device = foundHead; device != nullptr; device = device->next) {
+        if (!device->used) {
             continue;
         }
-        if (formatter != nullptr && formatter->findByIeee(found[i].ieee) != nullptr) {
+        if (formatter != nullptr && formatter->findByIeee(device->ieee) != nullptr) {
             continue;
         }
         if (!first) {
@@ -142,18 +194,18 @@ String FoundDeviceList::listJson(DeviceTopicMap *formatter) {
         first = false;
         json += "{\"ieee\":\"";
         if (formatter != nullptr) {
-            json += formatter->formatIeee(found[i].ieee);
+            json += formatter->formatIeee(device->ieee);
         }
         json += "\",\"nwk\":";
-        json += String(found[i].shortAddr);
+        json += String(device->shortAddr);
         json += ",\"endpoint\":";
-        json += String(found[i].endpoint);
+        json += String(device->endpoint);
         json += ",\"manufacturer\":\"";
-        appendJsonEscaped(json, found[i].manufacturer, sizeof(found[i].manufacturer));
+        appendJsonEscaped(json, device->manufacturer, device->manufacturer ? strlen(device->manufacturer) + 1 : 0);
         json += "\",\"model\":\"";
-        appendJsonEscaped(json, found[i].model, sizeof(found[i].model));
+        appendJsonEscaped(json, device->model, device->model ? strlen(device->model) + 1 : 0);
         json += "\",\"type\":\"";
-        json += zigbeeDeviceTypeJsonId(found[i].zigbeeType);
+        json += zigbeeDeviceTypeJsonId(device->zigbeeType);
         json += "\"}";
     }
     json += "]";

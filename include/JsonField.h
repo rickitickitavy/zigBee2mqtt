@@ -17,7 +17,8 @@ inline void appendJsonEscaped(String &json, const char *value, size_t maxLength 
             json += (char)character;
             continue;
         }
-        if (character < 32 || character >= 127) {
+        // Keep UTF-8 bytes (>= 128). Drop only ASCII control characters.
+        if (character < 32) {
             continue;
         }
         json += (char)character;

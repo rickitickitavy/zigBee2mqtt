@@ -1,0 +1,828 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Control consoles</title>
+    <link rel="stylesheet" type="text/css" href="css/all.css"/>
+    <script>
+        var signedInUser = null;
+        var sessionWatchTimer = null;
+        var firmwareRebootWaitActive = false;
+        var nativeFetch = window.fetch.bind(window);
+        window.fetch = function (input, init) {
+            return nativeFetch(input, init).then(function (response) {
+                if (response.status === 401 && signedInUser && !firmwareRebootWaitActive) {
+                    showLoginForm();
+                }
+                return response;
+            });
+        };
+
+        var assignedConsoles = [];
+        var activeConsoleIndex = 0;
+        var registeredDeviceRows = [];
+        var devicesLiveWanted = false;
+        var devicesLiveSocket = null;
+        var devicesLiveReconnectTimer = null;
+        var consolesLiveWanted = false;
+        var consolesLiveSocket = null;
+        var consolesLiveReconnectTimer = null;
+
+        function normalizeThemeId(themeId) {
+            return themeId === "dark" ? "dark" : "light";
+        }
+
+        function applyThemeToDocument(themeId) {
+            document.documentElement.setAttribute("data-theme", normalizeThemeId(themeId));
+        }
+
+        function isOperatorUser(user) {
+            if (!user) {
+                return false;
+            }
+            if (user.isAdmin) {
+                return true;
+            }
+            return !!(user.editDevices || user.addDevices || user.removeDevices || user.editUsers || user.editConsoles);
+        }
+
+        function showLoginForm() {
+            signedInUser = null;
+            stopSessionWatch();
+            stopDevicesLive();
+            stopConsolesLive();
+            applyThemeToDocument("dark");
+            document.getElementById("userShell").hidden = true;
+            document.getElementById("loginOverlay").hidden = false;
+        }
+
+        function stopSessionWatch() {
+            if (sessionWatchTimer != null) {
+                window.clearInterval(sessionWatchTimer);
+                sessionWatchTimer = null;
+            }
+        }
+
+        function startSessionWatch() {
+            if (sessionWatchTimer != null) {
+                return;
+            }
+            sessionWatchTimer = window.setInterval(function () {
+                if (!signedInUser || firmwareRebootWaitActive) {
+                    return;
+                }
+                fetch("/api/auth/me", { cache: "no-store" }).catch(function () {
+                });
+            }, 10000);
+        }
+
+        function enterUserConsole(user) {
+            if (isOperatorUser(user)) {
+                window.location.href = "/";
+                return;
+            }
+            signedInUser = user;
+            document.getElementById("loginOverlay").hidden = true;
+            document.getElementById("userShell").hidden = false;
+            applyThemeToDocument(user && user.theme);
+            startSessionWatch();
+            loadUserConsoles();
+            startDevicesLive();
+            startConsolesLive();
+        }
+
+        function checkSession() {
+            fetch("/api/auth/me", { cache: "no-store" }).then(function (response) {
+                if (response.status === 401) {
+                    showLoginForm();
+                    return null;
+                }
+                if (!response.ok) {
+                    throw new Error("HTTP " + response.status);
+                }
+                return response.json();
+            }).then(function (user) {
+                if (user) {
+                    enterUserConsole(user);
+                }
+            }).catch(function () {
+                showLoginForm();
+            });
+        }
+
+        function submitLogin() {
+            var errorLine = document.getElementById("loginError");
+            if (errorLine) {
+                errorLine.hidden = true;
+            }
+            var userNameInput = document.getElementById("loginUserName");
+            var passwordInput = document.getElementById("loginPassword");
+            var rememberInput = document.getElementById("loginRememberMe");
+            fetch("/api/auth/login", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    userName: userNameInput ? userNameInput.value : "",
+                    password: passwordInput ? passwordInput.value : "",
+                    rememberMe: !!(rememberInput && rememberInput.checked)
+                })
+            }).then(function (response) {
+                return response.text().then(function (text) {
+                    if (!response.ok) {
+                        throw new Error(text || ("HTTP " + response.status));
+                    }
+                });
+            }).then(function () {
+                if (passwordInput) {
+                    passwordInput.value = "";
+                }
+                checkSession();
+            }).catch(function (error) {
+                if (errorLine) {
+                    errorLine.hidden = false;
+                    errorLine.textContent = error && error.message ? error.message : "Sign in failed";
+                }
+            });
+        }
+
+        function signOut() {
+            document.getElementById("signOutConfirmDialog").hidden = true;
+            fetch("/api/auth/logout", { method: "POST" }).finally(function () {
+                showLoginForm();
+            });
+        }
+
+        function openSignOutConfirm() {
+            document.getElementById("signOutConfirmDialog").hidden = false;
+        }
+
+        function closeSignOutConfirm() {
+            document.getElementById("signOutConfirmDialog").hidden = true;
+        }
+
+        function loadUserConsoles() {
+            fetch("/api/consoles/mine", { cache: "no-store" }).then(function (response) {
+                return response.text().then(function (text) {
+                    if (!response.ok) {
+                        throw new Error(text || ("HTTP " + response.status));
+                    }
+                    return JSON.parse(text || "[]");
+                });
+            }).then(function (rows) {
+                assignedConsoles = Array.isArray(rows) ? rows : [];
+                if (activeConsoleIndex >= assignedConsoles.length) {
+                    activeConsoleIndex = 0;
+                }
+                renderConsoleTabs();
+            }).catch(function () {
+                assignedConsoles = [];
+                renderConsoleTabs();
+            });
+        }
+
+        function selectConsoleTab(index) {
+            activeConsoleIndex = index;
+            renderConsoleTabs();
+        }
+
+        function renderConsoleTabs() {
+            var tabsHost = document.getElementById("consoleTabs");
+            var panelsHost = document.getElementById("consolePanels");
+            var emptyState = document.getElementById("emptyState");
+            if (!tabsHost || !panelsHost) {
+                return;
+            }
+            tabsHost.innerHTML = "";
+            panelsHost.innerHTML = "";
+            if (!assignedConsoles.length) {
+                tabsHost.hidden = true;
+                panelsHost.hidden = true;
+                if (emptyState) {
+                    emptyState.hidden = false;
+                }
+                return;
+            }
+            tabsHost.hidden = false;
+            panelsHost.hidden = false;
+            if (emptyState) {
+                emptyState.hidden = true;
+            }
+            var tabIndex;
+            for (tabIndex = 0; tabIndex < assignedConsoles.length; tabIndex++) {
+                var tabButton = document.createElement("button");
+                tabButton.type = "button";
+                tabButton.className = "tab-btn" + (tabIndex === activeConsoleIndex ? " active" : "");
+                tabButton.textContent = assignedConsoles[tabIndex].name || "Console";
+                tabButton.onclick = (function (storedIndex) {
+                    return function () {
+                        selectConsoleTab(storedIndex);
+                    };
+                })(tabIndex);
+                tabsHost.appendChild(tabButton);
+            }
+            var panel = document.createElement("div");
+            panel.className = "tab-content user-console-tab";
+            renderConsoleGrid(panel, assignedConsoles[activeConsoleIndex]);
+            panelsHost.appendChild(panel);
+        }
+
+        function findRegisteredDevice(ieee) {
+            var index;
+            for (index = 0; index < registeredDeviceRows.length; index++) {
+                if ((registeredDeviceRows[index].ieee || "") === (ieee || "")) {
+                    return registeredDeviceRows[index];
+                }
+            }
+            return null;
+        }
+
+        function statusEntriesForDevice(device) {
+            var entries = [];
+            var raw = device && device.status;
+            if (!raw || !raw.length) {
+                return entries;
+            }
+            var index;
+            for (index = 0; index < raw.length; index++) {
+                entries.push({
+                    ep: raw[index].ep,
+                    state: raw[index].state || ""
+                });
+            }
+            entries.sort(function (left, right) {
+                return (left.ep || 0) - (right.ep || 0);
+            });
+            return entries;
+        }
+
+        function findStatusState(entries, endpoint) {
+            var index;
+            for (index = 0; index < entries.length; index++) {
+                if (entries[index].ep == endpoint) {
+                    return entries[index].state;
+                }
+            }
+            return "";
+        }
+
+        function isMeasurementDeviceType(typeId) {
+            return typeId == "illuminanceMeasurement"
+                || typeId == "illuminanceLevelSensing"
+                || typeId == "temperatureMeasurement"
+                || typeId == "pressureMeasurement"
+                || typeId == "flowMeasurement"
+                || typeId == "relativeHumidity"
+                || typeId == "metering"
+                || typeId == "electricalMeasurement";
+        }
+
+        function parseNumericState(stateText) {
+            var text = String(stateText || "").trim();
+            if (!text.length) {
+                return null;
+            }
+            var match = text.match(/-?\d+(?:\.\d+)?/);
+            if (!match) {
+                return null;
+            }
+            var value = parseFloat(match[0]);
+            return isNaN(value) ? null : value;
+        }
+
+        function formatMeasurementDisplay(typeId, stateText, unitId) {
+            var value = parseNumericState(stateText);
+            if (value === null) {
+                return stateText ? String(stateText) : "—";
+            }
+            var unit = unitId || "";
+            if (typeId == "temperatureMeasurement") {
+                var celsius = value;
+                if (unit === "F") {
+                    return (celsius * 9 / 5 + 32).toFixed(1) + " °F";
+                }
+                if (unit === "K") {
+                    return (celsius + 273.15).toFixed(1) + " K";
+                }
+                return celsius.toFixed(1) + " °C";
+            }
+            if (typeId == "relativeHumidity") {
+                return value.toFixed(0) + (unit === "%" || !unit ? " %" : " " + unit);
+            }
+            if (typeId == "pressureMeasurement") {
+                var pascal = value;
+                if (unit === "hPa") {
+                    return (pascal / 100).toFixed(1) + " hPa";
+                }
+                if (unit === "kPa") {
+                    return (pascal / 1000).toFixed(2) + " kPa";
+                }
+                if (unit === "bar") {
+                    return (pascal / 100000).toFixed(3) + " bar";
+                }
+                if (unit === "psi") {
+                    return (pascal * 0.000145038).toFixed(2) + " psi";
+                }
+                return pascal.toFixed(0) + " Pa";
+            }
+            if (typeId == "illuminanceMeasurement" || typeId == "illuminanceLevelSensing") {
+                return value.toFixed(0) + (unit === "lx" || !unit ? " lx" : " " + unit);
+            }
+            if (typeId == "flowMeasurement") {
+                if (unit === "m3/h") {
+                    return value.toFixed(2) + " m³/h";
+                }
+                if (unit === "l/min") {
+                    return value.toFixed(2) + " L/min";
+                }
+                return value.toFixed(2) + (unit ? " " + unit : "");
+            }
+            return value.toFixed(2) + (unit ? " " + unit : "");
+        }
+
+        function coveringPositionText(state) {
+            var text = String(state || "");
+            if (!text) {
+                return "—";
+            }
+            if (text.indexOf("cl=0x") >= 0 && text.indexOf("attr=") >= 0) {
+                return "—";
+            }
+            if (!/^\d+$/.test(text)) {
+                return text;
+            }
+            var raw = parseInt(text, 10);
+            if (raw > 100) {
+                raw = 100;
+            }
+            if (raw < 0) {
+                raw = 0;
+            }
+            return raw + "%";
+        }
+
+        function bindingChannel(binding) {
+            var channel = binding && binding.channel;
+            if (channel === undefined || channel === null || channel === "") {
+                return 1;
+            }
+            return parseInt(channel, 10) || 1;
+        }
+
+        function onOffStateForBinding(device, binding) {
+            if (!device || (device.type || "") !== "onOff") {
+                return "";
+            }
+            var entries = statusEntriesForDevice(device);
+            return findStatusState(entries, bindingChannel(binding));
+        }
+
+        function widgetGroupOnOffState(widget) {
+            var devices = widget && widget.devices;
+            if (!devices || !devices.length) {
+                return false;
+            }
+            var anyOn = false;
+            var index;
+            for (index = 0; index < devices.length; index++) {
+                var device = findRegisteredDevice(devices[index].ieee);
+                if (!device || (device.type || "") !== "onOff") {
+                    continue;
+                }
+                var state = onOffStateForBinding(device, devices[index]);
+                if (String(state || "").toUpperCase() === "ON") {
+                    anyOn = true;
+                }
+            }
+            return anyOn;
+        }
+
+        function sendDeviceCommand(ieee, payload, channel) {
+            var body = { ieee: ieee, payload: payload };
+            if (channel !== undefined && channel !== null) {
+                body.channel = channel;
+            }
+            fetch("/api/devices/command", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body)
+            }).catch(function () {
+            });
+        }
+
+        function toggleGroupOnOff(widget) {
+            var turnOn = !widgetGroupOnOffState(widget);
+            var payload = turnOn ? "ON" : "OFF";
+            var devices = widget.devices || [];
+            var index;
+            for (index = 0; index < devices.length; index++) {
+                var device = findRegisteredDevice(devices[index].ieee);
+                if (!device || (device.type || "") !== "onOff") {
+                    continue;
+                }
+                sendDeviceCommand(device.ieee, payload, bindingChannel(devices[index]));
+            }
+            window.setTimeout(refreshConsoleControls, 300);
+        }
+
+        function refreshConsoleControls() {
+            renderConsoleTabs();
+        }
+
+        function renderConsoleGrid(host, consoleLayout) {
+            var grid = document.createElement("div");
+            grid.className = "console-grid";
+            var columns = parseInt(consoleLayout && consoleLayout.columns, 10);
+            if (!columns || columns < 1) {
+                columns = 2;
+            }
+            if (columns > 6) {
+                columns = 6;
+            }
+            grid.style.gridTemplateColumns = "repeat(" + String(columns) + ", minmax(0, 1fr))";
+            var widgets = consoleLayout && consoleLayout.widgets;
+            if (!widgets || !widgets.length) {
+                var emptyWidget = document.createElement("p");
+                emptyWidget.className = "field-hint";
+                emptyWidget.textContent = "This console has no widgets yet.";
+                host.appendChild(emptyWidget);
+                return;
+            }
+            var widgetIndex;
+            var hasVisible = false;
+            for (widgetIndex = 0; widgetIndex < widgets.length; widgetIndex++) {
+                if (!(widgets[widgetIndex] && widgets[widgetIndex].spacer)) {
+                    hasVisible = true;
+                }
+                grid.appendChild(buildWidgetCard(widgets[widgetIndex]));
+            }
+            if (!hasVisible) {
+                var emptyOnly = document.createElement("p");
+                emptyOnly.className = "field-hint";
+                emptyOnly.textContent = "This console has no widgets yet.";
+                host.appendChild(emptyOnly);
+                return;
+            }
+            host.appendChild(grid);
+        }
+
+        function buildWidgetCard(widget) {
+            if (widget && widget.spacer) {
+                var spacer = document.createElement("div");
+                spacer.className = "console-widget console-widget-spacer console-widget-spacer-view";
+                spacer.setAttribute("aria-hidden", "true");
+                return spacer;
+            }
+            var card = document.createElement("article");
+            card.className = "console-widget";
+            var header = document.createElement("div");
+            header.className = "console-widget-header";
+            var title = document.createElement("h3");
+            title.className = "console-widget-title";
+            title.textContent = widget.title || "Widget";
+            header.appendChild(title);
+            if (widget.showGroupOnOff) {
+                var groupWrap = document.createElement("div");
+                groupWrap.className = "console-widget-group";
+                var groupLabel = document.createElement("span");
+                groupLabel.className = "console-widget-group-label";
+                groupLabel.textContent = "All";
+                var groupSwitch = document.createElement("button");
+                groupSwitch.type = "button";
+                groupSwitch.className = "console-switch" + (widgetGroupOnOffState(widget) ? " is-on" : "");
+                groupSwitch.setAttribute("aria-label", "Group on off");
+                groupSwitch.onclick = (function (storedWidget) {
+                    return function () {
+                        toggleGroupOnOff(storedWidget);
+                    };
+                })(widget);
+                groupWrap.appendChild(groupLabel);
+                groupWrap.appendChild(groupSwitch);
+                header.appendChild(groupWrap);
+            }
+            card.appendChild(header);
+            var list = document.createElement("div");
+            list.className = "console-device-list";
+            var bindings = widget.devices || [];
+            var bindingIndex;
+            for (bindingIndex = 0; bindingIndex < bindings.length; bindingIndex++) {
+                list.appendChild(buildBindingRow(bindings[bindingIndex]));
+            }
+            card.appendChild(list);
+            return card;
+        }
+
+        function buildBindingRow(binding) {
+            var row = document.createElement("div");
+            row.className = "console-device-row";
+            var title = document.createElement("span");
+            title.className = "console-device-row-title";
+            title.textContent = binding.title || binding.ieee || "Device";
+            row.appendChild(title);
+            var controls = document.createElement("div");
+            controls.className = "console-device-row-controls";
+            var device = findRegisteredDevice(binding.ieee);
+            if (!device) {
+                var unavailable = document.createElement("span");
+                unavailable.className = "console-device-unavailable";
+                unavailable.textContent = "unavailable";
+                controls.appendChild(unavailable);
+                row.appendChild(controls);
+                return row;
+            }
+            var typeId = device.type || "";
+            var channel = bindingChannel(binding);
+            if (typeId === "onOff") {
+                var onOffSwitch = document.createElement("button");
+                onOffSwitch.type = "button";
+                var onState = onOffStateForBinding(device, binding);
+                onOffSwitch.className = "console-switch" + (String(onState).toUpperCase() === "ON" ? " is-on" : "");
+                onOffSwitch.onclick = (function (ieee, ch, currentOn) {
+                    return function () {
+                        sendDeviceCommand(ieee, currentOn ? "OFF" : "ON", ch);
+                        window.setTimeout(refreshConsoleControls, 300);
+                    };
+                })(device.ieee, channel, String(onState).toUpperCase() === "ON");
+                controls.appendChild(onOffSwitch);
+            } else if (typeId === "windowCovering") {
+                var upButton = document.createElement("button");
+                upButton.type = "button";
+                upButton.className = "btn btn-secondary btn-inline console-cover-btn";
+                upButton.textContent = "Up";
+                upButton.onclick = (function (ieee, ch) {
+                    return function () {
+                        sendDeviceCommand(ieee, "OPEN", ch);
+                    };
+                })(device.ieee, channel);
+                var downButton = document.createElement("button");
+                downButton.type = "button";
+                downButton.className = "btn btn-secondary btn-inline console-cover-btn";
+                downButton.textContent = "Down";
+                downButton.onclick = (function (ieee, ch) {
+                    return function () {
+                        sendDeviceCommand(ieee, "CLOSE", ch);
+                    };
+                })(device.ieee, channel);
+                var stopButton = document.createElement("button");
+                stopButton.type = "button";
+                stopButton.className = "btn btn-secondary btn-inline console-cover-btn";
+                stopButton.textContent = "Stop";
+                stopButton.onclick = (function (ieee, ch) {
+                    return function () {
+                        sendDeviceCommand(ieee, "STOP", ch);
+                    };
+                })(device.ieee, channel);
+                var position = document.createElement("span");
+                position.className = "console-cover-position";
+                var entries = statusEntriesForDevice(device);
+                position.textContent = coveringPositionText(findStatusState(entries, channel));
+                controls.appendChild(upButton);
+                controls.appendChild(downButton);
+                controls.appendChild(stopButton);
+                controls.appendChild(position);
+            } else if (isMeasurementDeviceType(typeId)) {
+                var valueLabel = document.createElement("span");
+                valueLabel.className = "console-sensor-value";
+                var entries = statusEntriesForDevice(device);
+                valueLabel.textContent = formatMeasurementDisplay(
+                    typeId,
+                    findStatusState(entries, channel),
+                    binding.unit
+                );
+                controls.appendChild(valueLabel);
+            } else {
+                var generic = document.createElement("span");
+                generic.className = "console-sensor-value";
+                var entries = statusEntriesForDevice(device);
+                generic.textContent = findStatusState(entries, channel) || "—";
+                controls.appendChild(generic);
+            }
+            row.appendChild(controls);
+            return row;
+        }
+
+        function applyDevicesLiveMessage(text) {
+            var message;
+            try {
+                message = JSON.parse(text);
+            } catch (parseError) {
+                return;
+            }
+            if (!message || !message.op) {
+                return;
+            }
+            if (message.op === "reload") {
+                loadDevices();
+                return;
+            }
+            if (message.op === "remove") {
+                var removedIeee = message.ieee || "";
+                var keptRows = [];
+                var keepIndex;
+                for (keepIndex = 0; keepIndex < registeredDeviceRows.length; keepIndex++) {
+                    if ((registeredDeviceRows[keepIndex].ieee || "") !== removedIeee) {
+                        keptRows.push(registeredDeviceRows[keepIndex]);
+                    }
+                }
+                registeredDeviceRows = keptRows;
+                refreshConsoleControls();
+                return;
+            }
+            if (message.op === "upsert" && message.device) {
+                var nextDevice = message.device;
+                var replaced = false;
+                var rowIndex;
+                for (rowIndex = 0; rowIndex < registeredDeviceRows.length; rowIndex++) {
+                    if ((registeredDeviceRows[rowIndex].ieee || "") === (nextDevice.ieee || "")) {
+                        registeredDeviceRows[rowIndex] = nextDevice;
+                        replaced = true;
+                        break;
+                    }
+                }
+                if (!replaced) {
+                    registeredDeviceRows.push(nextDevice);
+                }
+                refreshConsoleControls();
+            }
+        }
+
+        function stopDevicesLive() {
+            devicesLiveWanted = false;
+            if (devicesLiveReconnectTimer != null) {
+                window.clearTimeout(devicesLiveReconnectTimer);
+                devicesLiveReconnectTimer = null;
+            }
+            if (devicesLiveSocket != null) {
+                devicesLiveSocket.onclose = null;
+                devicesLiveSocket.close();
+                devicesLiveSocket = null;
+            }
+        }
+
+        function openDevicesLiveSocket() {
+            if (!devicesLiveWanted || firmwareRebootWaitActive) {
+                return;
+            }
+            if (devicesLiveSocket != null
+                && (devicesLiveSocket.readyState === WebSocket.OPEN
+                    || devicesLiveSocket.readyState === WebSocket.CONNECTING)) {
+                return;
+            }
+            var protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+            var socket = new WebSocket(protocol + "//" + window.location.host + "/ws/devices");
+            devicesLiveSocket = socket;
+            socket.onmessage = function (event) {
+                applyDevicesLiveMessage(event.data);
+            };
+            socket.onclose = function () {
+                devicesLiveSocket = null;
+                if (!devicesLiveWanted || firmwareRebootWaitActive) {
+                    return;
+                }
+                devicesLiveReconnectTimer = window.setTimeout(openDevicesLiveSocket, 2000);
+            };
+        }
+
+        function startDevicesLive() {
+            devicesLiveWanted = true;
+            loadDevices();
+            openDevicesLiveSocket();
+        }
+
+        function applyConsolesLiveMessage(text) {
+            var message;
+            try {
+                message = JSON.parse(text);
+            } catch (parseError) {
+                return;
+            }
+            if (!message || message.op !== "reload") {
+                return;
+            }
+            loadUserConsoles();
+        }
+
+        function stopConsolesLive() {
+            consolesLiveWanted = false;
+            if (consolesLiveReconnectTimer != null) {
+                window.clearTimeout(consolesLiveReconnectTimer);
+                consolesLiveReconnectTimer = null;
+            }
+            if (consolesLiveSocket != null) {
+                consolesLiveSocket.onclose = null;
+                consolesLiveSocket.close();
+                consolesLiveSocket = null;
+            }
+        }
+
+        function openConsolesLiveSocket() {
+            if (!consolesLiveWanted || firmwareRebootWaitActive) {
+                return;
+            }
+            if (consolesLiveSocket != null
+                && (consolesLiveSocket.readyState === WebSocket.OPEN
+                    || consolesLiveSocket.readyState === WebSocket.CONNECTING)) {
+                return;
+            }
+            var protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+            var socket = new WebSocket(protocol + "//" + window.location.host + "/ws/consoles");
+            consolesLiveSocket = socket;
+            socket.onmessage = function (event) {
+                applyConsolesLiveMessage(event.data);
+            };
+            socket.onclose = function () {
+                consolesLiveSocket = null;
+                if (!consolesLiveWanted || firmwareRebootWaitActive) {
+                    return;
+                }
+                consolesLiveReconnectTimer = window.setTimeout(openConsolesLiveSocket, 2000);
+            };
+        }
+
+        function startConsolesLive() {
+            consolesLiveWanted = true;
+            openConsolesLiveSocket();
+        }
+
+        function loadDevices() {
+            fetch("/api/devices", { cache: "no-store" }).then(function (response) {
+                return response.text().then(function (text) {
+                    if (!response.ok) {
+                        throw new Error("HTTP " + response.status);
+                    }
+                    return JSON.parse(text);
+                });
+            }).then(function (rows) {
+                registeredDeviceRows = Array.isArray(rows) ? rows : [];
+                refreshConsoleControls();
+            }).catch(function () {
+            });
+        }
+
+        function onDialogOverlayPointerDown(event) {
+            if (event.target !== event.currentTarget) {
+                return;
+            }
+            if (!document.getElementById("signOutConfirmDialog").hidden) {
+                closeSignOutConfirm();
+            }
+        }
+
+        window.onload = function () {
+            var loginForm = document.getElementById("loginForm");
+            if (loginForm) {
+                loginForm.addEventListener("submit", function (event) {
+                    event.preventDefault();
+                    submitLogin();
+                });
+            }
+            var overlay = document.getElementById("signOutConfirmDialog");
+            if (overlay) {
+                overlay.addEventListener("mousedown", onDialogOverlayPointerDown);
+            }
+            applyThemeToDocument("dark");
+            checkSession();
+        };
+    </script>
+</head>
+<body>
+<div id="loginOverlay" class="login-overlay">
+    <form id="loginForm" class="login-panel" autocomplete="on">
+        <h1 class="section-title">Sign in</h1>
+        <p id="loginError" class="save-error" hidden></p>
+        <div class="field">
+            <label for="loginUserName">User name</label>
+            <input id="loginUserName" type="text" autocomplete="username">
+        </div>
+        <div class="field">
+            <label for="loginPassword">Password</label>
+            <input id="loginPassword" type="password" autocomplete="current-password">
+        </div>
+        <label class="field-check">
+            <input id="loginRememberMe" type="checkbox">
+            Remember me
+        </label>
+        <button type="submit" class="btn btn-primary">Sign in</button>
+    </form>
+</div>
+<div id="userShell" class="user-console-shell" hidden>
+    <header class="user-console-header">
+        <h1 class="section-title">Control</h1>
+        <button type="button" class="btn btn-secondary btn-inline" onclick="openSignOutConfirm()">Sign out</button>
+    </header>
+    <div id="consoleTabs" class="tabs" hidden></div>
+    <div id="consolePanels" class="user-console-panels" hidden></div>
+    <p id="emptyState" class="field-hint user-console-empty" hidden>No consoles are assigned to your account.</p>
+</div>
+<div id="signOutConfirmDialog" class="dialog-overlay dialog-overlay-front" hidden>
+    <div class="dialog-panel" role="dialog" aria-label="Sign out">
+        <h3 class="upload-title">Sign out</h3>
+        <p class="field-hint">Sign out of the control page?</p>
+        <div class="dialog-actions">
+            <button type="button" class="btn btn-primary" onclick="signOut()">Sign out</button>
+            <button type="button" class="btn btn-secondary" onclick="closeSignOutConfirm()">Cancel</button>
+        </div>
+    </div>
+</div>
+</body>
+</html>

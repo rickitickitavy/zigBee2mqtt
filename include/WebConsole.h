@@ -5,6 +5,7 @@
 #include "SettingsManager.h"
 #include "FoundDeviceList.h"
 #include "UserStore.h"
+#include "ConsoleStore.h"
 
 class WebConsole {
 public:
@@ -22,7 +23,7 @@ public:
     using DevicesRestoredFn = bool (*)(const uint8_t (*removedIeees)[8], int removedCount);
     using UsersRestoredFn = bool (*)(const char (*removedNames)[USER_NAME_MAX], int removedCount);
 
-    explicit WebConsole(SettingsManager *settingsManager, UserStore *userStore);
+    explicit WebConsole(SettingsManager *settingsManager, UserStore *userStore, ConsoleStore *consoleStore);
 
     void begin();
     void rebind();
@@ -30,6 +31,7 @@ public:
     void notifyDeviceLiveChanged(const uint8_t ieee[8]);
     void broadcastDeviceRemoved(const uint8_t ieee[8]);
     void broadcastDevicesReload();
+    void broadcastConsolesReload();
     void setDeviceServices(
         FoundDeviceList *foundDevices,
         SearchStartFn startSearch,
@@ -50,6 +52,7 @@ public:
 private:
     SettingsManager *settingsManager;
     UserStore *userStore;
+    ConsoleStore *consoleStore;
     FoundDeviceList *foundDevices = nullptr;
     SearchStartFn startSearch = nullptr;
     SearchStopFn stopSearch = nullptr;
@@ -66,14 +69,17 @@ private:
     UsersRestoredFn applyUsersRestored = nullptr;
     AsyncWebServer server;
     AsyncWebSocket devicesSocket;
+    AsyncWebSocket consolesSocket;
     String requestBody;
     bool otaStarted = false;
     bool otaFailed = false;
     int otaCommand = 0;
 
     void bindDevicesSocket();
+    void bindConsolesSocket();
     void broadcastDeviceUpsert(const uint8_t ieee[8]);
     void handleRoot(AsyncWebServerRequest *request);
+    void handleUserPage(AsyncWebServerRequest *request);
     void handleWifiGet(AsyncWebServerRequest *request);
     void handleWifiPost(AsyncWebServerRequest *request);
     void handleMqttGet(AsyncWebServerRequest *request);
@@ -91,9 +97,12 @@ private:
     bool requireUser(AsyncWebServerRequest *request, const UserRecord **userOut, bool touchActivity = true);
     bool requireAdmin(AsyncWebServerRequest *request, const UserRecord **userOut, bool touchActivity = true);
     bool requireEditUsers(AsyncWebServerRequest *request, const UserRecord **userOut, bool touchActivity = true);
+    bool requireEditConsoles(AsyncWebServerRequest *request, const UserRecord **userOut, bool touchActivity = true);
     bool userCanAddDevices(const UserRecord *user) const;
     bool userCanEditDevices(const UserRecord *user) const;
     bool userCanRemoveDevices(const UserRecord *user) const;
+    bool userIsOperator(const UserRecord *user) const;
+    bool userCanEditConsoles(const UserRecord *user) const;
     void sendAuthCookie(AsyncWebServerResponse *response, const char *tokenHex, uint32_t maxAgeSec);
     void handleAuthLoginPost(AsyncWebServerRequest *request);
     void handleAuthLogoutPost(AsyncWebServerRequest *request);
@@ -103,8 +112,15 @@ private:
     void handleUsersPost(AsyncWebServerRequest *request);
     void handleUsersUpdatePost(AsyncWebServerRequest *request);
     void handleUsersDelete(AsyncWebServerRequest *request);
+    void handleConsolesGet(AsyncWebServerRequest *request);
+    void handleConsolesMineGet(AsyncWebServerRequest *request);
+    void handleConsolesPost(AsyncWebServerRequest *request);
+    void handleConsoleGet(AsyncWebServerRequest *request);
+    void handleConsolePut(AsyncWebServerRequest *request);
+    void handleConsoleDelete(AsyncWebServerRequest *request);
     void fillUserFromJson(const char *json, UserRecord *user);
     void sendUserWriteResult(AsyncWebServerRequest *request, UserWriteResult result);
+    void sendConsoleWriteResult(AsyncWebServerRequest *request, ConsoleWriteResult result);
     void appendMqttSettingsJson(String &json);
     bool applyMqttJson(const char *json, String *errorText);
     bool applyZigbeeJson(const char *json, String *errorText);

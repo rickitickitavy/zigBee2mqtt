@@ -11,14 +11,21 @@
 #include <AsyncWebSocket.h>
 #include <Update.h>
 #include <IPAddress.h>
+#include <stdlib.h>
 #include <string.h>
 
-WebConsole::WebConsole(SettingsManager *settingsManager, UserStore *userStore)
-    : settingsManager(settingsManager), userStore(userStore), server(80), devicesSocket("/ws/devices") {}
+WebConsole::WebConsole(SettingsManager *settingsManager, UserStore *userStore, ConsoleStore *consoleStore)
+    : settingsManager(settingsManager),
+      userStore(userStore),
+      consoleStore(consoleStore),
+      server(80),
+      devicesSocket("/ws/devices"),
+      consolesSocket("/ws/consoles") {}
 
 void WebConsole::begin() {
     server.on("/", HTTP_GET, [this](AsyncWebServerRequest *request) { handleRoot(request); });
     server.on("/index.html", HTTP_GET, [this](AsyncWebServerRequest *request) { handleRoot(request); });
+    server.on("/user.html", HTTP_GET, [this](AsyncWebServerRequest *request) { handleUserPage(request); });
     server.on("/css/all.css", HTTP_GET, [this](AsyncWebServerRequest *request) {
         AsyncWebServerResponse *response = request->beginResponse(
             200,
@@ -50,20 +57,10 @@ void WebConsole::begin() {
         [this](AsyncWebServerRequest *request) { handleAuthLogoutPost(request); }
     );
     bindDevicesSocket();
+    bindConsolesSocket();
     server.on("/api/auth/me", HTTP_GET, [this](AsyncWebServerRequest *request) { handleAuthMeGet(request); });
     server.on("/api/auth/touch", HTTP_POST, [this](AsyncWebServerRequest *request) { handleAuthTouchPost(request); });
-    server.on("/api/users", HTTP_GET, [this](AsyncWebServerRequest *request) { handleUsersGet(request); });
-    server.on(
-        "/api/users",
-        HTTP_POST,
-        [this](AsyncWebServerRequest *request) { handleUsersPost(request); },
-        nullptr,
-        [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-            (void)request;
-            (void)total;
-            appendRequestBody(data, len, index);
-        }
-    );
+    // Child paths before collection; exact() so /api/users does not steal /api/users/update.
     server.on(
         "/api/users/update",
         HTTP_POST,
@@ -76,7 +73,23 @@ void WebConsole::begin() {
         }
     );
     server.on(
-        "/api/users",
+        AsyncURIMatcher::exact("/api/users"),
+        HTTP_GET,
+        [this](AsyncWebServerRequest *request) { handleUsersGet(request); }
+    );
+    server.on(
+        AsyncURIMatcher::exact("/api/users"),
+        HTTP_POST,
+        [this](AsyncWebServerRequest *request) { handleUsersPost(request); },
+        nullptr,
+        [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+            (void)request;
+            (void)total;
+            appendRequestBody(data, len, index);
+        }
+    );
+    server.on(
+        AsyncURIMatcher::exact("/api/users"),
         HTTP_DELETE,
         [this](AsyncWebServerRequest *request) { handleUsersDelete(request); },
         nullptr,
@@ -176,6 +189,48 @@ void WebConsole::begin() {
         }
     );
 
+    // Child paths before collection; exact() so /api/consoles does not steal /item|/mine|/update.
+    server.on("/api/consoles/mine", HTTP_GET, [this](AsyncWebServerRequest *request) { handleConsolesMineGet(request); });
+    server.on("/api/consoles/item", HTTP_GET, [this](AsyncWebServerRequest *request) { handleConsoleGet(request); });
+    server.on(
+        "/api/consoles/update",
+        HTTP_POST,
+        [this](AsyncWebServerRequest *request) { handleConsolePut(request); },
+        nullptr,
+        [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+            (void)request;
+            (void)total;
+            appendRequestBody(data, len, index);
+        }
+    );
+    server.on(
+        AsyncURIMatcher::exact("/api/consoles"),
+        HTTP_GET,
+        [this](AsyncWebServerRequest *request) { handleConsolesGet(request); }
+    );
+    server.on(
+        AsyncURIMatcher::exact("/api/consoles"),
+        HTTP_POST,
+        [this](AsyncWebServerRequest *request) { handleConsolesPost(request); },
+        nullptr,
+        [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+            (void)request;
+            (void)total;
+            appendRequestBody(data, len, index);
+        }
+    );
+    server.on(
+        AsyncURIMatcher::exact("/api/consoles"),
+        HTTP_DELETE,
+        [this](AsyncWebServerRequest *request) { handleConsoleDelete(request); },
+        nullptr,
+        [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+            (void)request;
+            (void)total;
+            appendRequestBody(data, len, index);
+        }
+    );
+
     server.on("/api/devices/store", HTTP_GET, [this](AsyncWebServerRequest *request) { handleDevicesStoreGet(request); });
     server.on(
         "/api/devices/command",
@@ -211,12 +266,16 @@ void WebConsole::begin() {
             appendRequestBody(data, len, index);
         }
     );
-    server.on("/api/devices", HTTP_GET, [this](AsyncWebServerRequest *request) { handleDevicesGet(request); });
+    server.on(
+        AsyncURIMatcher::exact("/api/devices"),
+        HTTP_GET,
+        [this](AsyncWebServerRequest *request) { handleDevicesGet(request); }
+    );
     server.on("/api/device-types", HTTP_GET, [this](AsyncWebServerRequest *request) {
         handleDeviceTypesGet(request);
     });
     server.on(
-        "/api/devices",
+        AsyncURIMatcher::exact("/api/devices"),
         HTTP_POST,
         [this](AsyncWebServerRequest *request) { handleDevicesPost(request); },
         nullptr,
@@ -227,7 +286,7 @@ void WebConsole::begin() {
         }
     );
     server.on(
-        "/api/devices",
+        AsyncURIMatcher::exact("/api/devices"),
         HTTP_DELETE,
         [this](AsyncWebServerRequest *request) { handleDevicesDelete(request); },
         nullptr,
@@ -275,6 +334,7 @@ void WebConsole::rebind() {
 
 void WebConsole::loop() {
     devicesSocket.cleanupClients();
+    consolesSocket.cleanupClients();
 }
 
 void WebConsole::bindDevicesSocket() {
@@ -282,6 +342,20 @@ void WebConsole::bindDevicesSocket() {
         return authenticatedUser(request, false) != nullptr;
     });
     server.addHandler(&devicesSocket);
+}
+
+void WebConsole::bindConsolesSocket() {
+    consolesSocket.handleHandshake([this](AsyncWebServerRequest *request) {
+        return authenticatedUser(request, false) != nullptr;
+    });
+    server.addHandler(&consolesSocket);
+}
+
+void WebConsole::broadcastConsolesReload() {
+    if (consolesSocket.count() == 0) {
+        return;
+    }
+    consolesSocket.textAll("{\"op\":\"reload\"}");
 }
 
 void WebConsole::broadcastDeviceUpsert(const uint8_t ieee[8]) {
@@ -321,11 +395,35 @@ void WebConsole::broadcastDevicesReload() {
 }
 
 void WebConsole::handleRoot(AsyncWebServerRequest *request) {
+    const UserRecord *user = authenticatedUser(request, false);
+    if (user != nullptr && !userIsOperator(user)) {
+        request->redirect("/user.html");
+        return;
+    }
     AsyncWebServerResponse *response = request->beginResponse(
         200,
         kEmbeddedIndexHtmlGzMime,
         kEmbeddedIndexHtmlGz,
         kEmbeddedIndexHtmlGzLen
+    );
+    if (kEmbeddedWebAssetsGzip) {
+        response->addHeader("Content-Encoding", "gzip");
+    }
+    response->addHeader("Cache-Control", "no-store");
+    request->send(response);
+}
+
+void WebConsole::handleUserPage(AsyncWebServerRequest *request) {
+    const UserRecord *user = authenticatedUser(request, false);
+    if (user != nullptr && userIsOperator(user)) {
+        request->redirect("/");
+        return;
+    }
+    AsyncWebServerResponse *response = request->beginResponse(
+        200,
+        kEmbeddedUserHtmlGzMime,
+        kEmbeddedUserHtmlGz,
+        kEmbeddedUserHtmlGzLen
     );
     if (kEmbeddedWebAssetsGzip) {
         response->addHeader("Content-Encoding", "gzip");
@@ -395,6 +493,33 @@ bool WebConsole::userCanRemoveDevices(const UserRecord *user) const {
     return user != nullptr && (user->isAdmin || user->removeDevices);
 }
 
+bool WebConsole::userCanEditConsoles(const UserRecord *user) const {
+    return user != nullptr && (user->isAdmin || user->editConsoles);
+}
+
+bool WebConsole::userIsOperator(const UserRecord *user) const {
+    if (user == nullptr) {
+        return false;
+    }
+    return user->isAdmin || user->editDevices || user->addDevices || user->removeDevices || user->editUsers
+        || user->editConsoles;
+}
+
+bool WebConsole::requireEditConsoles(AsyncWebServerRequest *request, const UserRecord **userOut, bool touchActivity) {
+    const UserRecord *user = nullptr;
+    if (!requireUser(request, &user, touchActivity)) {
+        return false;
+    }
+    if (!userCanEditConsoles(user)) {
+        request->send(403, "text/plain", "Forbidden");
+        return false;
+    }
+    if (userOut != nullptr) {
+        *userOut = user;
+    }
+    return true;
+}
+
 void WebConsole::sendAuthCookie(AsyncWebServerResponse *response, const char *tokenHex, uint32_t maxAgeSec) {
     String cookie = String(AUTH_COOKIE_NAME) + "=" + tokenHex + "; Path=/; HttpOnly; SameSite=Lax";
     if (maxAgeSec > 0) {
@@ -405,7 +530,7 @@ void WebConsole::sendAuthCookie(AsyncWebServerResponse *response, const char *to
 }
 
 void WebConsole::fillUserFromJson(const char *json, UserRecord *user) {
-    memset(user, 0, sizeof(*user));
+    UserStore::clearUserRecord(user);
     String userName;
     String themeText;
     extractJsonString(json, "userName", userName);
@@ -415,13 +540,16 @@ void WebConsole::fillUserFromJson(const char *json, UserRecord *user) {
     extractJsonBool(json, "addDevices", user->addDevices);
     extractJsonBool(json, "removeDevices", user->removeDevices);
     extractJsonBool(json, "editUsers", user->editUsers);
+    extractJsonBool(json, "editConsoles", user->editConsoles);
     extractJsonBool(json, "isBlocked", user->isBlocked);
     extractJsonString(json, "theme", themeText);
     user->theme = UserStore::themeFromJsonId(themeText.c_str());
+    UserStore::parseConsoleIdListFromObject(json, &user->consoleIds);
 }
 
 void WebConsole::sendUserWriteResult(AsyncWebServerRequest *request, UserWriteResult result) {
     if (result == UserWriteOk) {
+        broadcastConsolesReload();
         request->send(200, "text/plain", "Saved");
         return;
     }
@@ -449,7 +577,40 @@ void WebConsole::sendUserWriteResult(AsyncWebServerRequest *request, UserWriteRe
         request->send(400, "text/plain", "Need password");
         return;
     }
+    if (result == UserWriteOutOfMemory) {
+        request->send(507, "text/plain", "Out of memory");
+        return;
+    }
     request->send(400, "text/plain", "Bad user name");
+}
+
+void WebConsole::sendConsoleWriteResult(AsyncWebServerRequest *request, ConsoleWriteResult result) {
+    if (result == ConsoleWriteOk) {
+        broadcastConsolesReload();
+        request->send(200, "text/plain", "Saved");
+        return;
+    }
+    if (result == ConsoleWriteNotFound) {
+        request->send(404, "text/plain", "Console not found");
+        return;
+    }
+    if (result == ConsoleWriteFull) {
+        request->send(400, "text/plain", "Console table full");
+        return;
+    }
+    if (result == ConsoleWriteBadName) {
+        request->send(400, "text/plain", "Bad console name");
+        return;
+    }
+    if (result == ConsoleWriteBadId) {
+        request->send(400, "text/plain", "Bad console id");
+        return;
+    }
+    if (result == ConsoleWriteOutOfMemory) {
+        request->send(507, "text/plain", "Out of memory");
+        return;
+    }
+    request->send(400, "text/plain", "Bad console");
 }
 
 void WebConsole::handleAuthLoginPost(AsyncWebServerRequest *request) {
@@ -538,17 +699,20 @@ void WebConsole::handleUsersPost(AsyncWebServerRequest *request) {
         handleUsersUpdatePost(request);
         return;
     }
-    UserRecord source;
+    UserRecord source{};
     fillUserFromJson(requestBody.c_str(), &source);
     String password;
     extractJsonString(requestBody.c_str(), "password", password);
     bool isEdit = false;
     const bool hasIsEdit = extractJsonBool(requestBody.c_str(), "isEdit", isEdit);
+    UserWriteResult result = UserWriteOk;
     if (isEdit || (!hasIsEdit && userStore->findByName(source.userName) != nullptr)) {
-        sendUserWriteResult(request, userStore->updateUser(actor, source.userName, &source, password.c_str()));
-        return;
+        result = userStore->updateUser(actor, source.userName, &source, password.c_str());
+    } else {
+        result = userStore->createUser(actor, &source, password.c_str());
     }
-    sendUserWriteResult(request, userStore->createUser(actor, &source, password.c_str()));
+    UserStore::freeConsoleIdList(source.consoleIds);
+    sendUserWriteResult(request, result);
 }
 
 void WebConsole::handleUsersUpdatePost(AsyncWebServerRequest *request) {
@@ -556,11 +720,139 @@ void WebConsole::handleUsersUpdatePost(AsyncWebServerRequest *request) {
     if (!requireEditUsers(request, &actor)) {
         return;
     }
-    UserRecord source;
+    UserRecord source{};
     fillUserFromJson(requestBody.c_str(), &source);
     String password;
     extractJsonString(requestBody.c_str(), "password", password);
-    sendUserWriteResult(request, userStore->updateUser(actor, source.userName, &source, password.c_str()));
+    const UserWriteResult result = userStore->updateUser(actor, source.userName, &source, password.c_str());
+    UserStore::freeConsoleIdList(source.consoleIds);
+    sendUserWriteResult(request, result);
+}
+
+void WebConsole::handleConsolesGet(AsyncWebServerRequest *request) {
+    if (!requireEditConsoles(request, nullptr)) {
+        return;
+    }
+    if (consoleStore == nullptr) {
+        request->send(500, "text/plain", "Consoles unavailable");
+        return;
+    }
+    AsyncWebServerResponse *response =
+        request->beginResponse(200, "application/json", consoleStore->listSummaryJson(userStore));
+    response->addHeader("Cache-Control", "no-store");
+    request->send(response);
+}
+
+void WebConsole::handleConsolesMineGet(AsyncWebServerRequest *request) {
+    const UserRecord *user = nullptr;
+    if (!requireUser(request, &user)) {
+        return;
+    }
+    if (consoleStore == nullptr) {
+        request->send(500, "text/plain", "Consoles unavailable");
+        return;
+    }
+    AsyncWebServerResponse *response =
+        request->beginResponse(200, "application/json", consoleStore->mineJson(user));
+    response->addHeader("Cache-Control", "no-store");
+    request->send(response);
+}
+
+void WebConsole::handleConsolesPost(AsyncWebServerRequest *request) {
+    if (!requireEditConsoles(request, nullptr)) {
+        return;
+    }
+    if (consoleStore == nullptr) {
+        request->send(500, "text/plain", "Consoles unavailable");
+        return;
+    }
+    String name;
+    bool active = true;
+    extractJsonString(requestBody.c_str(), "name", name);
+    extractJsonBool(requestBody.c_str(), "active", active);
+    if (name.length() == 0) {
+        name = "Console";
+    }
+    ConsoleRecord *created = nullptr;
+    const ConsoleWriteResult result = consoleStore->createConsole(name.c_str(), active, &created);
+    if (result != ConsoleWriteOk || created == nullptr) {
+        sendConsoleWriteResult(request, result);
+        return;
+    }
+    broadcastConsolesReload();
+    AsyncWebServerResponse *response =
+        request->beginResponse(200, "application/json", consoleStore->consoleFullJson(created));
+    response->addHeader("Cache-Control", "no-store");
+    request->send(response);
+}
+
+void WebConsole::handleConsoleGet(AsyncWebServerRequest *request) {
+    const UserRecord *user = nullptr;
+    if (!requireUser(request, &user)) {
+        return;
+    }
+    if (consoleStore == nullptr) {
+        request->send(500, "text/plain", "Consoles unavailable");
+        return;
+    }
+    String consoleId;
+    if (request->hasParam("id")) {
+        consoleId = request->getParam("id")->value();
+    }
+    const ConsoleRecord *console = consoleStore->findById(consoleId.c_str());
+    if (console == nullptr) {
+        request->send(404, "text/plain", "Console not found");
+        return;
+    }
+    if (!userCanEditConsoles(user)) {
+        if (!console->active || !UserStore::userHasConsole(user, console->id)) {
+            request->send(403, "text/plain", "Forbidden");
+            return;
+        }
+    }
+    AsyncWebServerResponse *response =
+        request->beginResponse(200, "application/json", consoleStore->consoleFullJson(console));
+    response->addHeader("Cache-Control", "no-store");
+    request->send(response);
+}
+
+void WebConsole::handleConsolePut(AsyncWebServerRequest *request) {
+    if (!requireEditConsoles(request, nullptr)) {
+        return;
+    }
+    if (consoleStore == nullptr) {
+        request->send(500, "text/plain", "Consoles unavailable");
+        return;
+    }
+    String consoleId;
+    extractJsonString(requestBody.c_str(), "id", consoleId);
+    if (consoleId.length() == 0) {
+        request->send(400, "text/plain", "Need console id");
+        return;
+    }
+    sendConsoleWriteResult(
+        request,
+        consoleStore->replaceConsoleFromJson(consoleId.c_str(), requestBody.c_str(), true)
+    );
+}
+
+void WebConsole::handleConsoleDelete(AsyncWebServerRequest *request) {
+    if (!requireEditConsoles(request, nullptr)) {
+        return;
+    }
+    if (consoleStore == nullptr) {
+        request->send(500, "text/plain", "Consoles unavailable");
+        return;
+    }
+    String consoleId;
+    extractJsonString(requestBody.c_str(), "id", consoleId);
+    const ConsoleWriteResult result = consoleStore->deleteConsole(consoleId.c_str());
+    if (result == ConsoleWriteOk) {
+        broadcastConsolesReload();
+        request->send(200, "text/plain", "Deleted");
+        return;
+    }
+    sendConsoleWriteResult(request, result);
 }
 
 void WebConsole::handleUsersDelete(AsyncWebServerRequest *request) {
@@ -572,6 +864,7 @@ void WebConsole::handleUsersDelete(AsyncWebServerRequest *request) {
     extractJsonString(requestBody.c_str(), "userName", userName);
     const UserWriteResult result = userStore->deleteUser(actor, userName.c_str());
     if (result == UserWriteOk) {
+        broadcastConsolesReload();
         request->send(200, "text/plain", "Deleted");
         return;
     }
@@ -1008,6 +1301,8 @@ void WebConsole::handleSettingsExportGet(AsyncWebServerRequest *request) {
     json += settingsManager->deviceMap()->listStoreJson();
     json += ",\"users\":";
     json += userStore->listExportJson();
+    json += ",\"consoles\":";
+    json += consoleStore != nullptr ? consoleStore->listFullJson() : "[]";
     json += "}";
     AsyncWebServerResponse *response = request->beginResponse(200, "application/json", json);
     response->addHeader("Cache-Control", "no-store");
@@ -1030,8 +1325,10 @@ void WebConsole::handleSettingsRestorePost(AsyncWebServerRequest *request) {
     const bool haveHardware = extractJsonKeyedSlice(requestBody.c_str(), "hardware", '{', hardwareJson);
     const bool haveDevices = extractJsonKeyedSlice(requestBody.c_str(), "devices", '[', devicesJson);
     String usersJson;
+    String consolesJson;
     const bool haveUi = extractJsonKeyedSlice(requestBody.c_str(), "ui", '{', uiJson);
     const bool haveUsers = extractJsonKeyedSlice(requestBody.c_str(), "users", '[', usersJson);
+    const bool haveConsoles = extractJsonKeyedSlice(requestBody.c_str(), "consoles", '[', consolesJson);
     if (haveMqtt && !applyMqttJson(mqttJson.c_str(), &errorText)) {
         request->send(400, "text/plain", errorText);
         return;
@@ -1064,32 +1361,58 @@ void WebConsole::handleSettingsRestorePost(AsyncWebServerRequest *request) {
         request->send(503, "text/plain", "Slave is not ready to store the user list");
         return;
     }
+    if (haveConsoles) {
+        if (consoleStore == nullptr || !consoleStore->replaceAllFromJson(consolesJson)) {
+            request->send(400, "text/plain", "Need a valid consoles list");
+            return;
+        }
+    }
     if (haveUi && !applyThemeJson(uiJson.c_str(), userStore->findByName(actorName), &errorText)) {
         request->send(400, "text/plain", errorText);
         return;
     }
     if (haveDevices) {
         DeviceTopicMap *deviceMap = settingsManager->deviceMap();
-        static uint8_t previousIeees[DEVICE_MAP_SLOTS][8];
-        static uint8_t removedIeees[DEVICE_MAP_SLOTS][8];
-        int previousCount = 0;
-        for (int i = 0; i < DEVICE_MAP_SLOTS; i++) {
-            DeviceTopicEntry *entry = deviceMap->slotAt(i);
-            if (entry == nullptr || !entry->used) {
-                continue;
+        const int previousCount = deviceMap->usedCount();
+        uint8_t (*previousIeees)[8] = nullptr;
+        if (previousCount > 0) {
+            previousIeees = (uint8_t (*)[8])malloc((size_t)previousCount * 8);
+            if (previousIeees == nullptr) {
+                request->send(503, "text/plain", "Out of memory for device restore");
+                return;
             }
-            memcpy(previousIeees[previousCount], entry->ieee, 8);
-            previousCount++;
+            int copied = 0;
+            for (DeviceTopicEntry *entry = deviceMap->first(); entry != nullptr;
+                entry = DeviceTopicMap::nextEntry(entry)) {
+                if (!entry->used) {
+                    continue;
+                }
+                memcpy(previousIeees[copied], entry->ieee, 8);
+                copied++;
+            }
         }
         deviceMap->replaceFromJson(devicesJson);
         int removedCount = 0;
-        for (int i = 0; i < previousCount; i++) {
-            if (deviceMap->findByIeee(previousIeees[i]) == nullptr) {
-                memcpy(removedIeees[removedCount], previousIeees[i], 8);
-                removedCount++;
+        uint8_t (*removedIeees)[8] = nullptr;
+        if (previousCount > 0 && previousIeees != nullptr) {
+            removedIeees = (uint8_t (*)[8])malloc((size_t)previousCount * 8);
+            if (removedIeees == nullptr) {
+                free(previousIeees);
+                request->send(503, "text/plain", "Out of memory for device restore");
+                return;
+            }
+            for (int i = 0; i < previousCount; i++) {
+                if (deviceMap->findByIeee(previousIeees[i]) == nullptr) {
+                    memcpy(removedIeees[removedCount], previousIeees[i], 8);
+                    removedCount++;
+                }
             }
         }
-        if (applyDevicesRestored != nullptr && !applyDevicesRestored(removedIeees, removedCount)) {
+        const bool restoreOk =
+            applyDevicesRestored == nullptr || applyDevicesRestored(removedIeees, removedCount);
+        free(previousIeees);
+        free(removedIeees);
+        if (applyDevicesRestored != nullptr && !restoreOk) {
             request->send(503, "text/plain", "Slave is not ready to store the device list");
             return;
         }
@@ -1097,6 +1420,9 @@ void WebConsole::handleSettingsRestorePost(AsyncWebServerRequest *request) {
             settingsManager->saveDevicesJson();
         }
         broadcastDevicesReload();
+    }
+    if (haveConsoles || haveUsers) {
+        broadcastConsolesReload();
     }
     if (haveMqtt || haveZigbee) {
         settingsManager->saveMain(true);

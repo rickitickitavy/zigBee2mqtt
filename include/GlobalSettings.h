@@ -124,19 +124,6 @@ struct ZigbeeSettings {
     uint8_t permitJoinOnBootSec;
 };
 
-struct DeviceTopicEntry {
-    uint8_t ieee[8];
-    char friendlyName[24];
-    char stateTopic[64];
-    char commandTopic[64];
-    char availabilityTopic[64];
-    uint8_t channelCount;
-    uint8_t fullControl;
-    uint8_t zigbeeType;
-    uint8_t transport;
-    uint8_t used;
-};
-
 struct SettingsMainCore {
     char initMarker[4];
     unsigned char version;

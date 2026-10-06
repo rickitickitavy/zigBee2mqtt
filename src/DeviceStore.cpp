@@ -5,9 +5,7 @@
 #include <LittleFS.h>
 #include <string.h>
 
-DeviceStore::DeviceStore() : topicMap(slots) {
-    memset(slots, 0, sizeof(slots));
-}
+DeviceStore::DeviceStore() {}
 
 bool DeviceStore::begin(bool persistToLittleFs) {
     persistEnabled = persistToLittleFs;

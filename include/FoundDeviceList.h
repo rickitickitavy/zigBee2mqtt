@@ -13,11 +13,15 @@ public:
         uint8_t ieee[8];
         uint16_t shortAddr;
         uint8_t endpoint;
-        char manufacturer[32];
-        char model[32];
+        char *manufacturer;
+        char *model;
         uint8_t zigbeeType;
         bool used;
+        FoundDevice *next;
     };
+
+    FoundDeviceList();
+    ~FoundDeviceList();
 
     void clear();
     bool noteJoin(const SpiFrame &frame, DeviceTopicMap *registered);
@@ -35,5 +39,11 @@ public:
     String listJson(DeviceTopicMap *formatter);
 
 private:
-    FoundDevice found[kMaxFound]{};
+    FoundDevice *foundHead = nullptr;
+    int foundCount = 0;
+
+    FoundDevice *findByIeee(const uint8_t ieee[8]);
+    const FoundDevice *findByIeee(const uint8_t ieee[8]) const;
+    void freeFoundDevice(FoundDevice *device);
+    FoundDevice *allocateFoundDevice();
 };
