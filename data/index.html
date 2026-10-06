@@ -188,6 +188,7 @@
             );
             setStatusText("statusWifiMode", payload && payload.wifiMode ? payload.wifiMode : "—");
             setStatusText("statusWifiBssid", payload && payload.wifiBssid ? payload.wifiBssid : "—");
+            setStatusText("statusWifiStaMac", payload && payload.wifiStaMac ? payload.wifiStaMac : "—");
             if (payload && payload.wifiRssiDbm != null) {
                 setStatusText("statusWifiSignal", String(payload.wifiRssiDbm) + " dBm");
             } else {
@@ -276,6 +277,7 @@
             setHidden(document.getElementById("addDeviceBtn"), !canAdd);
             setHidden(document.getElementById("exportDevicesBtn"), !admin);
             setHidden(document.getElementById("restoreDevicesBtn"), !admin);
+            setHidden(document.getElementById("fullRestoreDevicesBtn"), !admin);
         }
 
         function stopSessionWatch() {
@@ -960,7 +962,9 @@
                     command: device.command || "",
                     availability: device.availability || "",
                     channels: device.channels,
-                    fullControl: !!device.fullControl
+                    fullControl: !!device.fullControl,
+                    type: device.type || "unknown",
+                    transport: device.transport == "wifi" ? "wifi" : "zigbee"
                 })
             }).then(function (response) {
                 return response.text().then(function (text) {
@@ -978,8 +982,9 @@
             });
         }
 
-        function restoreDevicesFromSelectedFile(file) {
+        function restoreDevicesFromSelectedFile(file, fullRestore) {
             var restoreError = document.getElementById("devicesRestoreError");
+            var overwriteExisting = !!fullRestore;
             if (restoreError) {
                 restoreError.hidden = true;
             }
@@ -1025,6 +1030,7 @@
                         });
                         var skippedDevices = [];
                         var devicesToAdd = [];
+                        var seenInFile = {};
                         parsed.forEach(function (device) {
                             var key = normalizeIeeeText(device && device.ieee);
                             var friendlyName = device && (device.name || device.friendlyName);
@@ -1032,7 +1038,12 @@
                                 skippedDevices.push(device || {});
                                 return;
                             }
-                            if (presentIeee[key]) {
+                            if (seenInFile[key]) {
+                                skippedDevices.push(device);
+                                return;
+                            }
+                            seenInFile[key] = true;
+                            if (!overwriteExisting && presentIeee[key]) {
                                 skippedDevices.push(device);
                                 return;
                             }
@@ -1065,11 +1076,14 @@
             reader.readAsText(file);
         }
 
-        function openDevicesRestoreDialog() {
+        var devicesRestoreOverwrite = false;
+
+        function openDevicesRestoreDialog(fullRestore) {
             var fileInput = document.getElementById("devicesRestoreFile");
             if (!fileInput) {
                 return;
             }
+            devicesRestoreOverwrite = !!fullRestore;
             fileInput.value = "";
             fileInput.click();
         }
@@ -1214,7 +1228,8 @@
         function onDevicesRestoreFileSelected(event) {
             var fileInput = event && event.target ? event.target : null;
             var file = fileInput && fileInput.files && fileInput.files[0] ? fileInput.files[0] : null;
-            restoreDevicesFromSelectedFile(file);
+            restoreDevicesFromSelectedFile(file, devicesRestoreOverwrite);
+            devicesRestoreOverwrite = false;
         }
 
         function refreshDevicesJson() {
@@ -1286,7 +1301,7 @@
             if (errorLine) {
                 errorLine.hidden = true;
             }
-            fetch("/api/log", { cache: "no-store" }).then(function (response) {
+            fetch("/api/log/download", { cache: "no-store" }).then(function (response) {
                 return response.text().then(function (text) {
                     if (!response.ok) {
                         throw new Error("HTTP " + response.status);
@@ -1526,7 +1541,7 @@
             var cardStatus = document.getElementById("updateCodeStatus");
             if (!fileInput.files || fileInput.files.length == 0) {
                 if (cardStatus) {
-                    cardStatus.textContent = "Choose a .bin file first.";
+                    cardStatus.textContent = "Choose a joined firmware ZIP first.";
                 }
                 return;
             }
@@ -1659,6 +1674,9 @@
             var phase = payload && payload.phase ? payload.phase : "";
             if (phase === "receiving") {
                 return "Uploading firmware to master...";
+            }
+            if (phase === "preparing") {
+                return "Preparing joined package on master...";
             }
             if (phase === "slave") {
                 return "Sending firmware from master to slave...";
@@ -4016,6 +4034,104 @@
             });
         }
 
+        function exportAllConsoles() {
+            var errorLine = document.getElementById("consolesSaveError");
+            if (errorLine) {
+                errorLine.hidden = true;
+            }
+            fetch("/api/consoles/store", { cache: "no-store" }).then(function (response) {
+                return response.text().then(function (text) {
+                    if (!response.ok) {
+                        throw new Error(text || ("HTTP " + response.status));
+                    }
+                    var blob = new Blob([text || "[]"], { type: "application/json;charset=utf-8" });
+                    var objectUrl = URL.createObjectURL(blob);
+                    var link = document.createElement("a");
+                    link.href = objectUrl;
+                    link.download = "consoles.json";
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+                    URL.revokeObjectURL(objectUrl);
+                });
+            }).catch(function (error) {
+                if (errorLine) {
+                    errorLine.hidden = false;
+                    errorLine.textContent = error && error.message ? error.message : "Export failed";
+                }
+            });
+        }
+
+        function chooseConsolesRestoreFile() {
+            var errorLine = document.getElementById("consolesSaveError");
+            if (errorLine) {
+                errorLine.hidden = true;
+            }
+            var fileInput = document.getElementById("consolesRestoreFile");
+            if (!fileInput) {
+                return;
+            }
+            fileInput.value = "";
+            fileInput.click();
+        }
+
+        function onConsolesRestoreFileSelected(event) {
+            var fileInput = event && event.target ? event.target : null;
+            var file = fileInput && fileInput.files && fileInput.files[0] ? fileInput.files[0] : null;
+            var errorLine = document.getElementById("consolesSaveError");
+            if (!file) {
+                return;
+            }
+            if (!window.confirm("Import replaces all consoles with this file. Continue?")) {
+                return;
+            }
+            var reader = new FileReader();
+            reader.onerror = function () {
+                if (errorLine) {
+                    errorLine.hidden = false;
+                    errorLine.textContent = "Failed to read the selected file";
+                }
+            };
+            reader.onload = function () {
+                var text = reader.result ? String(reader.result) : "";
+                var parsed;
+                try {
+                    parsed = JSON.parse(text);
+                } catch (parseError) {
+                    if (errorLine) {
+                        errorLine.hidden = false;
+                        errorLine.textContent = "Selected file is not valid JSON";
+                    }
+                    return;
+                }
+                if (!Array.isArray(parsed)) {
+                    if (errorLine) {
+                        errorLine.hidden = false;
+                        errorLine.textContent = "Selected file must be a consoles JSON array";
+                    }
+                    return;
+                }
+                fetch("/api/consoles/restore", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: text
+                }).then(function (response) {
+                    return response.text().then(function (bodyText) {
+                        if (!response.ok) {
+                            throw new Error(bodyText || ("HTTP " + response.status));
+                        }
+                        loadConsoles();
+                    });
+                }).catch(function (error) {
+                    if (errorLine) {
+                        errorLine.hidden = false;
+                        errorLine.textContent = error && error.message ? error.message : "Import failed";
+                    }
+                });
+            };
+            reader.readAsText(file);
+        }
+
         function renderConsoleTable(rows) {
             var body = document.getElementById("consoleTableBody");
             if (!body) {
@@ -5208,6 +5324,10 @@
                             <p id="statusWifiBssid" class="status-value">—</p>
                         </div>
                         <div class="status-row">
+                            <span class="status-row-label">STA MAC</span>
+                            <p id="statusWifiStaMac" class="status-value">—</p>
+                        </div>
+                        <div class="status-row">
                             <span class="status-row-label">Signal strength</span>
                             <p id="statusWifiSignal" class="status-value">—</p>
                         </div>
@@ -5381,7 +5501,8 @@
                 <div class="page-footer-inner">
                     <button type="button" id="addDeviceBtn" class="btn btn-primary" onclick="openSearchDialog()">Add device</button>
                     <button type="button" id="exportDevicesBtn" class="btn btn-secondary" onclick="exportDevicesStore()">Export</button>
-                    <button type="button" id="restoreDevicesBtn" class="btn btn-secondary" onclick="openDevicesRestoreDialog()">Restore</button>
+                    <button type="button" id="restoreDevicesBtn" class="btn btn-secondary" onclick="openDevicesRestoreDialog(false)">Restore</button>
+                    <button type="button" id="fullRestoreDevicesBtn" class="btn btn-secondary" onclick="openDevicesRestoreDialog(true)">Full restore</button>
                 </div>
             </div>
         </section>
@@ -5543,7 +5664,7 @@
         <div id="settingsRestoreConfirmDialog" class="dialog-overlay dialog-overlay-front" hidden>
             <div class="dialog-panel" role="dialog" aria-label="Confirm restore settings">
                 <h3 class="upload-title">Restore settings</h3>
-                <p class="field-hint">MQTT, Zigbee, hardware, and the device list will match this file. Devices not in the file will be deleted. Wi-Fi is not changed. Continue?</p>
+                <p class="field-hint">MQTT, Zigbee, hardware, devices, users, and consoles will match this file when those sections are present. Devices or consoles missing from the file are removed for those sections. Wi-Fi is not changed. Continue?</p>
                 <div class="dialog-actions">
                     <button type="button" class="btn btn-primary" onclick="confirmSettingsRestore()">Restore</button>
                     <button type="button" class="btn btn-secondary" onclick="closeSettingsRestoreConfirmDialog()">Cancel</button>
@@ -5627,12 +5748,12 @@
             <div class="tab-content">
                 <div id="system-tab-log" class="system-tab-panel tab-panel active" role="tabpanel">
                     <div class="upload-card log-card">
-                        <p class="field-hint">In-memory firmware log (oldest lines drop when the ring is full).</p>
+                        <p class="field-hint">Viewer shows the last 64 KB. Full ring (up to 512 KB in PSRAM) is available via Download.</p>
                         <textarea id="memoryLogViewer" class="log-viewer" readonly></textarea>
                         <p id="logDownloadError" class="save-error" hidden></p>
                         <div class="dialog-actions">
                             <button type="button" class="btn btn-secondary btn-inline" onclick="refreshLog()">Refresh</button>
-                            <button type="button" class="btn btn-primary btn-inline" onclick="downloadLog()">Download</button>
+                            <button type="button" class="btn btn-primary btn-inline" onclick="downloadLog()">Download full log</button>
                         </div>
                     </div>
                 </div>
@@ -5640,10 +5761,10 @@
                     <div class="upload-card">
                         <h3 class="upload-title">Code (firmware)</h3>
                         <p class="field-hint">Running version: <span id="firmwareVersion">—</span></p>
-                        <p class="field-hint">Web console HTML/CSS ships inside this firmware image. PlatformIO: <code>.pio/build/esp32-c6-devkitc-1/firmware.bin</code></p>
-                        <input id="updateCodeFile" type="file" accept=".bin,application/octet-stream">
+                        <p class="field-hint">Upload one joined ZIP (<code>slave.bin</code> + <code>host.bin</code>). Build with PlatformIO envs <code>esp32-c6-slave</code> and <code>esp32-s3-host</code>, then <code>scripts/firmware_join.py</code>.</p>
+                        <input id="updateCodeFile" type="file" accept=".zip,application/zip,application/octet-stream">
                         <p id="updateCodeStatus" class="upload-status"></p>
-                        <button type="button" class="btn btn-primary btn-inline" onclick="uploadFirmware()">Upload firmware</button>
+                        <button type="button" class="btn btn-primary btn-inline" onclick="uploadFirmware()">Upload joined package</button>
                     </div>
                 </div>
                 <div id="system-tab-hardware" class="system-tab-panel tab-panel" role="tabpanel">
@@ -5673,7 +5794,7 @@
                 <div id="system-tab-maintenance" class="system-tab-panel tab-panel" role="tabpanel">
                     <div id="maintenanceSettingsCard" class="upload-card" hidden>
                         <h3 class="upload-title">Settings</h3>
-                        <p class="field-hint">Export MQTT, Zigbee, hardware, and devices. Restore replaces those groups. Wi-Fi is never included.</p>
+                        <p class="field-hint">Export MQTT, Zigbee, hardware, devices, users, and consoles. Restore replaces those groups when present in the file. Wi-Fi is never included.</p>
                         <p id="settingsRestoreError" class="save-error" hidden></p>
                         <input id="settingsRestoreFile" type="file" accept="application/json,.json" hidden onchange="onSettingsRestoreFileSelected(event)">
                         <div class="dialog-actions">
@@ -5710,6 +5831,7 @@
         <section id="section-consoles" class="section-panel" aria-label="Consoles">
             <h2 class="section-title">Consoles</h2>
             <p id="consolesSaveError" class="save-error" hidden></p>
+            <input id="consolesRestoreFile" type="file" accept=".json,application/json" hidden onchange="onConsolesRestoreFileSelected(event)">
             <div class="settings-scroll">
                 <table class="data-table selectable">
                     <thead>
@@ -5724,6 +5846,8 @@
             </div>
             <div class="dialog-actions">
                 <button type="button" class="btn btn-primary" onclick="createConsoleAndEdit()">Add console</button>
+                <button type="button" class="btn btn-secondary" onclick="exportAllConsoles()">Export</button>
+                <button type="button" class="btn btn-secondary" onclick="chooseConsolesRestoreFile()">Import</button>
             </div>
         </section>
     </div>

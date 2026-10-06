@@ -82,6 +82,7 @@ public:
     void setZigbeeHealthChecker(ZigbeeHealthFn checker);
     bool consumeZigbeeLostReboot();
     bool completeCommandResult(uint8_t seq, bool ok);
+    bool hasOutboundPending() const;
 
 private:
     static constexpr int kQueue = 32;

@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <LittleFS.h>
+#include "JoinedFirmwareZip.h"
 #include "SpiProtocol.h"
 
 class FirmwareOta {
@@ -9,20 +10,22 @@ public:
     enum class Phase : uint8_t {
         Idle = 0,
         Receiving = 1,
-        Slave = 2,
-        Host = 3,
-        Failed = 4,
-        Done = 5,
-        Rebooting = 6
+        Preparing = 2,
+        Slave = 3,
+        Host = 4,
+        Failed = 5,
+        Done = 6,
+        Rebooting = 7
     };
 
-    static constexpr const char *kStagingPath = "/ota/firmware.bin";
+    static constexpr const char *kPackagePath = "/ota/package.zip";
     static constexpr uint8_t kMaxSlaveFrameFails = 5;
 
     bool busy() const;
     bool isUpdatingSlave() const;
     bool isApplyingImage() const;
     bool slaveBeginAcked() const;
+    bool isLastSlaveFrameEnd() const;
     Phase phase() const;
     String statusJson() const;
 
@@ -39,13 +42,22 @@ public:
 
     bool handleSlaveFrame(const SpiFrame &frame);
     bool queueSlaveBegin(const SpiFrame &frame);
+    void onSlaveSpiTransferDone();
 
 private:
     Phase currentPhase = Phase::Idle;
     String errorText;
     File stagingFile;
+    File packageFile;
+    JoinedFirmwareZip::MemberInfo slaveMember{};
+    JoinedFirmwareZip::MemberInfo hostMember{};
+    JoinedFirmwareZip::MemberReader memberReader{};
+    uint32_t packageSize = 0;
+    uint32_t slaveImageSize = 0;
+    uint32_t hostImageSize = 0;
     uint32_t imageSize = 0;
     uint32_t imageOffset = 0;
+    uint32_t streamPos = 0;
     bool waitingForSlaveResult = false;
     bool beginQueued = false;
     bool beginAcked = false;
@@ -53,6 +65,10 @@ private:
     bool slaveRestartPending = false;
     bool hostRestartPending = false;
     bool slaveOtaActive = false;
+    bool packagePreparePending = false;
+    bool slaveApplyPending = false;
+    bool slaveApplyArmed = false;
+    uint8_t slaveApplyWaitTransfers = 0;
     uint32_t slaveBytesRemaining = 0;
     uint32_t receivedBytes = 0;
     unsigned long rebootReadyMs = 0;
@@ -65,15 +81,22 @@ private:
     uint8_t lastSlaveSeq = 0;
     uint32_t lastSlaveDataBytes = 0;
     uint8_t slaveFrameFails = 0;
+    volatile bool slavePackClaimed = false;
 
     void fail(const char *message);
-    void clearStagingFile();
+    void clearStagingFiles();
+    void closePackageStream();
+    bool packSlaveChunkFromStream(uint8_t *payloadOut, uint16_t *packedLengthOut, uint32_t *dataBytesOut);
     bool enqueueNextSlaveChunk();
     bool sendLastSlaveFrame(bool isResend);
     void onSlaveFrameLost();
+    bool prepareJoinedPackage();
     bool startHostApply();
     void pumpHostApply();
     void pumpSlaveBegin();
+    void pumpSlaveApply();
+    void armSlaveApplyAfterAckDrain();
+    void pumpPackagePrepare();
     const char *phaseId() const;
     uint8_t percentOf(uint32_t done, uint32_t total) const;
 };

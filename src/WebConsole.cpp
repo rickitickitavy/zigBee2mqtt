@@ -192,6 +192,18 @@ void WebConsole::begin() {
     // Child paths before collection; exact() so /api/consoles does not steal /item|/mine|/update.
     server.on("/api/consoles/mine", HTTP_GET, [this](AsyncWebServerRequest *request) { handleConsolesMineGet(request); });
     server.on("/api/consoles/item", HTTP_GET, [this](AsyncWebServerRequest *request) { handleConsoleGet(request); });
+    server.on("/api/consoles/store", HTTP_GET, [this](AsyncWebServerRequest *request) { handleConsolesStoreGet(request); });
+    server.on(
+        "/api/consoles/restore",
+        HTTP_POST,
+        [this](AsyncWebServerRequest *request) { handleConsolesRestorePost(request); },
+        nullptr,
+        [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+            (void)request;
+            (void)total;
+            appendRequestBody(data, len, index);
+        }
+    );
     server.on(
         "/api/consoles/update",
         HTTP_POST,
@@ -298,6 +310,9 @@ void WebConsole::begin() {
     );
 
     server.on("/api/log", HTTP_GET, [this](AsyncWebServerRequest *request) { handleLogGet(request); });
+    server.on("/api/log/download", HTTP_GET, [this](AsyncWebServerRequest *request) {
+        handleLogDownloadGet(request);
+    });
     server.on("/api/version", HTTP_GET, [this](AsyncWebServerRequest *request) { handleVersionGet(request); });
     server.on(
         "/api/update/status",
@@ -742,6 +757,42 @@ void WebConsole::handleConsolesGet(AsyncWebServerRequest *request) {
         request->beginResponse(200, "application/json", consoleStore->listSummaryJson(userStore));
     response->addHeader("Cache-Control", "no-store");
     request->send(response);
+}
+
+void WebConsole::handleConsolesStoreGet(AsyncWebServerRequest *request) {
+    if (!requireEditConsoles(request, nullptr)) {
+        return;
+    }
+    if (consoleStore == nullptr) {
+        request->send(500, "text/plain", "Consoles unavailable");
+        return;
+    }
+    AsyncWebServerResponse *response =
+        request->beginResponse(200, "application/json", consoleStore->listFullJson());
+    response->addHeader("Cache-Control", "no-store");
+    request->send(response);
+}
+
+void WebConsole::handleConsolesRestorePost(AsyncWebServerRequest *request) {
+    if (!requireEditConsoles(request, nullptr)) {
+        return;
+    }
+    if (consoleStore == nullptr) {
+        request->send(500, "text/plain", "Consoles unavailable");
+        return;
+    }
+    String trimmed = requestBody;
+    trimmed.trim();
+    if (trimmed.length() == 0 || trimmed.charAt(0) != '[') {
+        request->send(400, "text/plain", "Need a consoles JSON array");
+        return;
+    }
+    if (!consoleStore->replaceAllFromJson(trimmed)) {
+        request->send(400, "text/plain", "Need a valid consoles list");
+        return;
+    }
+    broadcastConsolesReload();
+    request->send(200, "text/plain", "Restored");
 }
 
 void WebConsole::handleConsolesMineGet(AsyncWebServerRequest *request) {
@@ -1596,6 +1647,8 @@ void WebConsole::handleDevicesPost(AsyncWebServerRequest *request) {
     uint8_t transport = storedTransport;
     if (!isEdit) {
         transport = haveTransport ? requestedTransport : DeviceTransportZigbee;
+    } else if (haveTransport) {
+        transport = requestedTransport;
     }
     if (!isEdit && transport == DeviceTransportWifi && (!haveIeee || ieeeText.length() == 0)) {
         bool allocated = false;
@@ -1645,15 +1698,15 @@ void WebConsole::handleDevicesPost(AsyncWebServerRequest *request) {
         } else {
             entry->zigbeeType = ZigbeeDeviceTypeUnknown;
         }
+    } else if (haveType) {
+        entry->zigbeeType = zigbeeDeviceTypeFromJsonId(typeText.c_str());
+        if (entry->zigbeeType == ZigbeeDeviceTypeUnknown && storedType != ZigbeeDeviceTypeUnknown) {
+            entry->zigbeeType = storedType;
+        }
     } else if (storedType != ZigbeeDeviceTypeUnknown) {
         entry->zigbeeType = storedType;
     } else if (foundDevices != nullptr) {
         entry->zigbeeType = foundDevices->zigbeeTypeForIeee(ieee);
-        if (entry->zigbeeType == ZigbeeDeviceTypeUnknown && haveType) {
-            entry->zigbeeType = zigbeeDeviceTypeFromJsonId(typeText.c_str());
-        }
-    } else if (haveType) {
-        entry->zigbeeType = zigbeeDeviceTypeFromJsonId(typeText.c_str());
     }
     if (foundDevices != nullptr) {
         foundDevices->removeIeee(ieee);
@@ -1817,6 +1870,24 @@ void WebConsole::handleLogGet(AsyncWebServerRequest *request) {
     }
     size_t start = 0;
     size_t length = 0;
+    LOGGER.snapshotRingTail(Logger::kWebViewMaxBytes, &start, &length);
+    AsyncWebServerResponse *response = request->beginResponse(
+        "text/plain",
+        length,
+        [start, length](uint8_t *buffer, size_t maxLen, size_t index) -> size_t {
+            return LOGGER.copyRingSlice(start, length, index, reinterpret_cast<char *>(buffer), maxLen);
+        }
+    );
+    response->addHeader("Cache-Control", "no-store");
+    request->send(response);
+}
+
+void WebConsole::handleLogDownloadGet(AsyncWebServerRequest *request) {
+    if (!requireUser(request, nullptr, false)) {
+        return;
+    }
+    size_t start = 0;
+    size_t length = 0;
     LOGGER.snapshotRing(&start, &length);
     AsyncWebServerResponse *response = request->beginResponse(
         "text/plain",
@@ -1825,6 +1896,8 @@ void WebConsole::handleLogGet(AsyncWebServerRequest *request) {
             return LOGGER.copyRingSlice(start, length, index, reinterpret_cast<char *>(buffer), maxLen);
         }
     );
+    response->addHeader("Cache-Control", "no-store");
+    response->addHeader("Content-Disposition", "attachment; filename=\"z2m-log.txt\"");
     request->send(response);
 }
 
@@ -1891,7 +1964,9 @@ void WebConsole::handleOtaDone(AsyncWebServerRequest *request) {
     if (!requireAdmin(request, nullptr)) {
         return;
     }
-    if (!otaStarted || otaFailed || FIRMWARE_OTA.phase() != FirmwareOta::Phase::Slave) {
+    if (!otaStarted || otaFailed
+        || (FIRMWARE_OTA.phase() != FirmwareOta::Phase::Preparing
+            && FIRMWARE_OTA.phase() != FirmwareOta::Phase::Slave)) {
         String errorMessage = "Upload failed";
         if (FIRMWARE_OTA.phase() == FirmwareOta::Phase::Failed) {
             errorMessage = FIRMWARE_OTA.statusJson();

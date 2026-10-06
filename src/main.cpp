@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <LittleFS.h>
 #include <WiFi.h>
+#include <esp_mac.h>
 #include <esp_system.h>
 #include <time.h>
 
@@ -13,55 +14,63 @@
 #include "WiFiController.h"
 #include "MqttClient.h"
 #include "MqttBroker.h"
-#include "ZigbeeCoordinator.h"
 #include "WebConsole.h"
 #include "UserStore.h"
 #include "ConsoleStore.h"
 #include "JsonField.h"
+#if defined(BOARD_ROLE_HOST)
 #include "InterChipHost.h"
+#endif
+#if defined(BOARD_ROLE_SLAVE)
 #include "InterChipSlave.h"
+#endif
 #include "StatusRgb.h"
 #include "ZigbeeSpiProxy.h"
 #include "FoundDeviceList.h"
-#include "UserStore.h"
 #include "DeviceStore.h"
 #include "ZigbeeDeviceType.h"
 #include "ZigbeeCluster.h"
+#if defined(BOARD_ROLE_SLAVE)
+#include "ZigbeeCoordinator.h"
+#endif
 
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 
-#ifndef ZIGBEE_MODE_ZCZR
+#if defined(BOARD_ROLE_SLAVE) && !defined(ZIGBEE_MODE_ZCZR)
 #error "Zigbee coordinator mode is not selected (ZIGBEE_MODE_ZCZR)"
 #endif
+#if !defined(BOARD_ROLE_HOST) && !defined(BOARD_ROLE_SLAVE)
+#error "Define BOARD_ROLE_HOST or BOARD_ROLE_SLAVE"
+#endif
 
-enum BoardRole : uint8_t {
-    BoardRoleHost = 0,
-    BoardRoleSlave = 1
-};
-
-static BoardRole boardRole = BoardRoleHost;
 static SettingsManager *settingsManager = nullptr;
 static DeviceTopicMap *topicMap = nullptr;
 static WiFiController *wifiController = nullptr;
 static MqttClient *mqttClient = nullptr;
 static MqttBroker *mqttBroker = nullptr;
+#if defined(BOARD_ROLE_SLAVE)
 static ZigbeeCoordinator *zigbeeCoordinator = nullptr;
+#endif
 static WebConsole *webConsole = nullptr;
 static UserStore *userStore = nullptr;
 static ConsoleStore *consoleStore = nullptr;
 static FoundDeviceList *foundDevices = nullptr;
 static DeviceStore *deviceStore = nullptr;
 static bool ntpStarted = false;
+#if defined(BOARD_ROLE_SLAVE)
 static bool slaveZigbeeStarted = false;
 static bool slaveZigbeeStarting = false;
 static uint32_t slaveZigbeeStartDeadlineMs = 0;
 static constexpr uint32_t kSlaveZigbeeStartTimeoutMs = 30000;
+#endif
 static bool persistHostDeviceList();
 static bool onUsersRestored(const char (*removedNames)[USER_NAME_MAX], int removedCount);
 static void onHostUserChanged(UserChangeKind kind, const UserRecord *user);
+#if defined(BOARD_ROLE_SLAVE)
 static void onSlaveUserSync(uint8_t flags, const UserRecord *user);
+#endif
 static bool hostPreparationLatched = false;
 static volatile bool hostDeviceListPersistPending = false;
 static volatile bool hostMqttCommandResubscribePending = false;
@@ -95,15 +104,6 @@ static void applyRegisteredDeviceCommand(
     uint8_t topicEndpoint
 );
 static int applyManualDeviceCommand(const char *ieeeText, const char *payload, int channel);
-
-static BoardRole readBoardRole() {
-    pinMode(PIN_BOARD_ROLE, INPUT);
-    delay(2);
-    if (digitalRead(PIN_BOARD_ROLE) == HIGH) {
-        return BoardRoleSlave;
-    }
-    return BoardRoleHost;
-}
 
 static void onMqttRawMessage(char *topic, byte *payload, unsigned int length) {
     if (mqttClient != nullptr) {
@@ -668,6 +668,7 @@ static bool hostLastDeviceRssi(const uint8_t ieee[8], int8_t *rssiDbm) {
     return ZIGBEE_SPI_PROXY.lastRssiDbm(ieee, rssiDbm);
 }
 
+#if defined(BOARD_ROLE_HOST)
 static String hostGatewayStatusJson() {
     int registeredCount = topicMap != nullptr ? topicMap->usedCount() : 0;
     int onlineCount = 0;
@@ -739,6 +740,25 @@ static String hostGatewayStatusJson() {
     json += wifiModeText;
     json += "\",\"wifiBssid\":\"";
     appendJsonEscaped(json, wifiBssid, 64);
+    json += "\",\"wifiStaMac\":\"";
+    {
+        uint8_t staMacBytes[6] = {};
+        char staMacText[18] = {};
+        if (esp_read_mac(staMacBytes, ESP_MAC_WIFI_STA) == ESP_OK) {
+            snprintf(
+                staMacText,
+                sizeof(staMacText),
+                "%02X:%02X:%02X:%02X:%02X:%02X",
+                staMacBytes[0],
+                staMacBytes[1],
+                staMacBytes[2],
+                staMacBytes[3],
+                staMacBytes[4],
+                staMacBytes[5]
+            );
+        }
+        appendJsonEscaped(json, staMacText, sizeof(staMacText));
+    }
     json += "\",\"wifiRssiDbm\":";
     if (staHasRssi) {
         json += String((int)WiFi.RSSI());
@@ -748,6 +768,7 @@ static String hostGatewayStatusJson() {
     json += "}";
     return json;
 }
+#endif
 
 static bool onDeviceUpserted(const DeviceTopicEntry *entry) {
     if (mqttClient != nullptr) {
@@ -794,6 +815,7 @@ static void onHostUserChanged(UserChangeKind kind, const UserRecord *user) {
     ZIGBEE_SPI_PROXY.enqueueUserUpsert(user);
 }
 
+#if defined(BOARD_ROLE_SLAVE)
 static void onSlaveUserSync(uint8_t flags, const UserRecord *user) {
     if ((flags & SPI_USER_SYNC_RESET) != 0) {
         LOGGER.warning("Host cannot replace the full user store");
@@ -814,6 +836,7 @@ static void onSlaveUserSync(uint8_t flags, const UserRecord *user) {
         userStore->upsertFromRecord(user, true);
     }
 }
+#endif
 
 static void runDeviceRegistryFixtures() {
     LOGGER.info(
@@ -1105,6 +1128,7 @@ static void maybeStartNtp() {
     LOGGER.info("NTP started");
 }
 
+#if defined(BOARD_ROLE_SLAVE)
 static void startZigbeeOnOwnTask(uint8_t channel, uint8_t permitJoinSec) {
     struct StartArgs {
         uint8_t channel;
@@ -1281,12 +1305,25 @@ static void onSlaveZclCommand(
     }
     zigbeeCoordinator->sendClusterCommand(ieee, endpoint, clusterId, commandId, payload, payloadLength);
 }
+#endif
 
+#if defined(BOARD_ROLE_HOST)
 static void setupHost() {
     INTER_CHIP_HOST.resetSlaveSynchronous();
     STATUS_RGB.setBootHeld(true);
     LOGGER.setRoleLabel("host");
     LOGGER.setStoreRing(true);
+    LOGGER.begin();
+    if (LOGGER.ringCapacityBytes() >= Logger::kRingCapacityTarget) {
+        LOGGER.info("Log ring " + String((unsigned long)LOGGER.ringCapacityBytes()) + " bytes in PSRAM");
+    } else if (LOGGER.ringCapacityBytes() > 0) {
+        LOGGER.warning(
+            "Log ring " + String((unsigned long)LOGGER.ringCapacityBytes())
+            + " bytes in internal RAM (PSRAM unavailable)"
+        );
+    } else {
+        LOGGER.warning("Log ring allocation failed");
+    }
     {
         SpiFrame fixture;
         fixture.cmd = SpiCmdPing;
@@ -1531,7 +1568,9 @@ static void setupHost() {
     runDeviceRegistryFixtures();
     LOGGER.info("Host SPI ready; Zigbee radio stays on the slave");
 }
+#endif
 
+#if defined(BOARD_ROLE_SLAVE)
 static void setupSlave() {
     STATUS_RGB.setReadyGreen(true);
     STATUS_RGB.setBootHeld(true);
@@ -1569,56 +1608,54 @@ static void setupSlave() {
     LOGGER.info("Reset " + String((int)esp_reset_reason()));
     LOGGER.info("Zigbee runtime copy only; devices and users stay on the host");
 }
+#endif
 
 void setup() {
     STATUS_RGB.begin();
     Serial.begin(115200);
     Serial.setTxTimeoutMs(20);
     delay(400);
-    boardRole = readBoardRole();
-    if (boardRole == BoardRoleHost) {
-        setupHost();
-    } else {
-        setupSlave();
-    }
+#if defined(BOARD_ROLE_HOST)
+    setupHost();
+#else
+    setupSlave();
+#endif
 }
 
 void loop() {
-    if (boardRole == BoardRoleHost) {
-        settingsManager->handlePendingRestart(400);
-        FIRMWARE_OTA.pump();
-        if (FIRMWARE_OTA.consumeHostRestart()) {
-            settingsManager->requestRestart();
-        }
-        STATUS_RGB.setUpdateHeld(FIRMWARE_OTA.busy());
-        if (FIRMWARE_OTA.isUpdatingSlave()) {
-            wifiController->update();
-            STATUS_RGB.service();
-            delay(0);
-            return;
-        }
+#if defined(BOARD_ROLE_HOST)
+    settingsManager->handlePendingRestart(400);
+    FIRMWARE_OTA.pump();
+    if (FIRMWARE_OTA.consumeHostRestart()) {
+        settingsManager->requestRestart();
+    }
+    STATUS_RGB.setUpdateHeld(FIRMWARE_OTA.busy());
+    if (FIRMWARE_OTA.isUpdatingSlave()) {
         wifiController->update();
-        maybeStartNtp();
-        mqttBroker->dispatch(wifiController->hasUsableInterface());
-        mqttClient->dispatch(wifiController->isStaConnected());
-        pumpWifiDeviceCommands();
-        ZIGBEE_SPI_PROXY.pumpRegistrySync();
-        if (webConsole != nullptr) {
-            webConsole->loop();
-        }
-        pumpHostDeferredStoreWork();
-        if (!hostPreparationLatched && wifiController->hasUsableInterface() && INTER_CHIP_HOST.isNormal()) {
-            hostPreparationLatched = true;
-            STATUS_RGB.setBootHeld(false);
-        }
-        if (hostPreparationLatched) {
-            STATUS_RGB.setCritical(!INTER_CHIP_HOST.isLinkHealthy());
-        }
         STATUS_RGB.service();
-        delay(5);
+        delay(0);
         return;
     }
-
+    wifiController->update();
+    maybeStartNtp();
+    mqttBroker->dispatch(wifiController->hasUsableInterface());
+    mqttClient->dispatch(wifiController->isStaConnected());
+    pumpWifiDeviceCommands();
+    ZIGBEE_SPI_PROXY.pumpRegistrySync();
+    if (webConsole != nullptr) {
+        webConsole->loop();
+    }
+    pumpHostDeferredStoreWork();
+    if (!hostPreparationLatched && wifiController->hasUsableInterface() && INTER_CHIP_HOST.isNormal()) {
+        hostPreparationLatched = true;
+        STATUS_RGB.setBootHeld(false);
+    }
+    if (hostPreparationLatched) {
+        STATUS_RGB.setCritical(!INTER_CHIP_HOST.isLinkHealthy());
+    }
+    STATUS_RGB.service();
+    delay(5);
+#else
     FIRMWARE_OTA.pump();
     if (FIRMWARE_OTA.isApplyingImage()) {
         if (FIRMWARE_OTA.consumeFirmwareRestart()) {
@@ -1663,4 +1700,5 @@ void loop() {
         zigbeeCoordinator->dispatch();
     }
     delay(5);
+#endif
 }

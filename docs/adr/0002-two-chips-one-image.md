@@ -1,5 +1,9 @@
 # 0002. Two chips, one image
 
+## Status
+
+**Superseded** by [0003. Two chips, two images, one joined Update ZIP](0003-two-chips-two-images-joined-zip.md).
+
 ## Context
 
 Wi-Fi and Zigbee on one ESP32-C6 starve each other. The product uses two C6 boards.
@@ -15,3 +19,5 @@ Slave runs the Zigbee coordinator and SPI slave only. It does not start Wi-Fi, t
 ## Consequences
 
 Do not split into two firmware projects or bake the role into a build flag without a new ADR. Hardware must hold GPIO15 through reset (C6 strap).
+
+**Superseded:** host is now ESP32-S3 and slave ESP32-C6 with distinct images and a joined Update ZIP (see ADR 0003).

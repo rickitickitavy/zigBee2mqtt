@@ -225,6 +225,26 @@ bool InterChipHost::enqueueInternal(
     if (FIRMWARE_OTA.isUpdatingSlave() && cmd != SpiCmdFirmwareOta) {
         return false;
     }
+    if (FIRMWARE_OTA.isUpdatingSlave() && cmd == SpiCmdFirmwareOta) {
+        // At most one OTA frame in the outbound queue — avoid flood on retry/pump races.
+        for (int i = 0; i < kOutQueue; i++) {
+            if (!outbound[i].used || outbound[i].frame.cmd != SpiCmdFirmwareOta) {
+                continue;
+            }
+            outbound[i].expectReply = expectReply;
+            if (seq != 0) {
+                outbound[i].frame.seq = seq;
+            }
+            lastQueuedSeq = outbound[i].frame.seq;
+            outbound[i].frame.length = length;
+            if (length > 0 && payload != nullptr) {
+                memcpy(outbound[i].frame.payload, payload, length);
+            } else {
+                outbound[i].frame.length = 0;
+            }
+            return true;
+        }
+    }
     if (tryCoalesceDeviceControl(cmd, payload, length, expectReply)) {
         return true;
     }
@@ -416,8 +436,12 @@ void InterChipHost::emitLocalTimeout() {
     timeoutFrame.seq = pendingSeq;
     timeoutFrame.length = 1;
     timeoutFrame.payload[0] = timedOutCmd;
-    LOGGER.warning("SPI slave reply timeout cmd=" + String(timedOutCmd));
-    if (FIRMWARE_OTA.isUpdatingSlave() && timedOutCmd != SpiCmdFirmwareOta) {
+    if (!(FIRMWARE_OTA.isUpdatingSlave() && timedOutCmd == SpiCmdFirmwareOta)) {
+        LOGGER.warning("SPI slave reply timeout cmd=" + String(timedOutCmd));
+    } else {
+        // Silent during exclusive OTA — first-try timeouts are expected under flash load.
+    }
+    if (FIRMWARE_OTA.busy() && timedOutCmd != SpiCmdFirmwareOta) {
         return;
     }
     if (eventHandler != nullptr) {
@@ -439,7 +463,7 @@ void InterChipHost::emitLocalTimeout() {
         return;
     }
     if (state == HostBringupNormal && isKeepaliveCommand(timedOutCmd)) {
-        if (FIRMWARE_OTA.isUpdatingSlave()) {
+        if (FIRMWARE_OTA.busy()) {
             return;
         }
         pingTimeouts++;
@@ -497,7 +521,7 @@ void InterChipHost::pump() {
         emitLocalTimeout();
     }
 
-    if (state == HostBringupNormal && !FIRMWARE_OTA.isUpdatingSlave()) {
+    if (state == HostBringupNormal && !FIRMWARE_OTA.busy()) {
         if (zigbeeStartDeadlineMs != 0
             && !slaveZigbeeStarted
             && (int32_t)(millis() - zigbeeStartDeadlineMs) >= 0) {
@@ -565,9 +589,13 @@ void InterChipHost::pump() {
             pendingCmd = nextOut->frame.cmd;
             unsigned long replyTimeoutMs = kReplyTimeoutMs;
             if (nextOut->frame.cmd == SpiCmdFirmwareOta) {
-                replyTimeoutMs = FIRMWARE_OTA.slaveBeginAcked()
-                    ? kOtaChunkReplyTimeoutMs
-                    : kOtaBeginReplyTimeoutMs;
+                if (!FIRMWARE_OTA.slaveBeginAcked()) {
+                    replyTimeoutMs = kOtaBeginReplyTimeoutMs;
+                } else if (FIRMWARE_OTA.isLastSlaveFrameEnd()) {
+                    replyTimeoutMs = kOtaEndReplyTimeoutMs;
+                } else {
+                    replyTimeoutMs = kOtaChunkReplyTimeoutMs;
+                }
             }
             pendingDeadlineMs = millis() + replyTimeoutMs;
         }
