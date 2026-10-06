@@ -502,7 +502,7 @@ bool WebConsole::userIsOperator(const UserRecord *user) const {
         return false;
     }
     return user->isAdmin || user->editDevices || user->addDevices || user->removeDevices || user->editUsers
-        || user->editConsoles;
+        || user->editConsoles || user->monitor;
 }
 
 bool WebConsole::requireEditConsoles(AsyncWebServerRequest *request, const UserRecord **userOut, bool touchActivity) {
@@ -541,6 +541,7 @@ void WebConsole::fillUserFromJson(const char *json, UserRecord *user) {
     extractJsonBool(json, "removeDevices", user->removeDevices);
     extractJsonBool(json, "editUsers", user->editUsers);
     extractJsonBool(json, "editConsoles", user->editConsoles);
+    extractJsonBool(json, "monitor", user->monitor);
     extractJsonBool(json, "isBlocked", user->isBlocked);
     extractJsonString(json, "theme", themeText);
     user->theme = UserStore::themeFromJsonId(themeText.c_str());

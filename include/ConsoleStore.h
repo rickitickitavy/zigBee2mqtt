@@ -10,6 +10,7 @@ struct ConsoleBinding {
     uint8_t channel;
     char *title;
     char *unit;
+    int8_t decimals;
     ConsoleBinding *next;
 };
 

@@ -22,6 +22,7 @@ struct UserRecord {
     bool removeDevices;
     bool editUsers;
     bool editConsoles;
+    bool monitor;
     bool isBlocked;
     uint8_t theme;
     UserConsoleIdNode *consoleIds;

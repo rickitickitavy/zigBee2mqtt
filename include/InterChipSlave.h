@@ -7,6 +7,7 @@
 
 class InterChipSlave {
 public:
+    using ZigbeeHealthFn = bool (*)();
     using SettingsFn = void (*)(uint8_t channel, uint8_t permitJoinSec, uint32_t unixSec);
     using PermitJoinFn = bool (*)(uint8_t seconds);
     using OnOffFn = void (*)(const uint8_t ieee[8], const char *command, uint8_t endpoint);
@@ -77,6 +78,9 @@ public:
     void setDevicesFileSource(DevicesFileFn handler);
     void setPumpPaused(bool paused);
     void resumeAfterRadioPause();
+    void setZigbeeStarted(bool started);
+    void setZigbeeHealthChecker(ZigbeeHealthFn checker);
+    bool consumeZigbeeLostReboot();
     bool completeCommandResult(uint8_t seq, bool ok);
 
 private:
@@ -111,6 +115,7 @@ private:
     QueuedFrame outbound[kQueue]{};
     int outboundCount = 0;
     SettingsFn settingsHandler = nullptr;
+    ZigbeeHealthFn zigbeeHealthChecker = nullptr;
     PermitJoinFn permitJoinHandler = nullptr;
     OnOffFn onOffHandler = nullptr;
     WriteAttrFn writeAttrHandler = nullptr;
@@ -134,6 +139,8 @@ private:
     uint8_t nextSeq = 1;
     bool readySent = false;
     bool spiReady = false;
+    bool zigbeeStarted = false;
+    bool zigbeeLostRebootPending = false;
     bool settingsPending = false;
     bool permitJoinPending = false;
     bool pumpPaused = false;

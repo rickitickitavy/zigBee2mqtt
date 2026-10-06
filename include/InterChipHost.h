@@ -36,6 +36,8 @@ private:
     static constexpr unsigned long kPollMs = 50UL;
     static constexpr unsigned long kPingPeriodMs = 10000UL;
     static constexpr unsigned long kStatusPeriodMs = 10000UL;
+    static constexpr unsigned long kZigbeeStartStatusPeriodMs = 1000UL;
+    static constexpr unsigned long kZigbeeStartTimeoutMs = 30000UL;
     static constexpr unsigned long kTimeSyncMs = 30000UL;
     static constexpr unsigned long kMinTransferGapUs = 2000UL;
     static constexpr unsigned long kRstPulseMs = 15UL;
@@ -68,6 +70,8 @@ private:
     unsigned long lastTimeSyncMs = 0;
     unsigned long lastSettingsOkMs = 0;
     unsigned long lastKeepaliveOkMs = 0;
+    unsigned long zigbeeStartDeadlineMs = 0;
+    bool slaveZigbeeStarted = false;
     bool resetAsserting = false;
     bool settingsQueued = false;
     uint8_t settingsRetries = 0;

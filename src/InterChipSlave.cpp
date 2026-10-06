@@ -73,6 +73,22 @@ void InterChipSlave::setPumpPaused(bool paused) {
     pumpPaused = paused;
 }
 
+void InterChipSlave::setZigbeeStarted(bool started) {
+    zigbeeStarted = started;
+}
+
+void InterChipSlave::setZigbeeHealthChecker(ZigbeeHealthFn checker) {
+    zigbeeHealthChecker = checker;
+}
+
+bool InterChipSlave::consumeZigbeeLostReboot() {
+    if (!zigbeeLostRebootPending) {
+        return false;
+    }
+    zigbeeLostRebootPending = false;
+    return true;
+}
+
 void InterChipSlave::requestDeviceDump() {
     if (deviceDumpPending) {
         return;
@@ -631,14 +647,36 @@ void InterChipSlave::handleHostFrame(const SpiFrame &frame) {
         return;
     }
     if (frame.cmd == SpiCmdPing) {
-        enqueueReply(SpiEvtPong, frame.seq, nullptr, 0);
+        uint8_t flags = 0;
+        if (readySent) {
+            flags |= SPI_STATUS_FLAG_READY;
+        }
+        bool zigbeeOk = zigbeeStarted;
+        if (zigbeeStarted && zigbeeHealthChecker != nullptr) {
+            zigbeeOk = zigbeeHealthChecker();
+            if (!zigbeeOk) {
+                LOGGER.error("Zigbee health check failed on ping");
+                zigbeeStarted = false;
+                zigbeeLostRebootPending = true;
+            }
+        }
+        if (zigbeeOk) {
+            flags |= SPI_STATUS_FLAG_ZIGBEE_STARTED;
+        }
+        enqueueReply(SpiEvtPong, frame.seq, &flags, 1);
         return;
     }
     if (frame.cmd == SpiCmdReadEvent || frame.cmd == SpiCmdGetStatus) {
         if (frame.cmd == SpiCmdGetStatus) {
             uint8_t statusPayload[1 + SPI_STATUS_VERSION_MAX + 1];
             memset(statusPayload, 0, sizeof(statusPayload));
-            statusPayload[0] = readySent ? 1 : 0;
+            statusPayload[0] = 0;
+            if (readySent) {
+                statusPayload[0] |= SPI_STATUS_FLAG_READY;
+            }
+            if (zigbeeStarted) {
+                statusPayload[0] |= SPI_STATUS_FLAG_ZIGBEE_STARTED;
+            }
             strncpy((char *)statusPayload + 1, FIRMWARE_VERSION, SPI_STATUS_VERSION_MAX);
             const uint16_t versionLength = (uint16_t)strlen((char *)statusPayload + 1);
             enqueueReply(SpiEvtStatus, frame.seq, statusPayload, (uint16_t)(1 + versionLength));
