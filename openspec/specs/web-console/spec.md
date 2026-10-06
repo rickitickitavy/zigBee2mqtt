@@ -163,24 +163,20 @@ When System is selected, the console MUST present nested folder-style tabs in th
 - **WHEN** the operator opens System
 - **THEN** the Log tab is selected first
 
-### Requirement: Firmware update from the Update tab
-
-The Update tab MUST show the running firmware version and accept a firmware binary upload over HTTP. After a valid firmware file is received, the host MUST program the slave’s inactive application slot over SPI first. Only after the slave reports a successful firmware commit MUST the host program its own inactive application slot and restart. A failed HTTP receive, a failed slave transfer, or a failed slave commit MUST leave the host’s running application unchanged, MUST NOT restart the host, and MUST show a failure on the page. Filesystem upload on the same tab is unchanged by this requirement.
+### Requirement: Firmware update uploads one package for both chips
+The Update tab MUST show the running firmware version and accept a **joined firmware package** upload over HTTP (ZIP containing `slave.bin` and `host.bin`). After a valid file is received, the host MUST program the slave from `slave.bin` over SPI first. Only after the slave reports a successful firmware commit MUST the host program itself from `host.bin` and restart. A failed HTTP receive, invalid package, failed slave transfer, or failed slave commit MUST leave the host’s running application unchanged, MUST NOT restart the host, and MUST show a failure on the page.
 
 #### Scenario: Successful firmware upload
-
-- **WHEN** the operator uploads a valid firmware image from the Update tab and the slave commit succeeds
-- **THEN** the slave is running or restarting into that image before the host restarts into the same image
+- **WHEN** the operator uploads a valid joined package from the Update tab and the slave commit succeeds
+- **THEN** the host applies its image and restarts; both chips run the new firmware
 
 #### Scenario: Failed firmware upload
-
-- **WHEN** the upload is aborted or the image is rejected
+- **WHEN** the upload is rejected or staging fails
 - **THEN** the currently running firmware remains unchanged and the page reports the failure
 
 #### Scenario: Slave OTA fails
-
-- **WHEN** the HTTP firmware file is accepted but the slave transfer or slave commit fails
-- **THEN** the host does not restart, the host keeps its previously running application, and the Update tab reports the failure
+- **WHEN** the joined package is accepted but the slave transfer or slave commit fails
+- **THEN** the host does not apply its image, does not restart for update, and the page reports the failure
 
 ### Requirement: Firmware Update shows slave-then-host progress
 

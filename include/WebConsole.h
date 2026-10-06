@@ -115,6 +115,8 @@ private:
     void handleConsolesGet(AsyncWebServerRequest *request);
     void handleConsolesMineGet(AsyncWebServerRequest *request);
     void handleConsolesPost(AsyncWebServerRequest *request);
+    void handleConsolesStoreGet(AsyncWebServerRequest *request);
+    void handleConsolesRestorePost(AsyncWebServerRequest *request);
     void handleConsoleGet(AsyncWebServerRequest *request);
     void handleConsolePut(AsyncWebServerRequest *request);
     void handleConsoleDelete(AsyncWebServerRequest *request);
@@ -137,6 +139,7 @@ private:
     void handleGatewayStatusGet(AsyncWebServerRequest *request);
     void appendRequestBody(uint8_t *data, size_t len, size_t index);
     void handleLogGet(AsyncWebServerRequest *request);
+    void handleLogDownloadGet(AsyncWebServerRequest *request);
     void handleVersionGet(AsyncWebServerRequest *request);
     void handleFirmwareUpdateStatusGet(AsyncWebServerRequest *request);
     void handleOtaUpload(

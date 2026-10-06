@@ -1,10 +1,4 @@
-# board-role Specification
-
-## Purpose
-
-Selects host or slave by which firmware image is flashed: ESP32-S3 always runs as Wi-Fi/SPI host; ESP32-C6 always runs as Zigbee/SPI slave. Role is not chosen by a GPIO strap.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Role pin sampled at boot
 The product SHALL NOT sample a GPIO role strap to choose host vs slave. The ESP32-S3 firmware image SHALL always run as the Wi-Fi/SPI host. The ESP32-C6 firmware image SHALL always run as the Zigbee/SPI slave. Role SHALL be fixed by which image is flashed to which chip.

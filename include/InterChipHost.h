@@ -33,6 +33,7 @@ private:
     static constexpr unsigned long kReplyTimeoutMs = 3000UL;
     static constexpr unsigned long kOtaBeginReplyTimeoutMs = 180000UL;
     static constexpr unsigned long kOtaChunkReplyTimeoutMs = 250UL;
+    static constexpr unsigned long kOtaEndReplyTimeoutMs = 5000UL;
     static constexpr unsigned long kPollMs = 50UL;
     static constexpr unsigned long kPingPeriodMs = 10000UL;
     static constexpr unsigned long kStatusPeriodMs = 10000UL;

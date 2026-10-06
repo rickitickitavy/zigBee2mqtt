@@ -1,11 +1,33 @@
 #include "Logger.h"
 
+#include <esp_heap_caps.h>
 #include <time.h>
 #include <string.h>
 
 Logger LOGGER;
 
 Logger::Logger() {}
+
+void Logger::begin() {
+    if (ring != nullptr) {
+        return;
+    }
+    ring = static_cast<char *>(
+        heap_caps_malloc(kRingCapacityTarget, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+    );
+    if (ring != nullptr) {
+        ringCapacity = kRingCapacityTarget;
+        memset(ring, 0, ringCapacity);
+        return;
+    }
+    ring = static_cast<char *>(
+        heap_caps_malloc(kInternalFallbackBytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
+    );
+    if (ring != nullptr) {
+        ringCapacity = kInternalFallbackBytes;
+        memset(ring, 0, ringCapacity);
+    }
+}
 
 void Logger::setRoleLabel(const char *label) {
     if (label != nullptr && label[0] != '\0') {
@@ -57,20 +79,20 @@ void Logger::formatTimestamp(char *buffer, size_t bufferSize) const {
 }
 
 void Logger::appendRing(const String &msg) {
-    if (!storeRing) {
+    if (!storeRing || ring == nullptr || ringCapacity == 0) {
         return;
     }
     const size_t length = msg.length();
     for (size_t i = 0; i < length; i++) {
         ring[writePos] = msg[i];
-        writePos = (writePos + 1) % kRingSize;
-        if (used < kRingSize) {
+        writePos = (writePos + 1) % ringCapacity;
+        if (used < ringCapacity) {
             used++;
         }
     }
     ring[writePos] = '\n';
-    writePos = (writePos + 1) % kRingSize;
-    if (used < kRingSize) {
+    writePos = (writePos + 1) % ringCapacity;
+    if (used < ringCapacity) {
         used++;
     }
 }
@@ -80,7 +102,23 @@ void Logger::snapshotRing(size_t *start, size_t *length) const {
         *length = used;
     }
     if (start != nullptr) {
-        *start = used < kRingSize ? 0 : writePos;
+        *start = (ringCapacity == 0 || used < ringCapacity) ? 0 : writePos;
+    }
+}
+
+void Logger::snapshotRingTail(size_t maxBytes, size_t *start, size_t *length) const {
+    size_t fullStart = 0;
+    size_t fullLength = 0;
+    snapshotRing(&fullStart, &fullLength);
+    if (maxBytes > 0 && fullLength > maxBytes && ringCapacity > 0) {
+        fullStart = (fullStart + (fullLength - maxBytes)) % ringCapacity;
+        fullLength = maxBytes;
+    }
+    if (start != nullptr) {
+        *start = fullStart;
+    }
+    if (length != nullptr) {
+        *length = fullLength;
     }
 }
 
@@ -91,13 +129,13 @@ size_t Logger::copyRingSlice(
     char *destination,
     size_t maxLength
 ) const {
-    if (destination == nullptr || offset >= length || maxLength == 0) {
+    if (ring == nullptr || ringCapacity == 0 || destination == nullptr || offset >= length || maxLength == 0) {
         return 0;
     }
     const size_t remaining = length - offset;
     const size_t toCopy = remaining < maxLength ? remaining : maxLength;
-    const size_t physical = (start + offset) % kRingSize;
-    const size_t firstRun = kRingSize - physical;
+    const size_t physical = (start + offset) % ringCapacity;
+    const size_t firstRun = ringCapacity - physical;
     if (toCopy <= firstRun) {
         memcpy(destination, ring + physical, toCopy);
         return toCopy;

@@ -432,6 +432,10 @@ bool InterChipSlave::completeCommandResult(uint8_t seq, bool ok) {
     return enqueueReply(SpiEvtCmdResult, seq, &value, 1);
 }
 
+bool InterChipSlave::hasOutboundPending() const {
+    return outboundCount > 0 || hardwareQueued > 0;
+}
+
 bool InterChipSlave::enqueueReply(uint8_t cmd, uint8_t seq, const uint8_t *payload, uint16_t length) {
     if (tryEnqueue(cmd, seq, payload, length)) {
         return true;
@@ -847,6 +851,7 @@ void InterChipSlave::serviceSpi() {
         }
     }
     fillHardwareQueue();
+    FIRMWARE_OTA.onSlaveSpiTransferDone();
 }
 
 void InterChipSlave::applyDeferredSettings() {

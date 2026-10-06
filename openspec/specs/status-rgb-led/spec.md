@@ -15,6 +15,17 @@ Each chip SHALL drive LED1 on GPIO18, LED2 on GPIO19, LED3 on GPIO20, LED4 on GP
 - **WHEN** status indication is shown
 - **THEN** host uses LED1, LED2, LED4, LED5, and LED6; slave uses LED1–LED6
 
+### Requirement: Host status and boot GPIOs on ESP32-S3
+On the ESP32-S3 host, the firmware SHALL drive LED1–LED6 and sample the boot button on the host pin map from design (LED1–4: GPIO **4–7**, LED5: **15**, LED6: **16**, boot button: **41**). The firmware SHALL NOT require the former C6 role strap for LED or button behavior.
+
+#### Scenario: Host LED outputs
+- **WHEN** the host needs to show status on LED1–LED6
+- **THEN** it toggles the ESP32-S3 GPIOs assigned to those LEDs
+
+#### Scenario: Boot button
+- **WHEN** the operator holds the boot button according to existing AP/recovery rules
+- **THEN** the host samples GPIO **41** for that button
+
 ### Requirement: Onboard RGB is unused
 
 Each chip SHALL NOT drive the onboard WS2812 for status. Status SHALL use only LED1–LED6.

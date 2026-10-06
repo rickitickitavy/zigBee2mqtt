@@ -1,16 +1,22 @@
 #include "FirmwareOta.h"
+#include "JoinedFirmwareZip.h"
 #include "InterChipHost.h"
 #include "InterChipSlave.h"
 #include "Logger.h"
 
 #include <Update.h>
 #include <string.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/portmacro.h>
 
 FirmwareOta FIRMWARE_OTA;
 
+static portMUX_TYPE gFirmwareOtaMux = portMUX_INITIALIZER_UNLOCKED;
+
 bool FirmwareOta::busy() const {
-    return currentPhase == Phase::Receiving || currentPhase == Phase::Slave
-        || currentPhase == Phase::Host || currentPhase == Phase::Rebooting;
+    return currentPhase == Phase::Receiving || currentPhase == Phase::Preparing
+        || currentPhase == Phase::Slave || currentPhase == Phase::Host
+        || currentPhase == Phase::Rebooting;
 }
 
 bool FirmwareOta::isUpdatingSlave() const {
@@ -18,11 +24,15 @@ bool FirmwareOta::isUpdatingSlave() const {
 }
 
 bool FirmwareOta::isApplyingImage() const {
-    return slaveOtaActive || slaveBeginPending;
+    return slaveOtaActive || slaveBeginPending || slaveApplyPending || slaveApplyArmed;
 }
 
 bool FirmwareOta::slaveBeginAcked() const {
     return beginAcked;
+}
+
+bool FirmwareOta::isLastSlaveFrameEnd() const {
+    return lastSlavePayloadLength > 0 && (lastSlavePayload[0] & SPI_OTA_END) != 0;
 }
 
 FirmwareOta::Phase FirmwareOta::phase() const {
@@ -33,6 +43,8 @@ const char *FirmwareOta::phaseId() const {
     switch (currentPhase) {
         case Phase::Receiving:
             return "receiving";
+        case Phase::Preparing:
+            return "preparing";
         case Phase::Slave:
             return "slave";
         case Phase::Host:
@@ -64,23 +76,24 @@ String FirmwareOta::statusJson() const {
     uint8_t slavePercent = 0;
     uint8_t hostPercent = 0;
     if (currentPhase == Phase::Receiving) {
-        uploadPercent = percentOf(receivedBytes, imageSize);
+        uploadPercent = percentOf(receivedBytes, packageSize);
     } else if (currentPhase != Phase::Idle && currentPhase != Phase::Failed) {
         uploadPercent = 100;
     }
     if (currentPhase == Phase::Slave) {
-        slavePercent = percentOf(imageOffset, imageSize);
-    } else if (currentPhase == Phase::Host || currentPhase == Phase::Rebooting
-        || currentPhase == Phase::Done) {
+        slavePercent = percentOf(imageOffset, slaveImageSize);
+    } else if (
+        currentPhase == Phase::Host || currentPhase == Phase::Rebooting || currentPhase == Phase::Done
+    ) {
         slavePercent = 100;
     }
     if (currentPhase == Phase::Host) {
-        hostPercent = percentOf(imageOffset, imageSize);
+        hostPercent = percentOf(imageOffset, hostImageSize);
     } else if (currentPhase == Phase::Rebooting || currentPhase == Phase::Done) {
         hostPercent = 100;
     }
-    if (currentPhase == Phase::Failed && imageSize > 0) {
-        uploadPercent = percentOf(receivedBytes > 0 ? receivedBytes : imageOffset, imageSize);
+    if (currentPhase == Phase::Failed && packageSize > 0) {
+        uploadPercent = percentOf(receivedBytes > 0 ? receivedBytes : imageOffset, packageSize);
     }
     String json = "{\"phase\":\"";
     json += phaseId();
@@ -109,6 +122,13 @@ String FirmwareOta::statusJson() const {
     return json;
 }
 
+void FirmwareOta::closePackageStream() {
+    memberReader.close();
+    if (packageFile) {
+        packageFile.close();
+    }
+}
+
 void FirmwareOta::fail(const char *message) {
     errorText = message != nullptr ? message : "Firmware update failed";
     const bool abortUpdate = hostUpdateStarted || slaveOtaActive;
@@ -117,27 +137,38 @@ void FirmwareOta::fail(const char *message) {
     beginQueued = false;
     beginAcked = false;
     hostUpdateStarted = false;
+    packagePreparePending = false;
     rebootReadyMs = 0;
     if (stagingFile) {
         stagingFile.close();
     }
+    closePackageStream();
     if (abortUpdate) {
         Update.abort();
     }
     slaveOtaActive = false;
     slaveBeginPending = false;
+    slaveApplyPending = false;
+    slaveApplyArmed = false;
+    slaveApplyWaitTransfers = 0;
     slaveBeginExtraLength = 0;
     slaveBytesRemaining = 0;
     lastSlavePayloadLength = 0;
     lastSlaveDataBytes = 0;
+    streamPos = 0;
     slaveFrameFails = 0;
-    clearStagingFile();
+    slavePackClaimed = false;
+    clearStagingFiles();
     LOGGER.error(errorText);
 }
 
-void FirmwareOta::clearStagingFile() {
-    if (LittleFS.exists(kStagingPath)) {
-        LittleFS.remove(kStagingPath);
+void FirmwareOta::clearStagingFiles() {
+    closePackageStream();
+    if (stagingFile) {
+        stagingFile.close();
+    }
+    if (LittleFS.exists(kPackagePath)) {
+        LittleFS.remove(kPackagePath);
     }
 }
 
@@ -146,15 +177,22 @@ bool FirmwareOta::beginStaging(size_t contentLength) {
         return false;
     }
     errorText = "";
-    imageSize = (uint32_t)contentLength;
+    packageSize = (uint32_t)contentLength;
+    slaveImageSize = 0;
+    hostImageSize = 0;
+    imageSize = 0;
     imageOffset = 0;
+    streamPos = 0;
     receivedBytes = 0;
     waitingForSlaveResult = false;
     beginQueued = false;
     beginAcked = false;
     hostUpdateStarted = false;
     hostRestartPending = false;
+    packagePreparePending = false;
     rebootReadyMs = 0;
+    slaveMember = JoinedFirmwareZip::MemberInfo{};
+    hostMember = JoinedFirmwareZip::MemberInfo{};
     LittleFS.mkdir("/ota");
     if (contentLength > 0) {
         const size_t freeBytes = LittleFS.totalBytes() - LittleFS.usedBytes();
@@ -163,14 +201,14 @@ bool FirmwareOta::beginStaging(size_t contentLength) {
             return false;
         }
     }
-    clearStagingFile();
-    stagingFile = LittleFS.open(kStagingPath, "w");
+    clearStagingFiles();
+    stagingFile = LittleFS.open(kPackagePath, "w");
     if (!stagingFile) {
         fail("Could not create firmware staging file");
         return false;
     }
     currentPhase = Phase::Receiving;
-    LOGGER.info("Firmware staging start");
+    LOGGER.info("Firmware staging start (joined ZIP)");
     return true;
 }
 
@@ -193,28 +231,61 @@ bool FirmwareOta::writeStaging(const uint8_t *data, size_t length) {
     return true;
 }
 
+bool FirmwareOta::prepareJoinedPackage() {
+    closePackageStream();
+    packageFile = LittleFS.open(kPackagePath, "r");
+    if (!packageFile) {
+        fail("Joined package missing");
+        return false;
+    }
+    if (!JoinedFirmwareZip::findMembers(packageFile, &slaveMember, &hostMember)) {
+        closePackageStream();
+        fail("Joined package must contain slave.bin and host.bin");
+        return false;
+    }
+    if (!memberReader.open(packageFile, slaveMember)) {
+        closePackageStream();
+        fail("Failed to open slave.bin stream");
+        return false;
+    }
+    slaveImageSize = slaveMember.uncompressedSize;
+    hostImageSize = hostMember.uncompressedSize;
+    imageSize = slaveImageSize;
+    imageOffset = 0;
+    streamPos = 0;
+    LOGGER.info(
+        "Joined package OK stream slave=" + String((unsigned long)slaveImageSize) + " host="
+        + String((unsigned long)hostImageSize)
+    );
+    return true;
+}
+
 bool FirmwareOta::finishStaging() {
     if (currentPhase != Phase::Receiving || !stagingFile) {
         return false;
     }
     stagingFile.close();
-    stagingFile = LittleFS.open(kStagingPath, "r");
-    if (!stagingFile) {
-        fail("Firmware staging file missing");
-        return false;
+    stagingFile = File();
+    packageSize = 0;
+    {
+        File sized = LittleFS.open(kPackagePath, "r");
+        if (!sized) {
+            fail("Firmware staging file missing");
+            return false;
+        }
+        packageSize = (uint32_t)sized.size();
+        sized.close();
     }
-    imageSize = (uint32_t)stagingFile.size();
-    if (imageSize == 0) {
+    if (packageSize == 0) {
         fail("Firmware image is empty");
         return false;
     }
-    imageOffset = 0;
     lastSlavePayloadLength = 0;
     lastSlaveDataBytes = 0;
     slaveFrameFails = 0;
-    currentPhase = Phase::Slave;
-    INTER_CHIP_HOST.holdForFirmwareOta();
-    LOGGER.info("Firmware staging done, updating slave");
+    packagePreparePending = true;
+    currentPhase = Phase::Preparing;
+    LOGGER.info("Firmware staging done, preparing joined package stream");
     return true;
 }
 
@@ -222,7 +293,7 @@ void FirmwareOta::abortStaging() {
     if (stagingFile) {
         stagingFile.close();
     }
-    if (currentPhase == Phase::Receiving) {
+    if (currentPhase == Phase::Receiving || currentPhase == Phase::Preparing) {
         fail("Firmware upload aborted");
     }
 }
@@ -257,14 +328,66 @@ void FirmwareOta::onSlaveFrameLost() {
     waitingForSlaveResult = false;
     slaveFrameFails++;
     LOGGER.warning(
-        "SPI firmware frame lost seq=" + String((int)lastSlaveSeq)
-        + " fail=" + String((int)slaveFrameFails) + "/" + String((int)kMaxSlaveFrameFails)
+        "SPI firmware frame lost seq=" + String((int)lastSlaveSeq) + " fail="
+        + String((int)slaveFrameFails) + "/" + String((int)kMaxSlaveFrameFails)
     );
     if (slaveFrameFails >= kMaxSlaveFrameFails) {
+        // Last frame often times out while slave finalizes flash; image may already be complete.
+        const bool imageComplete = imageOffset + lastSlaveDataBytes >= slaveImageSize;
+        if (beginAcked && imageComplete) {
+            imageOffset = slaveImageSize;
+            lastSlavePayloadLength = 0;
+            lastSlaveDataBytes = 0;
+            INTER_CHIP_HOST.noteKeepaliveQuiet();
+            LOGGER.info("Slave END ACK lost after complete image; continuing host update");
+            startHostApply();
+            return;
+        }
         fail("Slave firmware update failed after repeated SPI frame loss");
         return;
     }
     sendLastSlaveFrame(true);
+}
+
+bool FirmwareOta::packSlaveChunkFromStream(
+    uint8_t *payloadOut,
+    uint16_t *packedLengthOut,
+    uint32_t *dataBytesOut
+) {
+    if (payloadOut == nullptr || packedLengthOut == nullptr || dataBytesOut == nullptr) {
+        return false;
+    }
+    if (!memberReader.isOpen() || !packageFile) {
+        fail("Slave image stream missing");
+        return false;
+    }
+    if (streamPos >= slaveImageSize) {
+        *packedLengthOut = 0;
+        *dataBytesOut = 0;
+        return true;
+    }
+    uint8_t chunk[SPI_FILE_CHUNK_MAX];
+    const uint32_t remaining = slaveImageSize - streamPos;
+    const size_t toRead = remaining > SPI_FILE_CHUNK_MAX ? SPI_FILE_CHUNK_MAX : (size_t)remaining;
+    const size_t readLength = memberReader.read(chunk, toRead);
+    if (readLength != toRead || memberReader.failed()) {
+        fail("Slave image stream read failed");
+        return false;
+    }
+    uint8_t flags = 0;
+    if (streamPos + (uint32_t)readLength >= slaveImageSize) {
+        flags = SPI_OTA_END;
+    }
+    const uint16_t packedLength =
+        spiPackFirmwareOta(payloadOut, SPI_MAX_PAYLOAD, flags, chunk, (uint16_t)readLength);
+    if (packedLength == 0) {
+        fail("Firmware OTA pack failed");
+        return false;
+    }
+    streamPos += (uint32_t)readLength;
+    *packedLengthOut = packedLength;
+    *dataBytesOut = (uint32_t)readLength;
+    return true;
 }
 
 bool FirmwareOta::enqueueNextSlaveChunk() {
@@ -275,51 +398,64 @@ bool FirmwareOta::enqueueNextSlaveChunk() {
         fail("Slave link is not ready");
         return false;
     }
-    if (lastSlavePayloadLength > 0) {
-        return sendLastSlaveFrame(slaveFrameFails > 0);
+
+    portENTER_CRITICAL(&gFirmwareOtaMux);
+    if (waitingForSlaveResult || slavePackClaimed) {
+        portEXIT_CRITICAL(&gFirmwareOtaMux);
+        return true;
     }
+    if (lastSlavePayloadLength > 0) {
+        const bool isResend = slaveFrameFails > 0;
+        portEXIT_CRITICAL(&gFirmwareOtaMux);
+        return sendLastSlaveFrame(isResend);
+    }
+    slavePackClaimed = true;
+    const bool doBegin = !beginQueued;
+    if (doBegin) {
+        beginQueued = true;
+    }
+    portEXIT_CRITICAL(&gFirmwareOtaMux);
+
     uint8_t payload[SPI_MAX_PAYLOAD];
     uint16_t packedLength = 0;
-    lastSlaveDataBytes = 0;
-    if (!beginQueued) {
+    uint32_t dataBytes = 0;
+    if (doBegin) {
         uint8_t sizeBytes[4];
-        sizeBytes[0] = (uint8_t)(imageSize & 0xFF);
-        sizeBytes[1] = (uint8_t)((imageSize >> 8) & 0xFF);
-        sizeBytes[2] = (uint8_t)((imageSize >> 16) & 0xFF);
-        sizeBytes[3] = (uint8_t)((imageSize >> 24) & 0xFF);
+        sizeBytes[0] = (uint8_t)(slaveImageSize & 0xFF);
+        sizeBytes[1] = (uint8_t)((slaveImageSize >> 8) & 0xFF);
+        sizeBytes[2] = (uint8_t)((slaveImageSize >> 16) & 0xFF);
+        sizeBytes[3] = (uint8_t)((slaveImageSize >> 24) & 0xFF);
         packedLength = spiPackFirmwareOta(payload, sizeof(payload), SPI_OTA_BEGIN, sizeBytes, 4);
-        beginQueued = true;
         LOGGER.info("Slave firmware begin queued; waiting for erase");
-    } else {
-        if (!stagingFile) {
-            fail("Firmware staging file missing");
+        if (packedLength == 0) {
+            portENTER_CRITICAL(&gFirmwareOtaMux);
+            slavePackClaimed = false;
+            beginQueued = false;
+            portEXIT_CRITICAL(&gFirmwareOtaMux);
+            fail("Firmware OTA pack failed");
             return false;
         }
-        if (!stagingFile.seek(imageOffset)) {
-            fail("Firmware staging seek failed");
-            return false;
-        }
-        uint8_t chunk[SPI_FILE_CHUNK_MAX];
-        const size_t remaining = imageSize - imageOffset;
-        const size_t toRead = remaining > SPI_FILE_CHUNK_MAX ? SPI_FILE_CHUNK_MAX : remaining;
-        const size_t readLength = stagingFile.read(chunk, toRead);
-        if (readLength != toRead) {
-            fail("Firmware staging read failed");
-            return false;
-        }
-        uint8_t flags = 0;
-        if (imageOffset + (uint32_t)readLength >= imageSize) {
-            flags = SPI_OTA_END;
-        }
-        packedLength = spiPackFirmwareOta(payload, sizeof(payload), flags, chunk, (uint16_t)readLength);
-        lastSlaveDataBytes = (uint32_t)readLength;
-    }
-    if (packedLength == 0) {
-        fail("Firmware OTA pack failed");
+    } else if (!packSlaveChunkFromStream(payload, &packedLength, &dataBytes)) {
+        portENTER_CRITICAL(&gFirmwareOtaMux);
+        slavePackClaimed = false;
+        portEXIT_CRITICAL(&gFirmwareOtaMux);
         return false;
     }
+
+    if (packedLength == 0) {
+        portENTER_CRITICAL(&gFirmwareOtaMux);
+        slavePackClaimed = false;
+        portEXIT_CRITICAL(&gFirmwareOtaMux);
+        startHostApply();
+        return true;
+    }
+
+    portENTER_CRITICAL(&gFirmwareOtaMux);
     memcpy(lastSlavePayload, payload, packedLength);
     lastSlavePayloadLength = packedLength;
+    lastSlaveDataBytes = dataBytes;
+    slavePackClaimed = false;
+    portEXIT_CRITICAL(&gFirmwareOtaMux);
     return sendLastSlaveFrame(false);
 }
 
@@ -351,10 +487,13 @@ void FirmwareOta::onSpiFrame(const SpiFrame &frame) {
         enqueueNextSlaveChunk();
         return;
     }
+    portENTER_CRITICAL(&gFirmwareOtaMux);
     imageOffset += lastSlaveDataBytes;
     lastSlavePayloadLength = 0;
     lastSlaveDataBytes = 0;
-    if (imageOffset >= imageSize) {
+    const bool done = imageOffset >= slaveImageSize;
+    portEXIT_CRITICAL(&gFirmwareOtaMux);
+    if (done) {
         startHostApply();
         return;
     }
@@ -362,48 +501,55 @@ void FirmwareOta::onSpiFrame(const SpiFrame &frame) {
 }
 
 bool FirmwareOta::startHostApply() {
-    if (stagingFile) {
-        stagingFile.close();
+    if (!packageFile) {
+        packageFile = LittleFS.open(kPackagePath, "r");
+        if (!packageFile) {
+            fail("Joined package missing for host stream");
+            return false;
+        }
+        if (!JoinedFirmwareZip::findMembers(packageFile, &slaveMember, &hostMember)) {
+            closePackageStream();
+            fail("Joined package lost host.bin");
+            return false;
+        }
     }
-    currentPhase = Phase::Host;
-    LOGGER.info("Slave firmware committed, updating host");
-    File sourceFile = LittleFS.open(kStagingPath, "r");
-    if (!sourceFile) {
-        fail("Firmware staging file missing");
+    memberReader.close();
+    if (!memberReader.open(packageFile, hostMember)) {
+        closePackageStream();
+        fail("Failed to open host.bin stream");
         return false;
     }
-    const size_t size = sourceFile.size();
-    sourceFile.close();
-    if (!Update.begin(size, U_FLASH)) {
+    hostImageSize = hostMember.uncompressedSize;
+    if (hostImageSize == 0) {
+        closePackageStream();
+        fail("Host image is empty");
+        return false;
+    }
+    Update.abort();
+    if (!Update.begin(hostImageSize, U_FLASH)) {
+        closePackageStream();
         fail("Host OTA begin failed");
         return false;
     }
     hostUpdateStarted = true;
+    currentPhase = Phase::Host;
+    imageSize = hostImageSize;
     imageOffset = 0;
+    INTER_CHIP_HOST.noteKeepaliveQuiet();
+    LOGGER.info("Slave firmware committed, streaming host update");
     return true;
 }
 
 void FirmwareOta::pumpHostApply() {
-    if (!hostUpdateStarted) {
-        return;
-    }
-    File sourceFile = LittleFS.open(kStagingPath, "r");
-    if (!sourceFile) {
-        fail("Firmware staging file missing");
-        return;
-    }
-    if (!sourceFile.seek(imageOffset)) {
-        sourceFile.close();
-        fail("Host OTA seek failed");
+    if (!hostUpdateStarted || !memberReader.isOpen()) {
         return;
     }
     uint8_t chunk[1024];
-    const size_t remaining = imageSize - imageOffset;
+    const size_t remaining = hostImageSize - imageOffset;
     const size_t toRead = remaining > sizeof(chunk) ? sizeof(chunk) : remaining;
-    const size_t readLength = sourceFile.read(chunk, toRead);
-    sourceFile.close();
-    if (readLength != toRead) {
-        fail("Host OTA read failed");
+    const size_t readLength = memberReader.read(chunk, toRead);
+    if (readLength != toRead || memberReader.failed()) {
+        fail("Host OTA stream read failed");
         return;
     }
     if (Update.write(chunk, readLength) != readLength) {
@@ -411,14 +557,14 @@ void FirmwareOta::pumpHostApply() {
         return;
     }
     imageOffset += (uint32_t)readLength;
-    if (imageOffset < imageSize) {
+    if (imageOffset < hostImageSize) {
         return;
     }
     if (!Update.end(true)) {
         fail("Host OTA end failed");
         return;
     }
-    clearStagingFile();
+    clearStagingFiles();
     currentPhase = Phase::Rebooting;
     rebootReadyMs = millis() + 2500;
     LOGGER.info("Host firmware written; reboot wait");
@@ -460,8 +606,23 @@ void FirmwareOta::pumpSlaveBegin() {
     INTER_CHIP_SLAVE.completeCommandResult(slaveBeginSeq, true);
 }
 
+void FirmwareOta::pumpPackagePrepare() {
+    if (!packagePreparePending || currentPhase != Phase::Preparing) {
+        return;
+    }
+    packagePreparePending = false;
+    if (!prepareJoinedPackage()) {
+        return;
+    }
+    currentPhase = Phase::Slave;
+    INTER_CHIP_HOST.holdForFirmwareOta();
+    LOGGER.info("Joined package stream ready, updating slave");
+}
+
 void FirmwareOta::pump() {
     pumpSlaveBegin();
+    pumpSlaveApply();
+    pumpPackagePrepare();
     if (currentPhase == Phase::Slave) {
         enqueueNextSlaveChunk();
         return;
@@ -500,11 +661,14 @@ bool FirmwareOta::handleSlaveFrame(const SpiFrame &frame) {
     }
     const uint8_t flags = frame.payload[0];
     if ((flags & SPI_OTA_ABORT) != 0) {
-        if (slaveOtaActive) {
+        if (slaveOtaActive || slaveApplyPending || slaveApplyArmed) {
             Update.abort();
         }
         slaveOtaActive = false;
         slaveBeginPending = false;
+        slaveApplyPending = false;
+        slaveApplyArmed = false;
+        slaveApplyWaitTransfers = 0;
         slaveBeginExtraLength = 0;
         slaveBytesRemaining = 0;
         return true;
@@ -513,20 +677,18 @@ bool FirmwareOta::handleSlaveFrame(const SpiFrame &frame) {
     bool writeOk = true;
     if ((flags & SPI_OTA_BEGIN) != 0) {
         return queueSlaveBegin(frame);
-    } else {
-        if (!slaveOtaActive || slaveBeginPending) {
-            return false;
-        }
-        const uint16_t dataLength = frame.length - 1;
-        if (dataLength > 0) {
-            uint8_t dataBytes[SPI_MAX_PAYLOAD];
-            memcpy(dataBytes, frame.payload + 1, dataLength);
-            if (dataLength > slaveBytesRemaining
-                || Update.write(dataBytes, dataLength) != dataLength) {
-                writeOk = false;
-            } else {
-                slaveBytesRemaining -= dataLength;
-            }
+    }
+    if (!slaveOtaActive || slaveBeginPending) {
+        return false;
+    }
+    const uint16_t dataLength = frame.length - 1;
+    if (dataLength > 0) {
+        uint8_t dataBytes[SPI_MAX_PAYLOAD];
+        memcpy(dataBytes, frame.payload + 1, dataLength);
+        if (dataLength > slaveBytesRemaining || Update.write(dataBytes, dataLength) != dataLength) {
+            writeOk = false;
+        } else {
+            slaveBytesRemaining -= dataLength;
         }
     }
 
@@ -546,13 +708,52 @@ bool FirmwareOta::handleSlaveFrame(const SpiFrame &frame) {
         slaveBytesRemaining = 0;
         return false;
     }
-    if (!Update.end(true)) {
-        slaveOtaActive = false;
-        return false;
-    }
+    // Write is done; ACK must leave SPI before Update.end (flash lock kills replies).
     slaveOtaActive = false;
-    slaveRestartPending = true;
+    // Arm after caller queues the ACK; wait one more completed transfer to clock it out.
+    slaveApplyArmed = true;
+    slaveApplyPending = false;
+    slaveApplyWaitTransfers = 1;
     return true;
+}
+
+void FirmwareOta::armSlaveApplyAfterAckDrain() {
+    // Kept for call sites that re-arm after reset; END path sets waitTransfers itself.
+    if (!INTER_CHIP_SLAVE.hasOutboundPending()) {
+        slaveApplyArmed = false;
+        slaveApplyPending = true;
+        slaveApplyWaitTransfers = 0;
+        return;
+    }
+    slaveApplyArmed = true;
+    slaveApplyPending = false;
+    slaveApplyWaitTransfers = 1;
+}
+
+void FirmwareOta::onSlaveSpiTransferDone() {
+    if (!slaveApplyArmed) {
+        return;
+    }
+    if (slaveApplyWaitTransfers > 0) {
+        slaveApplyWaitTransfers--;
+        return;
+    }
+    slaveApplyArmed = false;
+    slaveApplyPending = true;
+}
+
+void FirmwareOta::pumpSlaveApply() {
+    if (!slaveApplyPending) {
+        return;
+    }
+    slaveApplyPending = false;
+    if (!Update.end(true)) {
+        LOGGER.error("Slave firmware Update.end failed");
+        Update.abort();
+        return;
+    }
+    slaveRestartPending = true;
+    LOGGER.info("Slave firmware image committed");
 }
 
 bool FirmwareOta::queueSlaveBegin(const SpiFrame &frame) {

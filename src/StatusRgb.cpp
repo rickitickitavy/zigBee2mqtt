@@ -32,15 +32,21 @@ void StatusRgb::begin() {
         configureLedPin(kLedPins[ledIndex]);
         lastLevel[ledIndex] = 255;
     }
-    pinMode(PIN_BOARD_ROLE, INPUT);
-    delay(2);
-    hostRole = digitalRead(PIN_BOARD_ROLE) == LOW;
+#if defined(BOARD_ROLE_HOST)
+    hostRole = true;
+#elif defined(BOARD_ROLE_SLAVE)
+    hostRole = false;
+#else
+#error "Define BOARD_ROLE_HOST or BOARD_ROLE_SLAVE"
+#endif
     pinsReady = true;
     faultBlinkOn = true;
     faultBlinkToggleMs = millis();
     updateBlinkOn = true;
     updateBlinkToggleMs = millis();
+#if PIN_STATUS_RGB >= 0
     rgbLedWrite(PIN_STATUS_RGB, 0, 0, 0);
+#endif
     apply();
 }
 
