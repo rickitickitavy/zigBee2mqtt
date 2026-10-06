@@ -44,7 +44,8 @@
             if (user.isAdmin) {
                 return true;
             }
-            return !!(user.editDevices || user.addDevices || user.removeDevices || user.editUsers || user.editConsoles);
+            return !!(user.editDevices || user.addDevices || user.removeDevices || user.editUsers
+                || user.editConsoles || user.monitor);
         }
 
         function showLoginForm() {
@@ -266,6 +267,21 @@
             return "";
         }
 
+        function measurementStateForBinding(device, binding) {
+            var entries = statusEntriesForDevice(device);
+            var matched = findStatusState(entries, bindingChannel(binding));
+            if (matched) {
+                return matched;
+            }
+            var index;
+            for (index = 0; index < entries.length; index++) {
+                if (entries[index].state) {
+                    return entries[index].state;
+                }
+            }
+            return "";
+        }
+
         function isMeasurementDeviceType(typeId) {
             return typeId == "illuminanceMeasurement"
                 || typeId == "illuminanceLevelSensing"
@@ -282,7 +298,14 @@
             if (!text.length) {
                 return null;
             }
-            var match = text.match(/-?\d+(?:\.\d+)?/);
+            var valMatch = text.match(/(?:^|[,;\s])val\s*=\s*(-?0x[0-9a-fA-F]+|-?\d+(?:\.\d+)?)/i);
+            if (valMatch) {
+                var rawValue = valMatch[1];
+                var parsedVal = /0x/i.test(rawValue) ? parseInt(rawValue, 16) : parseFloat(rawValue);
+                return isNaN(parsedVal) ? null : parsedVal;
+            }
+            var withoutHex = text.replace(/0x[0-9a-fA-F]+/gi, " ");
+            var match = withoutHex.match(/-?\d+(?:\.\d+)?/);
             if (!match) {
                 return null;
             }
@@ -290,54 +313,98 @@
             return isNaN(value) ? null : value;
         }
 
-        function formatMeasurementDisplay(typeId, stateText, unitId) {
+        function defaultMeasurementDecimals(typeId) {
+            if (typeId == "temperatureMeasurement") {
+                return 1;
+            }
+            if (typeId == "relativeHumidity"
+                || typeId == "illuminanceMeasurement"
+                || typeId == "illuminanceLevelSensing") {
+                return 0;
+            }
+            if (typeId == "pressureMeasurement") {
+                return 1;
+            }
+            return 2;
+        }
+
+        function bindingDecimals(binding, typeId) {
+            if (binding && binding.decimals !== undefined && binding.decimals !== null && binding.decimals !== "") {
+                var parsed = parseInt(binding.decimals, 10);
+                if (!isNaN(parsed) && parsed >= 0 && parsed <= 3) {
+                    return parsed;
+                }
+            }
+            return defaultMeasurementDecimals(typeId);
+        }
+
+        function formatFixedValue(value, decimals) {
+            var places = decimals;
+            if (places === undefined || places === null || places < 0) {
+                places = 0;
+            }
+            if (places > 3) {
+                places = 3;
+            }
+            return Number(value).toFixed(places);
+        }
+
+        function formatMeasurementDisplay(typeId, stateText, unitId, decimals) {
             var value = parseNumericState(stateText);
             if (value === null) {
                 return stateText ? String(stateText) : "—";
             }
             var unit = unitId || "";
+            var places = decimals;
+            if (places === undefined || places === null || places < 0) {
+                places = defaultMeasurementDecimals(typeId);
+            }
             if (typeId == "temperatureMeasurement") {
                 var celsius = value;
                 if (unit === "F") {
-                    return (celsius * 9 / 5 + 32).toFixed(1) + " °F";
+                    return formatFixedValue(celsius * 9 / 5 + 32, places) + " °F";
                 }
                 if (unit === "K") {
-                    return (celsius + 273.15).toFixed(1) + " K";
+                    return formatFixedValue(celsius + 273.15, places) + " K";
                 }
-                return celsius.toFixed(1) + " °C";
+                return formatFixedValue(celsius, places) + " °C";
             }
             if (typeId == "relativeHumidity") {
-                return value.toFixed(0) + (unit === "%" || !unit ? " %" : " " + unit);
+                return formatFixedValue(value, places) + (unit === "%" || !unit ? " %" : " " + unit);
             }
             if (typeId == "pressureMeasurement") {
-                var pascal = value;
-                if (unit === "hPa") {
-                    return (pascal / 100).toFixed(1) + " hPa";
+                // Devices table shows the scaled report as-is; only format decimals + unit label.
+                var pressureLabel = unit || "hPa";
+                if (pressureLabel === "hPa") {
+                    return formatFixedValue(value, places) + " hPa";
                 }
-                if (unit === "kPa") {
-                    return (pascal / 1000).toFixed(2) + " kPa";
+                if (pressureLabel === "Pa") {
+                    return formatFixedValue(value, places) + " Pa";
                 }
-                if (unit === "bar") {
-                    return (pascal / 100000).toFixed(3) + " bar";
+                if (pressureLabel === "kPa") {
+                    return formatFixedValue(value, places) + " kPa";
                 }
-                if (unit === "psi") {
-                    return (pascal * 0.000145038).toFixed(2) + " psi";
+                if (pressureLabel === "bar") {
+                    return formatFixedValue(value, places) + " bar";
                 }
-                return pascal.toFixed(0) + " Pa";
+                if (pressureLabel === "psi") {
+                    return formatFixedValue(value, places) + " psi";
+                }
+                return formatFixedValue(value, places) + " " + pressureLabel;
             }
             if (typeId == "illuminanceMeasurement" || typeId == "illuminanceLevelSensing") {
-                return value.toFixed(0) + (unit === "lx" || !unit ? " lx" : " " + unit);
+                return formatFixedValue(value, places) + (unit === "lx" || !unit ? " lx" : " " + unit);
             }
             if (typeId == "flowMeasurement") {
                 if (unit === "m3/h") {
-                    return value.toFixed(2) + " m³/h";
+                    return formatFixedValue(value, places) + " m³/h";
                 }
                 if (unit === "l/min") {
-                    return value.toFixed(2) + " L/min";
+                    return formatFixedValue(value, places) + " L/min";
                 }
-                return value.toFixed(2) + (unit ? " " + unit : "");
+                return formatFixedValue(value, places) + (unit ? " " + unit : "");
             }
-            return value.toFixed(2) + (unit ? " " + unit : "");
+            return formatFixedValue(value, places) + (unit ? " " + unit : "");
         }
 
         function coveringPositionText(state) {
@@ -545,20 +612,20 @@
                 })(device.ieee, channel, String(onState).toUpperCase() === "ON");
                 controls.appendChild(onOffSwitch);
             } else if (typeId === "windowCovering") {
-                var upButton = document.createElement("button");
-                upButton.type = "button";
-                upButton.className = "btn btn-secondary btn-inline console-cover-btn";
-                upButton.textContent = "Up";
-                upButton.onclick = (function (ieee, ch) {
+                var openButton = document.createElement("button");
+                openButton.type = "button";
+                openButton.className = "btn btn-secondary btn-inline console-cover-btn";
+                openButton.textContent = "OPEN";
+                openButton.onclick = (function (ieee, ch) {
                     return function () {
                         sendDeviceCommand(ieee, "OPEN", ch);
                     };
                 })(device.ieee, channel);
-                var downButton = document.createElement("button");
-                downButton.type = "button";
-                downButton.className = "btn btn-secondary btn-inline console-cover-btn";
-                downButton.textContent = "Down";
-                downButton.onclick = (function (ieee, ch) {
+                var closeButton = document.createElement("button");
+                closeButton.type = "button";
+                closeButton.className = "btn btn-secondary btn-inline console-cover-btn";
+                closeButton.textContent = "CLOSE";
+                closeButton.onclick = (function (ieee, ch) {
                     return function () {
                         sendDeviceCommand(ieee, "CLOSE", ch);
                     };
@@ -566,7 +633,7 @@
                 var stopButton = document.createElement("button");
                 stopButton.type = "button";
                 stopButton.className = "btn btn-secondary btn-inline console-cover-btn";
-                stopButton.textContent = "Stop";
+                stopButton.textContent = "STOP";
                 stopButton.onclick = (function (ieee, ch) {
                     return function () {
                         sendDeviceCommand(ieee, "STOP", ch);
@@ -576,18 +643,18 @@
                 position.className = "console-cover-position";
                 var entries = statusEntriesForDevice(device);
                 position.textContent = coveringPositionText(findStatusState(entries, channel));
-                controls.appendChild(upButton);
-                controls.appendChild(downButton);
+                controls.appendChild(openButton);
+                controls.appendChild(closeButton);
                 controls.appendChild(stopButton);
                 controls.appendChild(position);
             } else if (isMeasurementDeviceType(typeId)) {
                 var valueLabel = document.createElement("span");
                 valueLabel.className = "console-sensor-value";
-                var entries = statusEntriesForDevice(device);
                 valueLabel.textContent = formatMeasurementDisplay(
                     typeId,
-                    findStatusState(entries, channel),
-                    binding.unit
+                    measurementStateForBinding(device, binding),
+                    binding.unit,
+                    bindingDecimals(binding, typeId)
                 );
                 controls.appendChild(valueLabel);
             } else {
@@ -806,11 +873,10 @@
     </form>
 </div>
 <div id="userShell" class="user-console-shell" hidden>
-    <header class="user-console-header">
-        <h1 class="section-title">Control</h1>
-        <button type="button" class="btn btn-secondary btn-inline" onclick="openSignOutConfirm()">Sign out</button>
-    </header>
-    <div id="consoleTabs" class="tabs" hidden></div>
+    <div class="user-console-toolbar">
+        <div id="consoleTabs" class="tabs user-console-tabs" hidden></div>
+        <button type="button" class="btn btn-secondary btn-inline user-console-signout" onclick="openSignOutConfirm()">Sign out</button>
+    </div>
     <div id="consolePanels" class="user-console-panels" hidden></div>
     <p id="emptyState" class="field-hint user-console-empty" hidden>No consoles are assigned to your account.</p>
 </div>

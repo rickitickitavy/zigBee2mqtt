@@ -47,6 +47,9 @@
             if (name == "devices") {
                 ensureDeviceTypeCatalog();
                 startDevicesLive();
+            } else if (name == "place") {
+                startDevicesLive();
+                loadPlaceConsoles();
             } else {
                 stopDevicesLive();
                 var searchDialog = document.getElementById("searchDialog");
@@ -246,7 +249,8 @@
             if (user.isAdmin) {
                 return true;
             }
-            return !!(user.editDevices || user.addDevices || user.removeDevices || user.editUsers || user.editConsoles);
+            return !!(user.editDevices || user.addDevices || user.removeDevices || user.editUsers
+                || user.editConsoles || user.monitor);
         }
 
         function setHidden(element, hidden) {
@@ -338,7 +342,7 @@
             }
             startSessionWatch();
             startConsolesLive();
-            showMainSection("status");
+            showMainSection(user && user.isAdmin ? "status" : "place");
         }
 
         function checkSession() {
@@ -438,6 +442,9 @@
             if (user && user.editConsoles) {
                 roles.push("console editor");
             }
+            if (user && user.monitor) {
+                roles.push("monitor");
+            }
             return roles.length ? roles.join(", ") : "simple";
         }
 
@@ -531,6 +538,9 @@
             if (document.getElementById("userEditConsoles").checked) {
                 return true;
             }
+            if (document.getElementById("userMonitor").checked) {
+                return true;
+            }
             return false;
         }
 
@@ -539,7 +549,7 @@
             if (!field) {
                 return;
             }
-            field.hidden = userDialogHasAnyRole();
+            field.hidden = false;
         }
 
         function openUserDialog(user) {
@@ -558,6 +568,7 @@
             document.getElementById("userRemoveDevices").checked = !!(user && user.removeDevices);
             document.getElementById("userEditUsers").checked = !!(user && user.editUsers);
             document.getElementById("userEditConsoles").checked = !!(user && user.editConsoles);
+            document.getElementById("userMonitor").checked = !!(user && user.monitor);
             document.getElementById("userIsBlocked").checked = !!(user && user.isBlocked);
             document.getElementById("userTheme").value = user && user.theme === "light" ? "light" : "dark";
             document.getElementById("userDeleteBtn").hidden = !isEdit;
@@ -669,9 +680,6 @@
         }
 
         function readUserConsoleAssignments() {
-            if (userDialogHasAnyRole()) {
-                return [];
-            }
             var boxes = document.querySelectorAll(".user-console-assign-cb");
             var ids = [];
             var index;
@@ -718,6 +726,7 @@
                 removeDevices: document.getElementById("userRemoveDevices").checked,
                 editUsers: document.getElementById("userEditUsers").checked,
                 editConsoles: document.getElementById("userEditConsoles").checked,
+                monitor: document.getElementById("userMonitor").checked,
                 isBlocked: document.getElementById("userIsBlocked").checked,
                 theme: document.getElementById("userTheme").value,
                 consoles: readUserConsoleAssignments()
@@ -2791,6 +2800,7 @@
                     }
                 }
                 renderDeviceTable(keptRows);
+                refreshPlaceConsolesIfActive();
                 return;
             }
             if (message.op === "upsert" && message.device) {
@@ -2808,6 +2818,7 @@
                     registeredDeviceRows.push(nextDevice);
                 }
                 renderDeviceTable(registeredDeviceRows);
+                refreshPlaceConsolesIfActive();
                 if (manualCommandIeee && (nextDevice.ieee || "") === manualCommandIeee) {
                     appendManualAnswers(nextDevice);
                 }
@@ -2874,6 +2885,10 @@
             var consolesSection = document.getElementById("section-consoles");
             if (consolesSection && consolesSection.classList.contains("active")) {
                 loadConsoles();
+            }
+            var placeSection = document.getElementById("section-place");
+            if (placeSection && placeSection.classList.contains("active")) {
+                loadPlaceConsoles();
             }
             var securitySection = document.getElementById("section-security");
             if (securitySection && securitySection.classList.contains("active")) {
@@ -3558,6 +3573,426 @@
         var consoleDragWidgetIndex = null;
         var consoleDragBindingWidgetIndex = null;
         var consoleDragBindingIndex = null;
+        var placeAssignedConsoles = [];
+        var placeActiveConsoleIndex = 0;
+
+        function refreshPlaceConsolesIfActive() {
+            var placeSection = document.getElementById("section-place");
+            if (placeSection && placeSection.classList.contains("active")) {
+                renderPlaceConsoleTabs();
+            }
+        }
+
+        function placeBindingChannel(binding) {
+            var channel = binding && binding.channel;
+            if (channel === undefined || channel === null || channel === "") {
+                return 1;
+            }
+            return parseInt(channel, 10) || 1;
+        }
+
+        function placeParseNumericState(stateText) {
+            var text = String(stateText || "").trim();
+            if (!text.length) {
+                return null;
+            }
+            var valMatch = text.match(/(?:^|[,;\s])val\s*=\s*(-?0x[0-9a-fA-F]+|-?\d+(?:\.\d+)?)/i);
+            if (valMatch) {
+                var rawValue = valMatch[1];
+                var parsedVal = /0x/i.test(rawValue) ? parseInt(rawValue, 16) : parseFloat(rawValue);
+                return isNaN(parsedVal) ? null : parsedVal;
+            }
+            var withoutHex = text.replace(/0x[0-9a-fA-F]+/gi, " ");
+            var match = withoutHex.match(/-?\d+(?:\.\d+)?/);
+            if (!match) {
+                return null;
+            }
+            var value = parseFloat(match[0]);
+            return isNaN(value) ? null : value;
+        }
+
+        function placeDefaultDecimals(typeId) {
+            if (typeId == "temperatureMeasurement") {
+                return 1;
+            }
+            if (typeId == "relativeHumidity"
+                || typeId == "illuminanceMeasurement"
+                || typeId == "illuminanceLevelSensing") {
+                return 0;
+            }
+            if (typeId == "pressureMeasurement") {
+                return 1;
+            }
+            return 2;
+        }
+
+        function placeBindingDecimals(binding, typeId) {
+            if (binding && binding.decimals !== undefined && binding.decimals !== null && binding.decimals !== "") {
+                var parsed = parseInt(binding.decimals, 10);
+                if (!isNaN(parsed) && parsed >= 0 && parsed <= 3) {
+                    return parsed;
+                }
+            }
+            return placeDefaultDecimals(typeId);
+        }
+
+        function placeFormatFixed(value, decimals) {
+            var places = decimals;
+            if (places === undefined || places === null || places < 0) {
+                places = 0;
+            }
+            if (places > 3) {
+                places = 3;
+            }
+            return Number(value).toFixed(places);
+        }
+
+        function placeFormatMeasurement(typeId, stateText, unitId, decimals) {
+            var value = placeParseNumericState(stateText);
+            if (value === null) {
+                return stateText ? String(stateText) : "—";
+            }
+            var unit = unitId || "";
+            var places = decimals;
+            if (places === undefined || places === null || places < 0) {
+                places = placeDefaultDecimals(typeId);
+            }
+            if (typeId == "temperatureMeasurement") {
+                if (unit === "F") {
+                    return placeFormatFixed(value * 9 / 5 + 32, places) + " °F";
+                }
+                if (unit === "K") {
+                    return placeFormatFixed(value + 273.15, places) + " K";
+                }
+                return placeFormatFixed(value, places) + " °C";
+            }
+            if (typeId == "relativeHumidity") {
+                return placeFormatFixed(value, places) + (unit === "%" || !unit ? " %" : " " + unit);
+            }
+            if (typeId == "pressureMeasurement") {
+                var pressureLabel = unit || "hPa";
+                if (pressureLabel === "hPa") {
+                    return placeFormatFixed(value, places) + " hPa";
+                }
+                if (pressureLabel === "Pa") {
+                    return placeFormatFixed(value, places) + " Pa";
+                }
+                if (pressureLabel === "kPa") {
+                    return placeFormatFixed(value, places) + " kPa";
+                }
+                if (pressureLabel === "bar") {
+                    return placeFormatFixed(value, places) + " bar";
+                }
+                if (pressureLabel === "psi") {
+                    return placeFormatFixed(value, places) + " psi";
+                }
+                return placeFormatFixed(value, places) + " " + pressureLabel;
+            }
+            if (typeId == "illuminanceMeasurement" || typeId == "illuminanceLevelSensing") {
+                return placeFormatFixed(value, places) + (unit === "lx" || !unit ? " lx" : " " + unit);
+            }
+            if (typeId == "flowMeasurement") {
+                if (unit === "m3/h") {
+                    return placeFormatFixed(value, places) + " m³/h";
+                }
+                if (unit === "l/min") {
+                    return placeFormatFixed(value, places) + " L/min";
+                }
+                return placeFormatFixed(value, places) + (unit ? " " + unit : "");
+            }
+            return placeFormatFixed(value, places) + (unit ? " " + unit : "");
+        }
+
+        function placeMeasurementState(device, binding) {
+            var entries = statusEntriesForDevice(device);
+            var matched = findStatusState(entries, placeBindingChannel(binding));
+            if (matched) {
+                return matched;
+            }
+            var index;
+            for (index = 0; index < entries.length; index++) {
+                if (entries[index].state) {
+                    return entries[index].state;
+                }
+            }
+            return "";
+        }
+
+        function placeCoveringPosition(state) {
+            var text = String(state || "");
+            if (!text) {
+                return "—";
+            }
+            if (text.indexOf("cl=0x") >= 0 && text.indexOf("attr=") >= 0) {
+                return "—";
+            }
+            if (!/^\d+$/.test(text)) {
+                return text;
+            }
+            var raw = parseInt(text, 10);
+            if (raw > 100) {
+                raw = 100;
+            }
+            if (raw < 0) {
+                raw = 0;
+            }
+            return raw + "%";
+        }
+
+        function placeSendCommand(ieee, payload, channel) {
+            var body = { ieee: ieee, payload: payload };
+            if (channel !== undefined && channel !== null) {
+                body.channel = channel;
+            }
+            fetch("/api/devices/command", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body)
+            }).catch(function () {
+            });
+        }
+
+        function placeOnOffState(device, binding) {
+            if (!device || (device.type || "") !== "onOff") {
+                return "";
+            }
+            return findStatusState(statusEntriesForDevice(device), placeBindingChannel(binding));
+        }
+
+        function placeWidgetGroupOn(widget) {
+            var devices = widget && widget.devices;
+            if (!devices || !devices.length) {
+                return false;
+            }
+            var index;
+            for (index = 0; index < devices.length; index++) {
+                var device = findRegisteredDevice(devices[index].ieee);
+                if (!device || (device.type || "") !== "onOff") {
+                    continue;
+                }
+                if (String(placeOnOffState(device, devices[index]) || "").toUpperCase() === "ON") {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        function placeBuildDeviceRow(binding) {
+            var row = document.createElement("div");
+            row.className = "console-device-row";
+            var title = document.createElement("span");
+            title.className = "console-device-row-title";
+            title.textContent = binding.title || binding.ieee || "Device";
+            row.appendChild(title);
+            var controls = document.createElement("div");
+            controls.className = "console-device-row-controls";
+            var device = findRegisteredDevice(binding.ieee);
+            if (!device) {
+                var unavailable = document.createElement("span");
+                unavailable.className = "console-device-unavailable";
+                unavailable.textContent = "unavailable";
+                controls.appendChild(unavailable);
+                row.appendChild(controls);
+                return row;
+            }
+            var typeId = device.type || "";
+            var channel = placeBindingChannel(binding);
+            if (typeId === "onOff") {
+                var onOffSwitch = document.createElement("button");
+                onOffSwitch.type = "button";
+                var onState = placeOnOffState(device, binding);
+                onOffSwitch.className = "console-switch" + (String(onState).toUpperCase() === "ON" ? " is-on" : "");
+                onOffSwitch.onclick = (function (ieee, ch, currentOn) {
+                    return function () {
+                        placeSendCommand(ieee, currentOn ? "OFF" : "ON", ch);
+                        window.setTimeout(refreshPlaceConsolesIfActive, 300);
+                    };
+                })(device.ieee, channel, String(onState).toUpperCase() === "ON");
+                controls.appendChild(onOffSwitch);
+            } else if (typeId === "windowCovering") {
+                [["OPEN", "OPEN"], ["CLOSE", "CLOSE"], ["STOP", "STOP"]].forEach(function (pair) {
+                    var button = document.createElement("button");
+                    button.type = "button";
+                    button.className = "btn btn-secondary btn-inline console-cover-btn";
+                    button.textContent = pair[0];
+                    button.onclick = (function (ieee, ch, payload) {
+                        return function () {
+                            placeSendCommand(ieee, payload, ch);
+                        };
+                    })(device.ieee, channel, pair[1]);
+                    controls.appendChild(button);
+                });
+                var position = document.createElement("span");
+                position.className = "console-cover-position";
+                position.textContent = placeCoveringPosition(
+                    findStatusState(statusEntriesForDevice(device), channel)
+                );
+                controls.appendChild(position);
+            } else if (isMeasurementDeviceType(typeId)) {
+                var valueLabel = document.createElement("span");
+                valueLabel.className = "console-sensor-value";
+                valueLabel.textContent = placeFormatMeasurement(
+                    typeId,
+                    placeMeasurementState(device, binding),
+                    binding.unit,
+                    placeBindingDecimals(binding, typeId)
+                );
+                controls.appendChild(valueLabel);
+            } else {
+                var generic = document.createElement("span");
+                generic.className = "console-sensor-value";
+                generic.textContent = findStatusState(statusEntriesForDevice(device), channel) || "—";
+                controls.appendChild(generic);
+            }
+            row.appendChild(controls);
+            return row;
+        }
+
+        function placeRenderGrid(host, consoleLayout) {
+            var grid = document.createElement("div");
+            grid.className = "console-grid";
+            var columns = parseInt(consoleLayout && consoleLayout.columns, 10);
+            if (!columns || columns < 1) {
+                columns = 2;
+            }
+            if (columns > 6) {
+                columns = 6;
+            }
+            grid.style.gridTemplateColumns = "repeat(" + String(columns) + ", minmax(0, 1fr))";
+            var widgets = consoleLayout && consoleLayout.widgets;
+            if (!widgets || !widgets.length) {
+                var emptyWidget = document.createElement("p");
+                emptyWidget.className = "field-hint";
+                emptyWidget.textContent = "This console has no widgets yet.";
+                host.appendChild(emptyWidget);
+                return;
+            }
+            var widgetIndex;
+            for (widgetIndex = 0; widgetIndex < widgets.length; widgetIndex++) {
+                var widget = widgets[widgetIndex];
+                if (widget && widget.spacer) {
+                    var spacer = document.createElement("div");
+                    spacer.className = "console-widget console-widget-spacer console-widget-spacer-view";
+                    spacer.setAttribute("aria-hidden", "true");
+                    grid.appendChild(spacer);
+                    continue;
+                }
+                var card = document.createElement("div");
+                card.className = "console-widget";
+                var header = document.createElement("div");
+                header.className = "console-widget-header";
+                var widgetTitle = document.createElement("h3");
+                widgetTitle.className = "console-widget-title";
+                widgetTitle.textContent = (widget && widget.title) || "Widget";
+                header.appendChild(widgetTitle);
+                if (widget && widget.showGroupOnOff) {
+                    var group = document.createElement("div");
+                    group.className = "console-widget-group";
+                    var groupLabel = document.createElement("span");
+                    groupLabel.className = "console-widget-group-label";
+                    groupLabel.textContent = "All";
+                    var groupSwitch = document.createElement("button");
+                    groupSwitch.type = "button";
+                    groupSwitch.className = "console-switch" + (placeWidgetGroupOn(widget) ? " is-on" : "");
+                    groupSwitch.onclick = (function (storedWidget) {
+                        return function () {
+                            var turnOn = !placeWidgetGroupOn(storedWidget);
+                            var payload = turnOn ? "ON" : "OFF";
+                            var devices = storedWidget.devices || [];
+                            var deviceIndex;
+                            for (deviceIndex = 0; deviceIndex < devices.length; deviceIndex++) {
+                                var boundDevice = findRegisteredDevice(devices[deviceIndex].ieee);
+                                if (!boundDevice || (boundDevice.type || "") !== "onOff") {
+                                    continue;
+                                }
+                                placeSendCommand(
+                                    boundDevice.ieee,
+                                    payload,
+                                    placeBindingChannel(devices[deviceIndex])
+                                );
+                            }
+                            window.setTimeout(refreshPlaceConsolesIfActive, 300);
+                        };
+                    })(widget);
+                    group.appendChild(groupLabel);
+                    group.appendChild(groupSwitch);
+                    header.appendChild(group);
+                }
+                card.appendChild(header);
+                var list = document.createElement("div");
+                list.className = "console-device-list";
+                var devices = (widget && widget.devices) || [];
+                var bindingIndex;
+                for (bindingIndex = 0; bindingIndex < devices.length; bindingIndex++) {
+                    list.appendChild(placeBuildDeviceRow(devices[bindingIndex]));
+                }
+                card.appendChild(list);
+                grid.appendChild(card);
+            }
+            host.appendChild(grid);
+        }
+
+        function renderPlaceConsoleTabs() {
+            var tabsHost = document.getElementById("placeConsoleTabs");
+            var panelsHost = document.getElementById("placeConsolePanels");
+            var emptyState = document.getElementById("placeEmptyState");
+            if (!tabsHost || !panelsHost) {
+                return;
+            }
+            tabsHost.innerHTML = "";
+            panelsHost.innerHTML = "";
+            if (!placeAssignedConsoles.length) {
+                tabsHost.hidden = true;
+                panelsHost.hidden = true;
+                if (emptyState) {
+                    emptyState.hidden = false;
+                }
+                return;
+            }
+            if (placeActiveConsoleIndex >= placeAssignedConsoles.length) {
+                placeActiveConsoleIndex = 0;
+            }
+            tabsHost.hidden = false;
+            panelsHost.hidden = false;
+            if (emptyState) {
+                emptyState.hidden = true;
+            }
+            var tabIndex;
+            for (tabIndex = 0; tabIndex < placeAssignedConsoles.length; tabIndex++) {
+                var tabButton = document.createElement("button");
+                tabButton.type = "button";
+                tabButton.className = "tab-btn" + (tabIndex === placeActiveConsoleIndex ? " active" : "");
+                tabButton.textContent = placeAssignedConsoles[tabIndex].name || "Console";
+                tabButton.onclick = (function (storedIndex) {
+                    return function () {
+                        placeActiveConsoleIndex = storedIndex;
+                        renderPlaceConsoleTabs();
+                    };
+                })(tabIndex);
+                tabsHost.appendChild(tabButton);
+            }
+            var panel = document.createElement("div");
+            panel.className = "tab-content place-console-panel";
+            placeRenderGrid(panel, placeAssignedConsoles[placeActiveConsoleIndex]);
+            panelsHost.appendChild(panel);
+        }
+
+        function loadPlaceConsoles() {
+            fetch("/api/consoles/mine", { cache: "no-store" }).then(function (response) {
+                return response.text().then(function (text) {
+                    if (!response.ok) {
+                        throw new Error(text || ("HTTP " + response.status));
+                    }
+                    return JSON.parse(text || "[]");
+                });
+            }).then(function (rows) {
+                placeAssignedConsoles = Array.isArray(rows) ? rows : [];
+                renderPlaceConsoleTabs();
+            }).catch(function () {
+                placeAssignedConsoles = [];
+                renderPlaceConsoleTabs();
+            });
+        }
 
         function loadConsoles() {
             var errorLine = document.getElementById("consolesSaveError");
@@ -4276,8 +4711,8 @@
             }
             if (typeId == "pressureMeasurement") {
                 return [
-                    { id: "Pa", label: "Pa" },
                     { id: "hPa", label: "hPa" },
+                    { id: "Pa", label: "Pa" },
                     { id: "kPa", label: "kPa" },
                     { id: "bar", label: "bar" },
                     { id: "psi", label: "psi" }
@@ -4309,7 +4744,7 @@
             consoleDeviceDialogBindingIndex = bindingIndex;
             var binding = bindingIndex >= 0
                 ? consoleEditorDraft.widgets[widgetIndex].devices[bindingIndex]
-                : { ieee: "", channel: 1, title: "", unit: "" };
+                : { ieee: "", channel: 1, title: "", unit: "", decimals: -1 };
             document.getElementById("consoleDeviceDialogError").hidden = true;
             fetch("/api/devices", { cache: "no-store" }).then(function (response) {
                 return response.json();
@@ -4340,6 +4775,20 @@
                 var unitSelect = document.getElementById("consoleDeviceUnit");
                 if (binding.unit) {
                     unitSelect.value = binding.unit;
+                }
+                updateConsoleDeviceDecimalsField();
+                var decimalsSelect = document.getElementById("consoleDeviceDecimals");
+                if (decimalsSelect && !document.getElementById("consoleDeviceDecimalsField").hidden) {
+                    var decimalsValue = binding.decimals;
+                    if (decimalsValue === undefined || decimalsValue === null || decimalsValue === "" || decimalsValue < 0) {
+                        decimalsSelect.value = String(defaultMeasurementDecimals(
+                            select.options[select.selectedIndex]
+                                ? select.options[select.selectedIndex].getAttribute("data-type") || ""
+                                : ""
+                        ));
+                    } else {
+                        decimalsSelect.value = String(decimalsValue);
+                    }
                 }
                 document.getElementById("consoleDeviceDialog").hidden = false;
                 consoleDeviceDialogBaseline = JSON.stringify(readConsoleDeviceDialogBody());
@@ -4378,17 +4827,34 @@
             }
         }
 
+        function defaultMeasurementDecimals(typeId) {
+            if (typeId == "temperatureMeasurement") {
+                return 1;
+            }
+            if (typeId == "relativeHumidity"
+                || typeId == "illuminanceMeasurement"
+                || typeId == "illuminanceLevelSensing") {
+                return 0;
+            }
+            if (typeId == "pressureMeasurement") {
+                return 1;
+            }
+            return 2;
+        }
+
         function updateConsoleDeviceUnitField() {
             var select = document.getElementById("consoleDeviceSelect");
             var unitField = document.getElementById("consoleDeviceUnitField");
             var unitSelect = document.getElementById("consoleDeviceUnit");
             if (!select || !select.options.length) {
                 unitField.hidden = true;
+                updateConsoleDeviceDecimalsField();
                 return;
             }
             var typeId = select.options[select.selectedIndex].getAttribute("data-type") || "";
             if (!isMeasurementDeviceType(typeId)) {
                 unitField.hidden = true;
+                updateConsoleDeviceDecimalsField();
                 return;
             }
             unitField.hidden = false;
@@ -4401,17 +4867,61 @@
                 unitOption.textContent = options[index].label;
                 unitSelect.appendChild(unitOption);
             }
+            updateConsoleDeviceDecimalsField();
+        }
+
+        function updateConsoleDeviceDecimalsField() {
+            var select = document.getElementById("consoleDeviceSelect");
+            var decimalsField = document.getElementById("consoleDeviceDecimalsField");
+            var decimalsSelect = document.getElementById("consoleDeviceDecimals");
+            if (!decimalsField || !decimalsSelect) {
+                return;
+            }
+            if (!select || !select.options.length) {
+                decimalsField.hidden = true;
+                return;
+            }
+            var typeId = select.options[select.selectedIndex].getAttribute("data-type") || "";
+            if (!isMeasurementDeviceType(typeId)) {
+                decimalsField.hidden = true;
+                return;
+            }
+            decimalsField.hidden = false;
+            var previous = decimalsSelect.value;
+            decimalsSelect.innerHTML = "";
+            var places;
+            for (places = 0; places <= 3; places++) {
+                var option = document.createElement("option");
+                option.value = String(places);
+                option.textContent = String(places);
+                decimalsSelect.appendChild(option);
+            }
+            if (previous !== "" && decimalsSelect.querySelector('option[value="' + previous + '"]')) {
+                decimalsSelect.value = previous;
+            } else {
+                decimalsSelect.value = String(defaultMeasurementDecimals(typeId));
+            }
         }
 
         function readConsoleDeviceDialogBody() {
             var deviceSelect = document.getElementById("consoleDeviceSelect");
             var channelSelect = document.getElementById("consoleDeviceChannel");
             var unitSelect = document.getElementById("consoleDeviceUnit");
+            var decimalsSelect = document.getElementById("consoleDeviceDecimals");
+            var decimalsField = document.getElementById("consoleDeviceDecimalsField");
+            var decimals = -1;
+            if (decimalsSelect && decimalsField && !decimalsField.hidden) {
+                decimals = parseInt(decimalsSelect.value, 10);
+                if (isNaN(decimals)) {
+                    decimals = -1;
+                }
+            }
             return {
                 ieee: deviceSelect ? deviceSelect.value : "",
                 channel: channelSelect ? parseInt(channelSelect.value, 10) || 1 : 1,
                 title: document.getElementById("consoleDeviceTitle").value,
-                unit: unitSelect && !document.getElementById("consoleDeviceUnitField").hidden ? unitSelect.value : ""
+                unit: unitSelect && !document.getElementById("consoleDeviceUnitField").hidden ? unitSelect.value : "",
+                decimals: decimals
             };
         }
 
@@ -4619,6 +5129,7 @@
 <div id="appShell" class="app-shell" hidden>
     <nav class="sidebar-nav" role="navigation" aria-label="Main sections">
         <h1 class="sidebar-title">Gateway</h1>
+        <button type="button" class="sidebar-btn" data-section="place" onclick="showMainSection('place')">Place</button>
         <button type="button" class="sidebar-btn active" data-section="status" onclick="showMainSection('status')">Status</button>
         <button type="button" class="sidebar-btn" data-section="wifi" onclick="showMainSection('wifi')">WiFi</button>
         <button type="button" class="sidebar-btn" data-section="mqtt" onclick="showMainSection('mqtt')">MQTT</button>
@@ -5079,6 +5590,15 @@
             </div>
         </div>
 
+        <section id="section-place" class="section-panel" aria-label="Place">
+            <h2 class="section-title">Place</h2>
+            <div class="place-console-shell">
+                <div id="placeConsoleTabs" class="tabs user-console-tabs" hidden></div>
+                <div id="placeConsolePanels" class="user-console-panels place-console-panels" hidden></div>
+                <p id="placeEmptyState" class="field-hint user-console-empty" hidden>No consoles are assigned to your account.</p>
+            </div>
+        </section>
+
         <section id="section-appearance" class="section-panel" aria-label="Appearance">
             <h2 class="section-title">Appearance</h2>
             <div class="settings-scroll">
@@ -5246,6 +5766,10 @@
                 <input id="userEditConsoles" type="checkbox" onchange="updateUserAssignedConsolesVisibility()">
                 Console editor
             </label>
+            <label class="field-check">
+                <input id="userMonitor" type="checkbox" onchange="updateUserAssignedConsolesVisibility()">
+                Monitor
+            </label>
         </div>
         <div id="userAssignedConsolesField" class="field">
             <label>Assigned consoles</label>
@@ -5344,6 +5868,10 @@
         <div id="consoleDeviceUnitField" class="field" hidden>
             <label for="consoleDeviceUnit">Unit</label>
             <select id="consoleDeviceUnit"></select>
+        </div>
+        <div id="consoleDeviceDecimalsField" class="field" hidden>
+            <label for="consoleDeviceDecimals">Value decimals</label>
+            <select id="consoleDeviceDecimals"></select>
         </div>
         <div class="dialog-actions">
             <button type="button" class="btn btn-primary" onclick="saveConsoleDeviceDialog()">Save</button>

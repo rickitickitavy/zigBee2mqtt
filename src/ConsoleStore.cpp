@@ -228,6 +228,7 @@ bool ConsoleStore::parseBindings(const char *widgetJson, ConsoleBinding **outBin
         String title;
         String unit;
         int channel = 1;
+        int decimals = -1;
         extractJsonString(object.c_str(), "ieee", ieeeText);
         if (ieeeText.length() == 0) {
             extractJsonString(object.c_str(), "deviceIeee", ieeeText);
@@ -235,11 +236,18 @@ bool ConsoleStore::parseBindings(const char *widgetJson, ConsoleBinding **outBin
         extractJsonString(object.c_str(), "title", title);
         extractJsonString(object.c_str(), "unit", unit);
         extractJsonInt(object.c_str(), "channel", channel);
+        extractJsonInt(object.c_str(), "decimals", decimals);
         if (channel < 1) {
             channel = 1;
         }
         if (channel > DEVICE_CHANNEL_COUNT_MAX) {
             channel = DEVICE_CHANNEL_COUNT_MAX;
+        }
+        if (decimals < -1) {
+            decimals = -1;
+        }
+        if (decimals > 3) {
+            decimals = 3;
         }
         binding->ieeeText = duplicateBoundedString(ieeeText.c_str(), IEEE_TEXT_MAX - 1);
         binding->title = duplicateBoundedString(title.c_str(), CONSOLE_BINDING_TITLE_MAX - 1);
@@ -253,6 +261,7 @@ bool ConsoleStore::parseBindings(const char *widgetJson, ConsoleBinding **outBin
             return false;
         }
         binding->channel = (uint8_t)channel;
+        binding->decimals = (int8_t)decimals;
         binding->next = nullptr;
         if (tail == nullptr) {
             *outBindings = binding;
@@ -675,7 +684,9 @@ void ConsoleStore::appendConsoleFull(String &json, const ConsoleRecord *console)
                 appendJsonEscaped(json, binding->title != nullptr ? binding->title : "", CONSOLE_BINDING_TITLE_MAX);
                 json += "\",\"unit\":\"";
                 appendJsonEscaped(json, binding->unit != nullptr ? binding->unit : "", CONSOLE_UNIT_MAX);
-                json += "\"}";
+                json += "\",\"decimals\":";
+                json += String((int)binding->decimals);
+                json += "}";
             }
         }
         json += "]}";

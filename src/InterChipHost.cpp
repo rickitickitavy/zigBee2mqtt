@@ -63,6 +63,8 @@ void InterChipHost::resetSlaveSynchronous() {
     hasPending = false;
     pingTimeouts = 0;
     slaveVersionText[0] = '\0';
+    slaveZigbeeStarted = false;
+    zigbeeStartDeadlineMs = 0;
     bootResetCompleted = true;
     LOGGER.info("Slave reset released (sync), waiting SLAVE_READY");
 }
@@ -266,6 +268,8 @@ void InterChipHost::enterReset() {
     hasPending = false;
     pingTimeouts = 0;
     slaveVersionText[0] = '\0';
+    slaveZigbeeStarted = false;
+    zigbeeStartDeadlineMs = 0;
     pulseResetStart();
 }
 
@@ -357,7 +361,24 @@ void InterChipHost::handleInbound(const SpiFrame &frame) {
         lastPingMs = millis();
         lastSettingsOkMs = millis();
         lastStatusMs = 0;
-        LOGGER.info("Slave settings applied, normal work");
+        slaveZigbeeStarted = false;
+        zigbeeStartDeadlineMs = millis() + kZigbeeStartTimeoutMs;
+        LOGGER.info("Slave settings applied, waiting for Zigbee start");
+    }
+    if (frame.cmd == SpiEvtPong && frame.length >= 1) {
+        const bool zigbeeUp = (frame.payload[0] & SPI_STATUS_FLAG_ZIGBEE_STARTED) != 0;
+        if (zigbeeUp) {
+            if (!slaveZigbeeStarted) {
+                LOGGER.info("Slave Zigbee started");
+            }
+            slaveZigbeeStarted = true;
+            zigbeeStartDeadlineMs = 0;
+        } else if (slaveZigbeeStarted) {
+            LOGGER.warning("Slave Zigbee lost (ping); resetting slave");
+            slaveZigbeeStarted = false;
+            zigbeeStartDeadlineMs = 0;
+            enterReset();
+        }
     }
     if (frame.cmd == SpiEvtStatus && frame.length >= 2) {
         size_t versionLength = (size_t)(frame.length - 1);
@@ -366,6 +387,13 @@ void InterChipHost::handleInbound(const SpiFrame &frame) {
         }
         memcpy(slaveVersionText, frame.payload + 1, versionLength);
         slaveVersionText[versionLength] = '\0';
+        if ((frame.payload[0] & SPI_STATUS_FLAG_ZIGBEE_STARTED) != 0) {
+            if (!slaveZigbeeStarted) {
+                LOGGER.info("Slave Zigbee started");
+            }
+            slaveZigbeeStarted = true;
+            zigbeeStartDeadlineMs = 0;
+        }
     }
     if (frame.cmd == SpiEvtLogRecord && frame.length > 0) {
         const uint16_t textLen = frame.length;
@@ -470,7 +498,13 @@ void InterChipHost::pump() {
     }
 
     if (state == HostBringupNormal && !FIRMWARE_OTA.isUpdatingSlave()) {
-        if (lastKeepaliveOkMs != 0 && (millis() - lastKeepaliveOkMs) >= kLinkDeadMs) {
+        if (zigbeeStartDeadlineMs != 0
+            && !slaveZigbeeStarted
+            && (int32_t)(millis() - zigbeeStartDeadlineMs) >= 0) {
+            LOGGER.warning("Slave Zigbee did not start within 30s; resetting slave");
+            zigbeeStartDeadlineMs = 0;
+            enterReset();
+        } else if (lastKeepaliveOkMs != 0 && (millis() - lastKeepaliveOkMs) >= kLinkDeadMs) {
             LOGGER.warning("SPI keepalive silent too long, resetting slave");
             noteLinkLostAndReset();
         } else {
@@ -482,7 +516,11 @@ void InterChipHost::pump() {
                 lastTimeSyncMs = millis();
                 requestTimeSync();
             }
-            if (lastStatusMs == 0 || (millis() - lastStatusMs) >= kStatusPeriodMs) {
+            const unsigned long statusPeriodMs =
+                (zigbeeStartDeadlineMs != 0 && !slaveZigbeeStarted)
+                    ? kZigbeeStartStatusPeriodMs
+                    : kStatusPeriodMs;
+            if (lastStatusMs == 0 || (millis() - lastStatusMs) >= statusPeriodMs) {
                 lastStatusMs = millis();
                 enqueueInternal(SpiCmdGetStatus, nullptr, 0, true, 0);
             }

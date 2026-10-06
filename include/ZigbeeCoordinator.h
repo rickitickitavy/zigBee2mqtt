@@ -54,6 +54,7 @@ public:
     void attachLibraryCallbacks(void (*withSource)(bool, uint8_t, esp_zb_zcl_addr_t));
     bool begin(uint8_t channel, uint8_t permitJoinSec);
     bool isStarted() const;
+    bool checkResponsive() const;
     void permitJoin(uint8_t seconds);
     void closeJoin();
     void refreshBoundDevices();

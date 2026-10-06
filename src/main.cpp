@@ -56,6 +56,8 @@ static DeviceStore *deviceStore = nullptr;
 static bool ntpStarted = false;
 static bool slaveZigbeeStarted = false;
 static bool slaveZigbeeStarting = false;
+static uint32_t slaveZigbeeStartDeadlineMs = 0;
+static constexpr uint32_t kSlaveZigbeeStartTimeoutMs = 30000;
 static bool persistHostDeviceList();
 static bool onUsersRestored(const char (*removedNames)[USER_NAME_MAX], int removedCount);
 static void onHostUserChanged(UserChangeKind kind, const UserRecord *user);
@@ -300,19 +302,19 @@ static int applyManualDeviceCommand(const char *ieeeText, const char *payload, i
         }
         return 200;
     }
-    uint8_t topicEndpoint = 0;
+    uint8_t topicEndpoint = channel > 0 && channel <= 240 ? (uint8_t)channel : 0;
     String wrapped;
     const char *applyPayload = body.c_str();
     if (DeviceTopicMap::usesPayloadParse(entry->channelCount)) {
-        const uint8_t parsedEndpoint = channel > 0 ? (uint8_t)channel : 1;
+        const uint8_t parsedEndpoint = topicEndpoint > 0 ? topicEndpoint : 1;
         wrapped = "ch-";
         wrapped += String((unsigned)parsedEndpoint);
         wrapped += "##";
         wrapped += body;
         applyPayload = wrapped.c_str();
         topicEndpoint = 0;
-    } else if (DeviceTopicMap::usesTopicSuffix(entry->channelCount)) {
-        topicEndpoint = channel > 0 ? (uint8_t)channel : 1;
+    } else if (DeviceTopicMap::usesTopicSuffix(entry->channelCount) && topicEndpoint == 0) {
+        topicEndpoint = 1;
     }
     applyRegisteredDeviceCommand(entry, applyPayload, topicEndpoint);
     return 200;
@@ -1120,10 +1122,13 @@ static void startZigbeeOnOwnTask(uint8_t channel, uint8_t permitJoinSec) {
             }
             if (!started) {
                 LOGGER.error("Zigbee start failed — check ZCZR partition / erase flash");
+                INTER_CHIP_SLAVE.setZigbeeStarted(false);
                 slaveZigbeeStarting = false;
             } else {
                 slaveZigbeeStarted = true;
                 slaveZigbeeStarting = false;
+                slaveZigbeeStartDeadlineMs = 0;
+                INTER_CHIP_SLAVE.setZigbeeStarted(true);
             }
             INTER_CHIP_SLAVE.resumeAfterRadioPause();
             delete startArgs;
@@ -1189,6 +1194,8 @@ static void onSlaveSettings(uint8_t channel, uint8_t permitJoinSec, uint32_t uni
         return;
     }
     slaveZigbeeStarting = true;
+    slaveZigbeeStartDeadlineMs = millis() + kSlaveZigbeeStartTimeoutMs;
+    INTER_CHIP_SLAVE.setZigbeeStarted(false);
     startZigbeeOnOwnTask(channel, permitJoinSec);
 }
 
@@ -1532,6 +1539,9 @@ static void setupSlave() {
     LOGGER.setStoreRing(false);
     INTER_CHIP_SLAVE.setSettingsHandler(onSlaveSettings);
     INTER_CHIP_SLAVE.setPermitJoinHandler(onSlavePermitJoin);
+    INTER_CHIP_SLAVE.setZigbeeHealthChecker([]() {
+        return zigbeeCoordinator != nullptr && zigbeeCoordinator->checkResponsive();
+    });
     INTER_CHIP_SLAVE.setOnOffHandler(onSlaveOnOff);
     INTER_CHIP_SLAVE.setWriteAttrHandler(onSlaveWriteAttr);
     INTER_CHIP_SLAVE.setReadAttrHandler(onSlaveReadAttr);
@@ -1619,8 +1629,19 @@ void loop() {
         return;
     }
 
+    if (INTER_CHIP_SLAVE.consumeZigbeeLostReboot()) {
+        LOGGER.error("Zigbee lost; rebooting slave");
+        delay(200);
+        ESP.restart();
+    }
     if (zigbeeCoordinator != nullptr && zigbeeCoordinator->isStarted()) {
         STATUS_RGB.setBootHeld(false);
+        slaveZigbeeStartDeadlineMs = 0;
+    } else if (slaveZigbeeStartDeadlineMs != 0
+        && (int32_t)(millis() - slaveZigbeeStartDeadlineMs) >= 0) {
+        LOGGER.error("Zigbee did not start within 30s; rebooting slave");
+        delay(200);
+        ESP.restart();
     }
     STATUS_RGB.service();
     INTER_CHIP_SLAVE.applyDeferredSettings();

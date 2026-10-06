@@ -487,6 +487,17 @@ bool ZigbeeCoordinator::isStarted() const {
     return started;
 }
 
+bool ZigbeeCoordinator::checkResponsive() const {
+    if (!started) {
+        return false;
+    }
+    if (!esp_zb_lock_acquire(pdMS_TO_TICKS(50))) {
+        return false;
+    }
+    esp_zb_lock_release();
+    return true;
+}
+
 void ZigbeeCoordinator::permitJoin(uint8_t seconds) {
     if (!started) {
         LOGGER.warning("Zigbee is not started");
