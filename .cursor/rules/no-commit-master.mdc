@@ -1,0 +1,15 @@
+---
+description: Never commit or push on master/develop/main — hard freeze, no user override
+alwaysApply: true
+---
+
+# No commits on protected branches
+
+NEVER run `git commit` or `git push` while HEAD is `master`, `develop`, or `main`.
+NEVER push a refspec that updates those branches (`origin master`, `HEAD:master`, etc.).
+
+This applies **even if the user explicitly asks** to commit or push on the current branch when that branch is protected.
+
+Instead: create/switch to a feature branch, commit there, push that branch, open a PR.
+
+A Cursor `beforeShellExecution` hook (`~/.cursor/hooks/block-master-develop-git.py`) denies these commands.
