@@ -18,26 +18,26 @@ enum WifiSettingsMode : uint8_t {
 
 enum DeviceTransport : uint8_t {
     DeviceTransportZigbee = 0,
-    DeviceTransportWifi = 1
+    DeviceTransportMqtt = 1
 };
 
 inline DeviceTransport clampDeviceTransport(uint8_t rawTransport) {
-    if (rawTransport == DeviceTransportWifi) {
-        return DeviceTransportWifi;
+    if (rawTransport == DeviceTransportMqtt) {
+        return DeviceTransportMqtt;
     }
     return DeviceTransportZigbee;
 }
 
 inline const char *deviceTransportJsonId(uint8_t transport) {
-    if (transport == DeviceTransportWifi) {
-        return "wifi";
+    if (transport == DeviceTransportMqtt) {
+        return "mqtt";
     }
     return "zigbee";
 }
 
 inline DeviceTransport deviceTransportFromJsonId(const char *transportId) {
-    if (transportId != nullptr && strcmp(transportId, "wifi") == 0) {
-        return DeviceTransportWifi;
+    if (transportId != nullptr && strcmp(transportId, "mqtt") == 0) {
+        return DeviceTransportMqtt;
     }
     return DeviceTransportZigbee;
 }

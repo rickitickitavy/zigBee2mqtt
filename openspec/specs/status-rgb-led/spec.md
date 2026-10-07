@@ -22,7 +22,7 @@ Each chip SHALL drive LED1–LED6 on that board’s pin map (host ESP32-S3 and s
 
 ### Requirement: Fixed LED colors per board role
 
-Each board SHALL treat LED1–LED6 as fixed physical colors by role. Host (master): LED1 blue, LED2 green, LED3 green, LED4 green, LED5 green, LED6 red. Slave: LED1 red, LED2 blue, LED3 green, LED4 blue, LED5 green, LED6 blue. Status meanings for each LED index SHALL stay as today; only the drive method and brightness by color change.
+Each board SHALL treat LED1–LED6 as fixed physical colors by role. Host (master): LED1 blue, LED2 green, LED3 green, LED4 green, LED5 green, LED6 red. Slave: LED1 red, LED2 green, LED3 green, LED4 blue, LED5 green, LED6 blue. Status meanings for each LED index SHALL stay as today; only the drive method and brightness by color change.
 
 #### Scenario: Host color map
 
@@ -32,7 +32,7 @@ Each board SHALL treat LED1–LED6 as fixed physical colors by role. Host (maste
 #### Scenario: Slave color map
 
 - **WHEN** the slave drives LED1–LED6 for status
-- **THEN** LED1 is red, LED2 blue, LED3 green, LED4 blue, LED5 green, and LED6 blue
+- **THEN** LED1 is red, LED2 green, LED3 green, LED4 blue, LED5 green, and LED6 blue
 
 ### Requirement: Blue and green LEDs use PWM brightness
 

@@ -174,7 +174,7 @@ void MqttClient::subscribeDeviceCommands() {
             continue;
         }
 
-        if (entry->transport != DeviceTransportWifi && !deviceTopicEmpty(entry->commandTopic)) {
+        if (entry->transport != DeviceTransportMqtt && !deviceTopicEmpty(entry->commandTopic)) {
             keepOrSubscribe(String(entry->commandTopic));
             if (DeviceTopicMap::usesTopicSuffix(entry->channelCount)) {
                 keepOrSubscribe(String(entry->commandTopic) + "/+");
@@ -182,15 +182,15 @@ void MqttClient::subscribeDeviceCommands() {
         }
 
         if (!deviceTopicEmpty(entry->stateTopic)
-            && (entry->transport == DeviceTransportWifi
+            && (entry->transport == DeviceTransportMqtt
                 || zigbeeDeviceTypeIsMeasurement(entry->zigbeeType))) {
             keepOrSubscribe(String(entry->stateTopic));
-            if (entry->transport != DeviceTransportWifi
+            if (entry->transport != DeviceTransportMqtt
                 && DeviceTopicMap::usesTopicSuffix(entry->channelCount)) {
                 keepOrSubscribe(String(entry->stateTopic) + "/+");
             }
         }
-        if (entry->transport == DeviceTransportWifi && !deviceTopicEmpty(entry->availabilityTopic)) {
+        if (entry->transport == DeviceTransportMqtt && !deviceTopicEmpty(entry->availabilityTopic)) {
             keepOrSubscribe(String(entry->availabilityTopic));
         }
     }
@@ -320,7 +320,7 @@ void MqttClient::publishDeviceState(const DeviceTopicEntry *entry, const char *m
     if (entry == nullptr || deviceTopicEmpty(entry->stateTopic)) {
         return;
     }
-    if (entry->transport == DeviceTransportWifi) {
+    if (entry->transport == DeviceTransportMqtt) {
         return;
     }
     if (message == nullptr) {
@@ -341,7 +341,7 @@ bool MqttClient::publishDeviceCommand(const DeviceTopicEntry *entry, const char 
     if (entry == nullptr || deviceTopicEmpty(entry->commandTopic) || message == nullptr) {
         return false;
     }
-    if (entry->transport == DeviceTransportWifi) {
+    if (entry->transport == DeviceTransportMqtt) {
         const bool sent = publishMessage(entry->commandTopic, message, false);
         if (sent) {
             STATUS_RGB.pulseMqttPublished();

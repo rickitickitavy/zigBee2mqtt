@@ -213,7 +213,7 @@ static void pumpWifiDeviceCommands() {
         pendingWifiCommands[index].used = false;
         portEXIT_CRITICAL(&pendingWifiCommandMux);
         DeviceTopicEntry *entry = topicMap->findByIeee(pending.ieee);
-        if (entry == nullptr || entry->transport != DeviceTransportWifi) {
+        if (entry == nullptr || entry->transport != DeviceTransportMqtt) {
             continue;
         }
         if (!mqttClient->publishDeviceCommand(entry, pending.action, pending.endpoint)) {
@@ -229,7 +229,7 @@ static void applyRegisteredDeviceCommand(
     const char *payload,
     uint8_t topicEndpoint
 ) {
-    if (entry == nullptr || entry->transport == DeviceTransportWifi) {
+    if (entry == nullptr || entry->transport == DeviceTransportMqtt) {
         return;
     }
     String action = String(payload != nullptr ? payload : "");
@@ -295,7 +295,7 @@ static int applyManualDeviceCommand(const char *ieeeText, const char *payload, i
     if (body.length() == 0) {
         return 400;
     }
-    if (entry->transport == DeviceTransportWifi) {
+    if (entry->transport == DeviceTransportMqtt) {
         const uint8_t commandEndpoint = channel > 0 && channel <= 240 ? (uint8_t)channel : 1;
         if (!enqueueWifiDeviceCommand(entry, body.c_str(), commandEndpoint)) {
             return 503;
@@ -328,7 +328,7 @@ static void hostCollectZigbeeStatuses() {
     while (slotIndex >= 0) {
         DeviceTopicEntry *entry = topicMap->slotAt(slotIndex);
         slotIndex = topicMap->nextUsedIndex(slotIndex + 1);
-        if (entry == nullptr || !entry->used || entry->transport == DeviceTransportWifi) {
+        if (entry == nullptr || !entry->used || entry->transport == DeviceTransportMqtt) {
             continue;
         }
         if (entry->zigbeeType == ZigbeeDeviceTypeOnOff) {
@@ -411,7 +411,7 @@ static DeviceTopicEntry *findWifiStateEntry(const char *topic, uint8_t *topicEnd
         return nullptr;
     }
     DeviceTopicEntry *exact = topicMap->findByStateTopic(topic, topicEndpoint);
-    if (exact != nullptr && exact->transport == DeviceTransportWifi) {
+    if (exact != nullptr && exact->transport == DeviceTransportMqtt) {
         return exact;
     }
     DeviceTopicEntry *best = nullptr;
@@ -420,7 +420,7 @@ static DeviceTopicEntry *findWifiStateEntry(const char *topic, uint8_t *topicEnd
     while (slotIndex >= 0) {
         DeviceTopicEntry *entry = topicMap->slotAt(slotIndex);
         slotIndex = topicMap->nextUsedIndex(slotIndex + 1);
-        if (entry == nullptr || entry->transport != DeviceTransportWifi || deviceTopicEmpty(entry->stateTopic)) {
+        if (entry == nullptr || entry->transport != DeviceTransportMqtt || deviceTopicEmpty(entry->stateTopic)) {
             continue;
         }
         const size_t mappedLength = strlen(entry->stateTopic);
@@ -499,7 +499,7 @@ static void applyWifiMqttAvailability(const char *topic, const char *payload) {
         return;
     }
     DeviceTopicEntry *entry = topicMap->findByAvailabilityTopic(topic);
-    if (entry == nullptr || entry->transport != DeviceTransportWifi) {
+    if (entry == nullptr || entry->transport != DeviceTransportMqtt) {
         return;
     }
     const String body = trimmedMqttText(payload);
@@ -522,7 +522,7 @@ static void applyMeasurementMqttState(const char *topic, const char *payload) {
     uint8_t topicEndpoint = 0;
     DeviceTopicEntry *entry = topicMap->findByStateTopic(topic, &topicEndpoint);
     if (entry == nullptr
-        || entry->transport == DeviceTransportWifi
+        || entry->transport == DeviceTransportMqtt
         || !zigbeeDeviceTypeIsMeasurement(entry->zigbeeType)) {
         return;
     }
@@ -584,7 +584,7 @@ static void onMqttLogicalMessage(const char *topic, const char *payload) {
     if (entry == nullptr) {
         return;
     }
-    if (entry->transport == DeviceTransportWifi) {
+    if (entry->transport == DeviceTransportMqtt) {
         uint8_t stateEndpoint = 0;
         if (findWifiStateEntry(topic, &stateEndpoint) == nullptr) {
             ZIGBEE_SPI_PROXY.notePacketReceived();
@@ -791,7 +791,7 @@ static bool onDeviceRemoved(const uint8_t ieee[8], uint8_t transport) {
         mqttClient->subscribeDeviceCommands();
     }
     persistHostDeviceList();
-    if (transport == DeviceTransportWifi) {
+    if (transport == DeviceTransportMqtt) {
         ZIGBEE_SPI_PROXY.forgetDeviceTelemetry(ieee);
         return true;
     }

@@ -1032,7 +1032,7 @@
                     channels: device.channels,
                     fullControl: !!device.fullControl,
                     type: device.type || "unknown",
-                    transport: device.transport == "wifi" ? "wifi" : "zigbee"
+                    transport: device.transport == "mqtt" ? "mqtt" : "zigbee"
                 })
             }).then(function (response) {
                 return response.text().then(function (text) {
@@ -2121,8 +2121,8 @@
         }
 
         function deviceTransportLabel(transportId) {
-            if (transportId == "wifi") {
-                return "Wi-Fi";
+            if (transportId == "mqtt") {
+                return "MQTT";
             }
             return "Zigbee";
         }
@@ -2137,20 +2137,20 @@
             if (transportInput) {
                 transportInput.value = deviceTransportLabel(parameterDialogTransport);
             }
-            var wifiDevice = parameterDialogTransport == "wifi";
+            var mqttDevice = parameterDialogTransport == "mqtt";
             if (ieeeField) {
-                ieeeField.hidden = wifiDevice;
+                ieeeField.hidden = mqttDevice;
             }
             if (typeReadonlyField) {
-                typeReadonlyField.hidden = wifiDevice;
+                typeReadonlyField.hidden = mqttDevice;
             }
             if (typeSelectField) {
-                typeSelectField.hidden = !wifiDevice;
+                typeSelectField.hidden = !mqttDevice;
             }
-            if (!wifiDevice && typeReadonly) {
+            if (!mqttDevice && typeReadonly) {
                 typeReadonly.value = zigbeeDeviceTypeLabel(parameterDialogTypeId);
             }
-            if (wifiDevice) {
+            if (mqttDevice) {
                 fillDeviceTypeSelect(parameterDialogTypeId || "unknown");
                 if (typeSelect) {
                     typeSelect.value = parameterDialogTypeId || "unknown";
@@ -2185,7 +2185,7 @@
         }
 
         function defaultDeviceTopics(name) {
-            if (parameterDialogTransport == "wifi") {
+            if (parameterDialogTransport == "mqtt") {
                 return wifiDeviceTopics(name);
             }
             var base = mqttBaseTopicCache || "z2m";
@@ -3275,10 +3275,10 @@
             }
             document.getElementById("deviceIeee").value = device.ieee || "";
             parameterDialogTypeId = device.type || "unknown";
-            parameterDialogTransport = device.transport == "wifi" ? "wifi" : "zigbee";
+            parameterDialogTransport = device.transport == "mqtt" ? "mqtt" : "zigbee";
             applyParameterTypeControls();
             document.getElementById("deviceName").value = device.name || device.friendlyName || "";
-            if (parameterDialogTransport == "wifi" && !parameterDialogIsEdit) {
+            if (parameterDialogTransport == "mqtt" && !parameterDialogIsEdit) {
                 var wifiTopics = wifiDeviceTopics(document.getElementById("deviceName").value);
                 document.getElementById("deviceStateTopic").value = wifiTopics.state;
                 document.getElementById("deviceCommandTopic").value = wifiTopics.command;
@@ -3360,7 +3360,7 @@
                 availability: document.getElementById("deviceAvailabilityTopic").value,
                 channels: channelsSelect ? channelsSelect.value : "1",
                 fullControl: fullControlInput ? !!fullControlInput.checked : false,
-                type: parameterDialogTransport == "wifi" && typeSelect
+                type: parameterDialogTransport == "mqtt" && typeSelect
                     ? typeSelect.value
                     : parameterDialogTypeId
             };
@@ -3449,7 +3449,7 @@
             );
         }
 
-        function openWifiDeviceDialog() {
+        function openMqttDeviceDialog() {
             closeSearchDialog(true);
             refreshMqttBaseTopic();
             parameterDialogIsEdit = false;
@@ -3458,9 +3458,9 @@
                 {
                     ieee: "",
                     type: "unknown",
-                    transport: "wifi"
+                    transport: "mqtt"
                 },
-                "Wi-Fi device"
+                "MQTT device"
             );
         }
 
@@ -3548,7 +3548,7 @@
 
         function onDeviceNameInput() {
             var deviceName = document.getElementById("deviceName").value;
-            if (parameterDialogTransport == "wifi") {
+            if (parameterDialogTransport == "mqtt") {
                 if (proposedWifiTopics == null) {
                     return;
                 }
@@ -3588,7 +3588,7 @@
             }
             var typeSelect = document.getElementById("deviceTypeSelect");
             var typeId = parameterDialogTypeId || "unknown";
-            if (parameterDialogTransport == "wifi") {
+            if (parameterDialogTransport == "mqtt") {
                 if (typeSelect && typeSelect.options.length == 0) {
                     fillDeviceTypeSelect("unknown");
                 }
@@ -3597,7 +3597,7 @@
                 }
             }
             var ieeeText = document.getElementById("deviceIeee").value;
-            if (parameterDialogTransport != "wifi" && !ieeeText) {
+            if (parameterDialogTransport != "mqtt" && !ieeeText) {
                 errorLine.hidden = false;
                 errorLine.textContent = "IEEE is required";
                 return;
@@ -5602,7 +5602,7 @@
                         <span id="searchStartLabel">Search</span>
                     </button>
                     <button type="button" id="foundAddBtn" class="btn btn-primary" onclick="openParameterDialog()" disabled>Add</button>
-                    <button type="button" id="wifiDeviceBtn" class="btn btn-secondary" onclick="openWifiDeviceDialog()">WIFI DEVICE</button>
+                    <button type="button" id="mqttDeviceBtn" class="btn btn-secondary" onclick="openMqttDeviceDialog()">MQTT DEVICE</button>
                     <button type="button" class="btn btn-secondary" onclick="closeSearchDialog(true)">Close</button>
                 </div>
             </div>

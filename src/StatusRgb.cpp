@@ -17,7 +17,7 @@ static const LedColor kLedColors[6] = {
 #elif defined(BOARD_ROLE_SLAVE)
 static const LedColor kLedColors[6] = {
     LedColorRed,
-    LedColorBlue,
+    LedColorGreen,
     LedColorGreen,
     LedColorBlue,
     LedColorGreen,

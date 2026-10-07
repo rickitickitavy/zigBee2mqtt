@@ -464,7 +464,7 @@ bool ZigbeeSpiProxy::enqueueDeviceUpsert(const DeviceTopicEntry *entry) {
     if (slot != nullptr) {
         ensureChannelCapacity(slot, channelCapacityForIeee(entry->ieee));
     }
-    if (entry->transport == DeviceTransportWifi) {
+    if (entry->transport == DeviceTransportMqtt) {
         return true;
     }
     return queueDeviceChange(SPI_DEVICE_SYNC_ENTRY, entry);
@@ -562,7 +562,7 @@ void ZigbeeSpiProxy::pumpPendingChanges() {
         return;
     }
     DeviceTopicEntry *entry = registryMap->slotAt(nextIndex);
-    if (entry != nullptr && entry->transport == DeviceTransportWifi) {
+    if (entry != nullptr && entry->transport == DeviceTransportMqtt) {
         pendingUpsertWalk = nextIndex + 1;
         return;
     }

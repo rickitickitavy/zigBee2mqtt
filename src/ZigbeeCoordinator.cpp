@@ -1849,7 +1849,7 @@ void ZigbeeCoordinator::queueOutstandingStatusReads() {
 }
 
 void ZigbeeCoordinator::queueDeviceStatusReads(const DeviceTopicEntry *entry) {
-    if (entry == nullptr || !entry->used || entry->transport == DeviceTransportWifi) {
+    if (entry == nullptr || !entry->used || entry->transport == DeviceTransportMqtt) {
         return;
     }
     if (!started || statusReadAlreadyIssued(entry->ieee)) {
@@ -1959,7 +1959,7 @@ void ZigbeeCoordinator::enqueueRegisteredStatusReads() {
     while (slotIndex >= 0) {
         DeviceTopicEntry *entry = registeredMap->slotAt(slotIndex);
         slotIndex = registeredMap->nextUsedIndex(slotIndex + 1);
-        if (entry == nullptr || !entry->used || entry->transport == DeviceTransportWifi) {
+        if (entry == nullptr || !entry->used || entry->transport == DeviceTransportMqtt) {
             continue;
         }
         if (statusReadAlreadyIssued(entry->ieee)) {

@@ -1718,7 +1718,7 @@ void WebConsole::handleDevicesPost(AsyncWebServerRequest *request) {
     } else if (haveTransport) {
         transport = requestedTransport;
     }
-    if (!isEdit && transport == DeviceTransportWifi && (!haveIeee || ieeeText.length() == 0)) {
+    if (!isEdit && transport == DeviceTransportMqtt && (!haveIeee || ieeeText.length() == 0)) {
         bool allocated = false;
         for (int attempt = 0; attempt < 64 && !allocated; attempt++) {
             ieee[0] = 0xFE;
@@ -1731,7 +1731,7 @@ void WebConsole::handleDevicesPost(AsyncWebServerRequest *request) {
             }
         }
         if (!allocated) {
-            request->send(500, "text/plain", "Could not allocate WiFi device id");
+            request->send(500, "text/plain", "Could not allocate MQTT device id");
             return;
         }
     } else if (!haveIeee || ieeeText.length() == 0) {
@@ -1758,7 +1758,7 @@ void WebConsole::handleDevicesPost(AsyncWebServerRequest *request) {
     }
     String typeText;
     const bool haveType = extractJsonString(requestBody.c_str(), "type", typeText);
-    if (transport == DeviceTransportWifi) {
+    if (transport == DeviceTransportMqtt) {
         if (haveType) {
             entry->zigbeeType = zigbeeDeviceTypeFromJsonId(typeText.c_str());
         } else if (isEdit) {
