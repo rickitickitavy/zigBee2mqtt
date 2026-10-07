@@ -14,6 +14,10 @@ MqttClient::MqttClient(SettingsManager *settingsManager, DeviceTopicMap *topicMa
 }
 
 MqttClient::~MqttClient() {
+    if (connectTaskHandle != nullptr) {
+        // Best-effort: do not join; task exits after connect and clears the handle.
+        connectInProgress = false;
+    }
     clearTopicSubscriptions();
     delete client;
 }
@@ -131,12 +135,16 @@ void MqttClient::keepOrSubscribe(const String &subscribeTopic) {
     }
     TopicSubscription *node = (TopicSubscription *)calloc(1, sizeof(TopicSubscription));
     if (node == nullptr) {
+        client->unsubscribe(subscribeTopic.c_str());
+        LOGGER.warning("MQTT subscribe OOM tracking topic=" + subscribeTopic);
         return;
     }
     const size_t topicLen = subscribeTopic.length();
     node->topic = (char *)malloc(topicLen + 1);
     if (node->topic == nullptr) {
         free(node);
+        client->unsubscribe(subscribeTopic.c_str());
+        LOGGER.warning("MQTT subscribe OOM topic string topic=" + subscribeTopic);
         return;
     }
     memcpy(node->topic, subscribeTopic.c_str(), topicLen + 1);
@@ -220,7 +228,31 @@ void MqttClient::attachLocalBroker() {
     publishStatus("online");
 }
 
-void MqttClient::reconnect() {
+void MqttClient::connectTaskEntry(void *arg) {
+    MqttClient *mqttClient = static_cast<MqttClient *>(arg);
+    if (mqttClient != nullptr) {
+        mqttClient->runRemoteConnect();
+        mqttClient->connectTaskHandle = nullptr;
+        mqttClient->connectInProgress = false;
+    }
+    vTaskDelete(nullptr);
+}
+
+void MqttClient::finishRemoteSessionAttach() {
+    if (!client->connected()) {
+        remoteSessionAttachPending = false;
+        return;
+    }
+    remoteSessionAttachPending = false;
+    reconnectBackoffMs = 0;
+    lastDevicesJson = "";
+    clearTopicSubscriptions();
+    LOGGER.info("MQTT connected");
+    subscribeBridge();
+    publishStatus("online");
+}
+
+void MqttClient::runRemoteConnect() {
     GlobalSettings *settings = settingsManager->getSettings();
     applyRemoteBrokerTarget();
     LOGGER.info("MQTT connecting to " + String(settings->mqtt.server) + ":" + String(settings->mqtt.port));
@@ -234,12 +266,28 @@ void MqttClient::reconnect() {
         return;
     }
 
-    reconnectBackoffMs = 0;
-    lastDevicesJson = "";
-    clearTopicSubscriptions();
-    LOGGER.info("MQTT connected");
-    subscribeBridge();
-    publishStatus("online");
+    remoteSessionAttachPending = true;
+}
+
+void MqttClient::reconnect() {
+    if (connectInProgress || connectTaskHandle != nullptr) {
+        return;
+    }
+    connectInProgress = true;
+    const BaseType_t created = xTaskCreate(
+        connectTaskEntry,
+        "mqttConnect",
+        4096,
+        this,
+        1,
+        &connectTaskHandle
+    );
+    if (created != pdPASS) {
+        connectTaskHandle = nullptr;
+        connectInProgress = false;
+        LOGGER.warning("MQTT connect task create failed; connecting on loop");
+        runRemoteConnect();
+    }
 }
 
 void MqttClient::dispatch(bool staConnected) {
@@ -265,12 +313,22 @@ void MqttClient::dispatch(bool staConnected) {
         return;
     }
 
+    if (connectInProgress) {
+        STATUS_RGB.setMqttConnected(false);
+        return;
+    }
+
     if (client->connected()) {
+        if (remoteSessionAttachPending) {
+            finishRemoteSessionAttach();
+        }
         STATUS_RGB.setMqttConnected(true);
         client->loop();
         serviceBornAnnounce();
         return;
     }
+
+    remoteSessionAttachPending = false;
 
     STATUS_RGB.setMqttConnected(false);
 

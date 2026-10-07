@@ -12,14 +12,17 @@ public:
         Receiving = 1,
         Preparing = 2,
         Slave = 3,
-        Host = 4,
-        Failed = 5,
-        Done = 6,
-        Rebooting = 7
+        VerifyingSlave = 4,
+        Host = 5,
+        Failed = 6,
+        Done = 7,
+        Rebooting = 8
     };
 
     static constexpr const char *kPackagePath = "/ota/package.zip";
     static constexpr uint8_t kMaxSlaveFrameFails = 5;
+    static constexpr uint8_t kSlaveVerifyMaxAttempts = 3;
+    static constexpr unsigned long kSlaveVerifyWaitMs = 15000UL;
 
     bool busy() const;
     bool isUpdatingSlave() const;
@@ -87,6 +90,11 @@ private:
     volatile bool slavePackClaimed = false;
     SpiClockHzFn spiClockRestoreFn = nullptr;
     bool spiClockOverrideActive = false;
+    char expectedSlaveVersion[SPI_STATUS_VERSION_MAX + 1]{};
+    char preOtaSlaveVersion[SPI_STATUS_VERSION_MAX + 1]{};
+    uint8_t slaveVerifyAttempt = 0;
+    unsigned long slaveVerifyDeadlineMs = 0;
+    bool slaveVerifyResetPending = false;
 
     void fail(const char *message);
     void clearStagingFiles();
@@ -96,6 +104,9 @@ private:
     bool sendLastSlaveFrame(bool isResend);
     void onSlaveFrameLost();
     bool prepareJoinedPackage();
+    void beginSlaveVersionVerify();
+    void pumpSlaveVersionVerify();
+    bool slaveVersionMatchesExpected() const;
     bool startHostApply();
     void pumpHostApply();
     void pumpSlaveBegin();

@@ -1,4 +1,5 @@
 #include "ZigbeeCoordinator.h"
+#include "BoundDeviceJson.h"
 #include "Logger.h"
 #include "Defines.h"
 #include "StatusRgb.h"
@@ -2288,7 +2289,7 @@ bool ZigbeeCoordinator::sendZclWithoutApsAck(
     const uint8_t *payload,
     uint16_t payloadLength
 ) {
-    if (!esp_zb_lock_acquire(portMAX_DELAY)) {
+    if (!esp_zb_lock_acquire(pdMS_TO_TICKS(100))) {
         LOGGER.warning("Zigbee lock failed for ZCL send");
         return false;
     }
@@ -2477,37 +2478,27 @@ void ZigbeeCoordinator::noteDefaultResponse(uint8_t endpoint, uint16_t cluster) 
 String ZigbeeCoordinator::devicesJson(DeviceTopicMap *topicMap) {
     String json = "[";
     bool first = true;
+    size_t usedCount = 0;
+    for (BoundZigbeeDevice *device = boundDeviceHead; device != nullptr; device = device->next) {
+        if (device->occupied) {
+            usedCount++;
+        }
+    }
+    json.reserve(usedCount * 192 + 2);
     for (BoundZigbeeDevice *device = boundDeviceHead; device != nullptr; device = device->next) {
         if (!device->occupied) {
             continue;
         }
-        if (!first) {
-            json += ",";
-        }
-        first = false;
-        json += "{\"ieee\":\"";
-        json += topicMap->formatIeee(device->ieee);
-        json += "\",\"nwk\":\"0x";
-        json += String(device->shortAddr, HEX);
-        json += "\",\"endpoint\":";
-        json += String(device->endpoint);
-        json += ",\"manufacturer\":\"";
-        json += deviceTopicCStr(device->manufacturer);
-        json += "\",\"model\":\"";
-        json += deviceTopicCStr(device->model);
-        json += "\"";
-
-        DeviceTopicEntry *mapped = topicMap->findByIeee(device->ieee);
-        if (mapped != nullptr) {
-            json += ",\"name\":\"";
-            json += deviceTopicCStr(mapped->friendlyName);
-            json += "\",\"state\":\"";
-            json += deviceTopicCStr(mapped->stateTopic);
-            json += "\",\"command\":\"";
-            json += deviceTopicCStr(mapped->commandTopic);
-            json += "\"";
-        }
-        json += "}";
+        appendBoundRadioDeviceJson(
+            json,
+            first,
+            topicMap,
+            device->ieee,
+            device->shortAddr,
+            device->endpoint,
+            deviceTopicCStr(device->manufacturer),
+            deviceTopicCStr(device->model)
+        );
     }
     json += "]";
     return json;

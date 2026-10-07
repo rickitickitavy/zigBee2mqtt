@@ -14,6 +14,16 @@
 #include <stdlib.h>
 #include <string.h>
 
+namespace {
+
+struct HttpRequestBody {
+    String text;
+    bool overflow = false;
+    size_t maxBytes = 0;
+};
+
+}  // namespace
+
 WebConsole::WebConsole(SettingsManager *settingsManager, UserStore *userStore, ConsoleStore *consoleStore)
     : settingsManager(settingsManager),
       userStore(userStore),
@@ -46,9 +56,7 @@ void WebConsole::begin() {
         [this](AsyncWebServerRequest *request) { handleAuthLoginPost(request); },
         nullptr,
         [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-            (void)request;
-            (void)total;
-            appendRequestBody(data, len, index);
+            appendRequestBody(request, data, len, index, total, kHttpBodyMaxSmall);
         }
     );
     server.on(
@@ -67,9 +75,7 @@ void WebConsole::begin() {
         [this](AsyncWebServerRequest *request) { handleUsersUpdatePost(request); },
         nullptr,
         [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-            (void)request;
-            (void)total;
-            appendRequestBody(data, len, index);
+            appendRequestBody(request, data, len, index, total, kHttpBodyMaxSmall);
         }
     );
     server.on(
@@ -83,9 +89,7 @@ void WebConsole::begin() {
         [this](AsyncWebServerRequest *request) { handleUsersPost(request); },
         nullptr,
         [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-            (void)request;
-            (void)total;
-            appendRequestBody(data, len, index);
+            appendRequestBody(request, data, len, index, total, kHttpBodyMaxSmall);
         }
     );
     server.on(
@@ -94,9 +98,7 @@ void WebConsole::begin() {
         [this](AsyncWebServerRequest *request) { handleUsersDelete(request); },
         nullptr,
         [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-            (void)request;
-            (void)total;
-            appendRequestBody(data, len, index);
+            appendRequestBody(request, data, len, index, total, kHttpBodyMaxSmall);
         }
     );
 
@@ -107,9 +109,7 @@ void WebConsole::begin() {
         [this](AsyncWebServerRequest *request) { handleWifiPost(request); },
         nullptr,
         [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-            (void)request;
-            (void)total;
-            appendRequestBody(data, len, index);
+            appendRequestBody(request, data, len, index, total, kHttpBodyMaxSmall);
         }
     );
 
@@ -120,9 +120,7 @@ void WebConsole::begin() {
         [this](AsyncWebServerRequest *request) { handleMqttPost(request); },
         nullptr,
         [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-            (void)request;
-            (void)total;
-            appendRequestBody(data, len, index);
+            appendRequestBody(request, data, len, index, total, kHttpBodyMaxSmall);
         }
     );
 
@@ -133,9 +131,7 @@ void WebConsole::begin() {
         [this](AsyncWebServerRequest *request) { handleZigbeePost(request); },
         nullptr,
         [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-            (void)request;
-            (void)total;
-            appendRequestBody(data, len, index);
+            appendRequestBody(request, data, len, index, total, kHttpBodyMaxSmall);
         }
     );
 
@@ -150,9 +146,7 @@ void WebConsole::begin() {
         [this](AsyncWebServerRequest *request) { handleHardwarePost(request); },
         nullptr,
         [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-            (void)request;
-            (void)total;
-            appendRequestBody(data, len, index);
+            appendRequestBody(request, data, len, index, total, kHttpBodyMaxSmall);
         }
     );
     server.on(
@@ -171,9 +165,7 @@ void WebConsole::begin() {
         [this](AsyncWebServerRequest *request) { handleSettingsRestorePost(request); },
         nullptr,
         [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-            (void)request;
-            (void)total;
-            appendRequestBody(data, len, index);
+            appendRequestBody(request, data, len, index, total, kHttpBodyMaxRestore);
         }
     );
     server.on("/api/theme", HTTP_GET, [this](AsyncWebServerRequest *request) { handleThemeGet(request); });
@@ -183,9 +175,7 @@ void WebConsole::begin() {
         [this](AsyncWebServerRequest *request) { handleThemePost(request); },
         nullptr,
         [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-            (void)request;
-            (void)total;
-            appendRequestBody(data, len, index);
+            appendRequestBody(request, data, len, index, total, kHttpBodyMaxSmall);
         }
     );
 
@@ -199,9 +189,7 @@ void WebConsole::begin() {
         [this](AsyncWebServerRequest *request) { handleConsolesRestorePost(request); },
         nullptr,
         [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-            (void)request;
-            (void)total;
-            appendRequestBody(data, len, index);
+            appendRequestBody(request, data, len, index, total, kHttpBodyMaxRestore);
         }
     );
     server.on(
@@ -210,9 +198,7 @@ void WebConsole::begin() {
         [this](AsyncWebServerRequest *request) { handleConsolePut(request); },
         nullptr,
         [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-            (void)request;
-            (void)total;
-            appendRequestBody(data, len, index);
+            appendRequestBody(request, data, len, index, total, kHttpBodyMaxSmall);
         }
     );
     server.on(
@@ -226,9 +212,7 @@ void WebConsole::begin() {
         [this](AsyncWebServerRequest *request) { handleConsolesPost(request); },
         nullptr,
         [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-            (void)request;
-            (void)total;
-            appendRequestBody(data, len, index);
+            appendRequestBody(request, data, len, index, total, kHttpBodyMaxSmall);
         }
     );
     server.on(
@@ -237,9 +221,7 @@ void WebConsole::begin() {
         [this](AsyncWebServerRequest *request) { handleConsoleDelete(request); },
         nullptr,
         [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-            (void)request;
-            (void)total;
-            appendRequestBody(data, len, index);
+            appendRequestBody(request, data, len, index, total, kHttpBodyMaxSmall);
         }
     );
 
@@ -250,9 +232,7 @@ void WebConsole::begin() {
         [this](AsyncWebServerRequest *request) { handleDevicesCommandPost(request); },
         nullptr,
         [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-            (void)request;
-            (void)total;
-            appendRequestBody(data, len, index);
+            appendRequestBody(request, data, len, index, total, kHttpBodyMaxSmall);
         }
     );
     server.on("/api/devices/found", HTTP_GET, [this](AsyncWebServerRequest *request) { handleDevicesFoundGet(request); });
@@ -262,9 +242,7 @@ void WebConsole::begin() {
         [this](AsyncWebServerRequest *request) { handleDevicesSearchStopPost(request); },
         nullptr,
         [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-            (void)request;
-            (void)total;
-            appendRequestBody(data, len, index);
+            appendRequestBody(request, data, len, index, total, kHttpBodyMaxSmall);
         }
     );
     server.on(
@@ -273,9 +251,7 @@ void WebConsole::begin() {
         [this](AsyncWebServerRequest *request) { handleDevicesSearchPost(request); },
         nullptr,
         [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-            (void)request;
-            (void)total;
-            appendRequestBody(data, len, index);
+            appendRequestBody(request, data, len, index, total, kHttpBodyMaxSmall);
         }
     );
     server.on(
@@ -292,9 +268,7 @@ void WebConsole::begin() {
         [this](AsyncWebServerRequest *request) { handleDevicesPost(request); },
         nullptr,
         [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-            (void)request;
-            (void)total;
-            appendRequestBody(data, len, index);
+            appendRequestBody(request, data, len, index, total, kHttpBodyMaxSmall);
         }
     );
     server.on(
@@ -303,9 +277,7 @@ void WebConsole::begin() {
         [this](AsyncWebServerRequest *request) { handleDevicesDelete(request); },
         nullptr,
         [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-            (void)request;
-            (void)total;
-            appendRequestBody(data, len, index);
+            appendRequestBody(request, data, len, index, total, kHttpBodyMaxSmall);
         }
     );
 
@@ -648,6 +620,10 @@ void WebConsole::sendConsoleWriteResult(AsyncWebServerRequest *request, ConsoleW
 }
 
 void WebConsole::handleAuthLoginPost(AsyncWebServerRequest *request) {
+    String body;
+    if (!takeRequestBody(request, &body)) {
+        return;
+    }
     if (userStore == nullptr) {
         request->send(500, "text/plain", "Users unavailable");
         return;
@@ -655,9 +631,9 @@ void WebConsole::handleAuthLoginPost(AsyncWebServerRequest *request) {
     String userName;
     String password;
     bool rememberMe = false;
-    extractJsonString(requestBody.c_str(), "userName", userName);
-    extractJsonString(requestBody.c_str(), "password", password);
-    extractJsonBool(requestBody.c_str(), "rememberMe", rememberMe);
+    extractJsonString(body.c_str(), "userName", userName);
+    extractJsonString(body.c_str(), "password", password);
+    extractJsonBool(body.c_str(), "rememberMe", rememberMe);
     const UserRecord *user = userStore->findByName(userName.c_str());
     if (user == nullptr || user->isBlocked || !userStore->passwordMatches(user, password.c_str())) {
         request->send(401, "text/plain", "Invalid user name or password");
@@ -669,8 +645,8 @@ void WebConsole::handleAuthLoginPost(AsyncWebServerRequest *request) {
         request->send(401, "text/plain", "Invalid user name or password");
         return;
     }
-    String body = "{\"ok\":true}";
-    AsyncWebServerResponse *response = request->beginResponse(200, "application/json", body);
+    const String responseBody = "{\"ok\":true}";
+    AsyncWebServerResponse *response = request->beginResponse(200, "application/json", responseBody);
     sendAuthCookie(response, tokenHex, maxAgeSec);
     request->send(response);
 }
@@ -725,6 +701,10 @@ void WebConsole::handleUsersGet(AsyncWebServerRequest *request) {
 }
 
 void WebConsole::handleUsersPost(AsyncWebServerRequest *request) {
+    String body;
+    if (!takeRequestBody(request, &body)) {
+        return;
+    }
     const UserRecord *actor = nullptr;
     if (!requireEditUsers(request, &actor)) {
         return;
@@ -734,11 +714,11 @@ void WebConsole::handleUsersPost(AsyncWebServerRequest *request) {
         return;
     }
     UserRecord source{};
-    fillUserFromJson(requestBody.c_str(), &source);
+    fillUserFromJson(body.c_str(), &source);
     String password;
-    extractJsonString(requestBody.c_str(), "password", password);
+    extractJsonString(body.c_str(), "password", password);
     bool isEdit = false;
-    const bool hasIsEdit = extractJsonBool(requestBody.c_str(), "isEdit", isEdit);
+    const bool hasIsEdit = extractJsonBool(body.c_str(), "isEdit", isEdit);
     UserWriteResult result = UserWriteOk;
     if (isEdit || (!hasIsEdit && userStore->findByName(source.userName) != nullptr)) {
         result = userStore->updateUser(actor, source.userName, &source, password.c_str());
@@ -750,14 +730,18 @@ void WebConsole::handleUsersPost(AsyncWebServerRequest *request) {
 }
 
 void WebConsole::handleUsersUpdatePost(AsyncWebServerRequest *request) {
+    String body;
+    if (!takeRequestBody(request, &body)) {
+        return;
+    }
     const UserRecord *actor = nullptr;
     if (!requireEditUsers(request, &actor)) {
         return;
     }
     UserRecord source{};
-    fillUserFromJson(requestBody.c_str(), &source);
+    fillUserFromJson(body.c_str(), &source);
     String password;
-    extractJsonString(requestBody.c_str(), "password", password);
+    extractJsonString(body.c_str(), "password", password);
     const UserWriteResult result = userStore->updateUser(actor, source.userName, &source, password.c_str());
     UserStore::freeConsoleIdList(source.consoleIds);
     sendUserWriteResult(request, result);
@@ -792,6 +776,10 @@ void WebConsole::handleConsolesStoreGet(AsyncWebServerRequest *request) {
 }
 
 void WebConsole::handleConsolesRestorePost(AsyncWebServerRequest *request) {
+    String body;
+    if (!takeRequestBody(request, &body)) {
+        return;
+    }
     if (!requireEditConsoles(request, nullptr)) {
         return;
     }
@@ -799,7 +787,7 @@ void WebConsole::handleConsolesRestorePost(AsyncWebServerRequest *request) {
         request->send(500, "text/plain", "Consoles unavailable");
         return;
     }
-    String trimmed = requestBody;
+    String trimmed = body;
     trimmed.trim();
     if (trimmed.length() == 0 || trimmed.charAt(0) != '[') {
         request->send(400, "text/plain", "Need a consoles JSON array");
@@ -829,6 +817,10 @@ void WebConsole::handleConsolesMineGet(AsyncWebServerRequest *request) {
 }
 
 void WebConsole::handleConsolesPost(AsyncWebServerRequest *request) {
+    String body;
+    if (!takeRequestBody(request, &body)) {
+        return;
+    }
     if (!requireEditConsoles(request, nullptr)) {
         return;
     }
@@ -838,8 +830,8 @@ void WebConsole::handleConsolesPost(AsyncWebServerRequest *request) {
     }
     String name;
     bool active = true;
-    extractJsonString(requestBody.c_str(), "name", name);
-    extractJsonBool(requestBody.c_str(), "active", active);
+    extractJsonString(body.c_str(), "name", name);
+    extractJsonBool(body.c_str(), "active", active);
     if (name.length() == 0) {
         name = "Console";
     }
@@ -887,6 +879,10 @@ void WebConsole::handleConsoleGet(AsyncWebServerRequest *request) {
 }
 
 void WebConsole::handleConsolePut(AsyncWebServerRequest *request) {
+    String body;
+    if (!takeRequestBody(request, &body)) {
+        return;
+    }
     if (!requireEditConsoles(request, nullptr)) {
         return;
     }
@@ -895,18 +891,22 @@ void WebConsole::handleConsolePut(AsyncWebServerRequest *request) {
         return;
     }
     String consoleId;
-    extractJsonString(requestBody.c_str(), "id", consoleId);
+    extractJsonString(body.c_str(), "id", consoleId);
     if (consoleId.length() == 0) {
         request->send(400, "text/plain", "Need console id");
         return;
     }
     sendConsoleWriteResult(
         request,
-        consoleStore->replaceConsoleFromJson(consoleId.c_str(), requestBody.c_str(), true)
+        consoleStore->replaceConsoleFromJson(consoleId.c_str(), body.c_str(), true)
     );
 }
 
 void WebConsole::handleConsoleDelete(AsyncWebServerRequest *request) {
+    String body;
+    if (!takeRequestBody(request, &body)) {
+        return;
+    }
     if (!requireEditConsoles(request, nullptr)) {
         return;
     }
@@ -915,7 +915,7 @@ void WebConsole::handleConsoleDelete(AsyncWebServerRequest *request) {
         return;
     }
     String consoleId;
-    extractJsonString(requestBody.c_str(), "id", consoleId);
+    extractJsonString(body.c_str(), "id", consoleId);
     const ConsoleWriteResult result = consoleStore->deleteConsole(consoleId.c_str());
     if (result == ConsoleWriteOk) {
         broadcastConsolesReload();
@@ -926,12 +926,16 @@ void WebConsole::handleConsoleDelete(AsyncWebServerRequest *request) {
 }
 
 void WebConsole::handleUsersDelete(AsyncWebServerRequest *request) {
+    String body;
+    if (!takeRequestBody(request, &body)) {
+        return;
+    }
     const UserRecord *actor = nullptr;
     if (!requireEditUsers(request, &actor)) {
         return;
     }
     String userName;
-    extractJsonString(requestBody.c_str(), "userName", userName);
+    extractJsonString(body.c_str(), "userName", userName);
     const UserWriteResult result = userStore->deleteUser(actor, userName.c_str());
     if (result == UserWriteOk) {
         broadcastConsolesReload();
@@ -966,6 +970,10 @@ void WebConsole::handleWifiGet(AsyncWebServerRequest *request) {
 }
 
 void WebConsole::handleWifiPost(AsyncWebServerRequest *request) {
+    String body;
+    if (!takeRequestBody(request, &body)) {
+        return;
+    }
     if (!requireAdmin(request, nullptr)) {
         return;
     }
@@ -975,15 +983,15 @@ void WebConsole::handleWifiPost(AsyncWebServerRequest *request) {
     String apIpText;
     String modeText;
     bool otgEnabled = false;
-    bool haveBssid = extractJsonString(requestBody.c_str(), "bssid", bssid);
+    bool haveBssid = extractJsonString(body.c_str(), "bssid", bssid);
     if (!haveBssid) {
-        haveBssid = extractJsonString(requestBody.c_str(), "bsid", bssid);
+        haveBssid = extractJsonString(body.c_str(), "bsid", bssid);
     }
-    const bool havePassword = extractJsonString(requestBody.c_str(), "password", password);
-    const bool haveDeviceName = extractJsonString(requestBody.c_str(), "deviceName", deviceName);
-    const bool haveApIp = extractJsonString(requestBody.c_str(), "apIp", apIpText);
-    const bool haveMode = extractJsonString(requestBody.c_str(), "mode", modeText);
-    extractJsonBool(requestBody.c_str(), "otgEnabled", otgEnabled);
+    const bool havePassword = extractJsonString(body.c_str(), "password", password);
+    const bool haveDeviceName = extractJsonString(body.c_str(), "deviceName", deviceName);
+    const bool haveApIp = extractJsonString(body.c_str(), "apIp", apIpText);
+    const bool haveMode = extractJsonString(body.c_str(), "mode", modeText);
+    extractJsonBool(body.c_str(), "otgEnabled", otgEnabled);
     if (!haveBssid || !havePassword || !haveDeviceName || !haveMode) {
         request->send(400, "text/plain", "Need bssid, password, deviceName, mode");
         return;
@@ -1036,11 +1044,15 @@ void WebConsole::handleMqttGet(AsyncWebServerRequest *request) {
 }
 
 void WebConsole::handleMqttPost(AsyncWebServerRequest *request) {
+    String body;
+    if (!takeRequestBody(request, &body)) {
+        return;
+    }
     if (!requireAdmin(request, nullptr)) {
         return;
     }
     String errorText;
-    if (!applyMqttJson(requestBody.c_str(), &errorText)) {
+    if (!applyMqttJson(body.c_str(), &errorText)) {
         request->send(400, "text/plain", errorText.length() > 0 ? errorText : "Need mqtt settings");
         return;
     }
@@ -1048,13 +1060,73 @@ void WebConsole::handleMqttPost(AsyncWebServerRequest *request) {
     request->send(200, "text/plain", "Saved. Device will restart to apply MQTT.");
 }
 
-void WebConsole::appendRequestBody(uint8_t *data, size_t len, size_t index) {
+void WebConsole::appendRequestBody(
+    AsyncWebServerRequest *request,
+    uint8_t *data,
+    size_t len,
+    size_t index,
+    size_t total,
+    size_t maxBytes
+) {
+    if (request == nullptr) {
+        return;
+    }
     if (index == 0) {
-        requestBody = "";
+        discardRequestBody(request);
+        HttpRequestBody *collector = new HttpRequestBody();
+        collector->maxBytes = maxBytes;
+        if (total > maxBytes) {
+            collector->overflow = true;
+        } else if (total > 0) {
+            collector->text.reserve(total);
+        }
+        request->_tempObject = collector;
     }
-    for (size_t byteIndex = 0; byteIndex < len; byteIndex++) {
-        requestBody += (char)data[byteIndex];
+    HttpRequestBody *collector = static_cast<HttpRequestBody *>(request->_tempObject);
+    if (collector == nullptr || collector->overflow || data == nullptr || len == 0) {
+        return;
     }
+    if (collector->text.length() + len > collector->maxBytes) {
+        collector->overflow = true;
+        collector->text = "";
+        return;
+    }
+    collector->text.concat(reinterpret_cast<const char *>(data), len);
+}
+
+void WebConsole::discardRequestBody(AsyncWebServerRequest *request) {
+    if (request == nullptr || request->_tempObject == nullptr) {
+        return;
+    }
+    delete static_cast<HttpRequestBody *>(request->_tempObject);
+    request->_tempObject = nullptr;
+}
+
+bool WebConsole::takeRequestBody(AsyncWebServerRequest *request, String *bodyOut) {
+    if (request == nullptr) {
+        if (bodyOut != nullptr) {
+            *bodyOut = "";
+        }
+        return true;
+    }
+    HttpRequestBody *collector = static_cast<HttpRequestBody *>(request->_tempObject);
+    request->_tempObject = nullptr;
+    if (collector == nullptr) {
+        if (bodyOut != nullptr) {
+            *bodyOut = "";
+        }
+        return true;
+    }
+    if (collector->overflow) {
+        delete collector;
+        request->send(413, "text/plain", "Request body too large");
+        return false;
+    }
+    if (bodyOut != nullptr) {
+        *bodyOut = collector->text;
+    }
+    delete collector;
+    return true;
 }
 
 void WebConsole::handleZigbeeGet(AsyncWebServerRequest *request) {
@@ -1074,13 +1146,17 @@ void WebConsole::handleZigbeeGet(AsyncWebServerRequest *request) {
 }
 
 void WebConsole::handleZigbeePost(AsyncWebServerRequest *request) {
+    String body;
+    if (!takeRequestBody(request, &body)) {
+        return;
+    }
     if (!requireAdmin(request, nullptr)) {
         return;
     }
     int channel = DEFAULT_ZIGBEE_CHANNEL;
     int permitJoinOnBootSec = DEFAULT_PERMIT_JOIN_SEC;
-    if (!extractJsonInt(requestBody.c_str(), "channel", channel)
-        || !extractJsonInt(requestBody.c_str(), "permitJoinOnBootSec", permitJoinOnBootSec)) {
+    if (!extractJsonInt(body.c_str(), "channel", channel)
+        || !extractJsonInt(body.c_str(), "permitJoinOnBootSec", permitJoinOnBootSec)) {
         request->send(400, "text/plain", "Need channel, permitJoinOnBootSec");
         return;
     }
@@ -1157,15 +1233,19 @@ void WebConsole::handleHardwareGet(AsyncWebServerRequest *request) {
 }
 
 void WebConsole::handleHardwarePost(AsyncWebServerRequest *request) {
+    String body;
+    if (!takeRequestBody(request, &body)) {
+        return;
+    }
     if (!requireAdmin(request, nullptr)) {
         return;
     }
     int spiSpeedHz = DEFAULT_SPI_SPEED_HZ;
     int blueLedBrightness = DEFAULT_LED_BRIGHTNESS_PERCENT;
     int greenLedBrightness = DEFAULT_LED_BRIGHTNESS_PERCENT;
-    if (!extractJsonInt(requestBody.c_str(), "spiSpeedHz", spiSpeedHz)
-        || !extractJsonInt(requestBody.c_str(), "blueLedBrightness", blueLedBrightness)
-        || !extractJsonInt(requestBody.c_str(), "greenLedBrightness", greenLedBrightness)) {
+    if (!extractJsonInt(body.c_str(), "spiSpeedHz", spiSpeedHz)
+        || !extractJsonInt(body.c_str(), "blueLedBrightness", blueLedBrightness)
+        || !extractJsonInt(body.c_str(), "greenLedBrightness", greenLedBrightness)) {
         request->send(400, "text/plain", "Need spiSpeedHz, blueLedBrightness, greenLedBrightness");
         return;
     }
@@ -1399,37 +1479,41 @@ void WebConsole::handleSettingsExportGet(AsyncWebServerRequest *request) {
         return;
     }
     GlobalSettings *settings = settingsManager->getSettings();
-    String json = "{";
-    json += "\"version\":\"";
-    json += FIRMWARE_VERSION;
-    json += "\",\"mqtt\":{";
-    appendMqttSettingsJson(json);
-    json += "},\"zigbee\":{";
-    json += "\"channel\":";
-    json += String(settings->zigbee.channel);
-    json += ",\"permitJoinOnBootSec\":";
-    json += String(settings->zigbee.permitJoinOnBootSec);
-    json += "},\"hardware\":{\"spiSpeedHz\":";
-    json += String((unsigned long)settingsManager->spiSpeedHz());
-    json += ",\"blueLedBrightness\":";
-    json += String(settingsManager->blueLedBrightness());
-    json += ",\"greenLedBrightness\":";
-    json += String(settingsManager->greenLedBrightness());
-    json += "},\"ui\":{\"theme\":\"";
-    json += UserStore::themeJsonId(user->theme);
-    json += "\"},\"devices\":";
-    json += settingsManager->deviceMap()->listStoreJson();
-    json += ",\"users\":";
-    json += userStore->listExportJson();
-    json += ",\"consoles\":";
-    json += consoleStore != nullptr ? consoleStore->listFullJson() : "[]";
-    json += "}";
-    AsyncWebServerResponse *response = request->beginResponse(200, "application/json", json);
+    AsyncResponseStream *response = request->beginResponseStream("application/json");
     response->addHeader("Cache-Control", "no-store");
+    response->print("{\"version\":\"");
+    response->print(FIRMWARE_VERSION);
+    response->print("\",\"mqtt\":{");
+    String mqttSection;
+    appendMqttSettingsJson(mqttSection);
+    response->print(mqttSection);
+    response->print("},\"zigbee\":{\"channel\":");
+    response->print((unsigned)settings->zigbee.channel);
+    response->print(",\"permitJoinOnBootSec\":");
+    response->print((unsigned)settings->zigbee.permitJoinOnBootSec);
+    response->print("},\"hardware\":{\"spiSpeedHz\":");
+    response->print((unsigned long)settingsManager->spiSpeedHz());
+    response->print(",\"blueLedBrightness\":");
+    response->print((unsigned)settingsManager->blueLedBrightness());
+    response->print(",\"greenLedBrightness\":");
+    response->print((unsigned)settingsManager->greenLedBrightness());
+    response->print("},\"ui\":{\"theme\":\"");
+    response->print(UserStore::themeJsonId(user->theme));
+    response->print("\"},\"devices\":");
+    response->print(settingsManager->deviceMap()->listStoreJson());
+    response->print(",\"users\":");
+    response->print(userStore->listExportJson());
+    response->print(",\"consoles\":");
+    response->print(consoleStore != nullptr ? consoleStore->listFullJson() : "[]");
+    response->print('}');
     request->send(response);
 }
 
 void WebConsole::handleSettingsRestorePost(AsyncWebServerRequest *request) {
+    String body;
+    if (!takeRequestBody(request, &body)) {
+        return;
+    }
     const UserRecord *user = nullptr;
     if (!requireAdmin(request, &user)) {
         return;
@@ -1440,15 +1524,15 @@ void WebConsole::handleSettingsRestorePost(AsyncWebServerRequest *request) {
     String hardwareJson;
     String devicesJson;
     String uiJson;
-    const bool haveMqtt = extractJsonKeyedSlice(requestBody.c_str(), "mqtt", '{', mqttJson);
-    const bool haveZigbee = extractJsonKeyedSlice(requestBody.c_str(), "zigbee", '{', zigbeeJson);
-    const bool haveHardware = extractJsonKeyedSlice(requestBody.c_str(), "hardware", '{', hardwareJson);
-    const bool haveDevices = extractJsonKeyedSlice(requestBody.c_str(), "devices", '[', devicesJson);
+    const bool haveMqtt = extractJsonKeyedSlice(body.c_str(), "mqtt", '{', mqttJson);
+    const bool haveZigbee = extractJsonKeyedSlice(body.c_str(), "zigbee", '{', zigbeeJson);
+    const bool haveHardware = extractJsonKeyedSlice(body.c_str(), "hardware", '{', hardwareJson);
+    const bool haveDevices = extractJsonKeyedSlice(body.c_str(), "devices", '[', devicesJson);
     String usersJson;
     String consolesJson;
-    const bool haveUi = extractJsonKeyedSlice(requestBody.c_str(), "ui", '{', uiJson);
-    const bool haveUsers = extractJsonKeyedSlice(requestBody.c_str(), "users", '[', usersJson);
-    const bool haveConsoles = extractJsonKeyedSlice(requestBody.c_str(), "consoles", '[', consolesJson);
+    const bool haveUi = extractJsonKeyedSlice(body.c_str(), "ui", '{', uiJson);
+    const bool haveUsers = extractJsonKeyedSlice(body.c_str(), "users", '[', usersJson);
+    const bool haveConsoles = extractJsonKeyedSlice(body.c_str(), "consoles", '[', consolesJson);
     if (haveMqtt && !applyMqttJson(mqttJson.c_str(), &errorText)) {
         request->send(400, "text/plain", errorText);
         return;
@@ -1595,12 +1679,16 @@ void WebConsole::handleThemeGet(AsyncWebServerRequest *request) {
 }
 
 void WebConsole::handleThemePost(AsyncWebServerRequest *request) {
+    String body;
+    if (!takeRequestBody(request, &body)) {
+        return;
+    }
     const UserRecord *user = nullptr;
     if (!requireUser(request, &user)) {
         return;
     }
     String errorText;
-    if (!applyThemeJson(requestBody.c_str(), userStore->findByName(user->userName), &errorText)) {
+    if (!applyThemeJson(body.c_str(), userStore->findByName(user->userName), &errorText)) {
         request->send(400, "text/plain", errorText);
         return;
     }
@@ -1662,6 +1750,10 @@ void WebConsole::handleDeviceTypesGet(AsyncWebServerRequest *request) {
 }
 
 void WebConsole::handleDevicesPost(AsyncWebServerRequest *request) {
+    String body;
+    if (!takeRequestBody(request, &body)) {
+        return;
+    }
     const UserRecord *user = nullptr;
     if (!requireUser(request, &user)) {
         return;
@@ -1672,15 +1764,15 @@ void WebConsole::handleDevicesPost(AsyncWebServerRequest *request) {
     String commandTopic;
     String availability;
     String transportText;
-    const bool haveIeee = extractJsonString(requestBody.c_str(), "ieee", ieeeText);
-    const bool haveTransport = extractJsonString(requestBody.c_str(), "transport", transportText);
-    extractJsonString(requestBody.c_str(), "name", friendlyName);
-    extractJsonString(requestBody.c_str(), "friendlyName", friendlyName);
-    extractJsonString(requestBody.c_str(), "state", stateTopic);
-    extractJsonString(requestBody.c_str(), "command", commandTopic);
-    extractJsonString(requestBody.c_str(), "availability", availability);
+    const bool haveIeee = extractJsonString(body.c_str(), "ieee", ieeeText);
+    const bool haveTransport = extractJsonString(body.c_str(), "transport", transportText);
+    extractJsonString(body.c_str(), "name", friendlyName);
+    extractJsonString(body.c_str(), "friendlyName", friendlyName);
+    extractJsonString(body.c_str(), "state", stateTopic);
+    extractJsonString(body.c_str(), "command", commandTopic);
+    extractJsonString(body.c_str(), "availability", availability);
     int parsedChannels = DEVICE_CHANNEL_COUNT_DEFAULT;
-    if (!extractJsonInt(requestBody.c_str(), "channels", parsedChannels)) {
+    if (!extractJsonInt(body.c_str(), "channels", parsedChannels)) {
         parsedChannels = DEVICE_CHANNEL_COUNT_DEFAULT;
     }
     if (friendlyName.length() == 0) {
@@ -1753,11 +1845,11 @@ void WebConsole::handleDevicesPost(AsyncWebServerRequest *request) {
     }
     entry->transport = transport;
     bool parsedFullControl = false;
-    if (extractJsonBool(requestBody.c_str(), "fullControl", parsedFullControl)) {
+    if (extractJsonBool(body.c_str(), "fullControl", parsedFullControl)) {
         entry->fullControl = parsedFullControl ? 1 : 0;
     }
     String typeText;
-    const bool haveType = extractJsonString(requestBody.c_str(), "type", typeText);
+    const bool haveType = extractJsonString(body.c_str(), "type", typeText);
     if (transport == DeviceTransportMqtt) {
         if (haveType) {
             entry->zigbeeType = zigbeeDeviceTypeFromJsonId(typeText.c_str());
@@ -1788,6 +1880,10 @@ void WebConsole::handleDevicesPost(AsyncWebServerRequest *request) {
 }
 
 void WebConsole::handleDevicesDelete(AsyncWebServerRequest *request) {
+    String body;
+    if (!takeRequestBody(request, &body)) {
+        return;
+    }
     const UserRecord *user = nullptr;
     if (!requireUser(request, &user)) {
         return;
@@ -1797,7 +1893,7 @@ void WebConsole::handleDevicesDelete(AsyncWebServerRequest *request) {
         return;
     }
     String ieeeText;
-    if (!extractJsonString(requestBody.c_str(), "ieee", ieeeText)) {
+    if (!extractJsonString(body.c_str(), "ieee", ieeeText)) {
         request->send(400, "text/plain", "Need ieee");
         return;
     }
@@ -1826,6 +1922,10 @@ void WebConsole::handleDevicesDelete(AsyncWebServerRequest *request) {
 }
 
 void WebConsole::handleDevicesCommandPost(AsyncWebServerRequest *request) {
+    String body;
+    if (!takeRequestBody(request, &body)) {
+        return;
+    }
     const UserRecord *user = nullptr;
     if (!requireUser(request, &user)) {
         return;
@@ -1840,13 +1940,13 @@ void WebConsole::handleDevicesCommandPost(AsyncWebServerRequest *request) {
     }
     String ieeeText;
     String payload;
-    if (!extractJsonString(requestBody.c_str(), "ieee", ieeeText)) {
+    if (!extractJsonString(body.c_str(), "ieee", ieeeText)) {
         request->send(400, "text/plain", "Need ieee");
         return;
     }
-    extractJsonString(requestBody.c_str(), "payload", payload);
+    extractJsonString(body.c_str(), "payload", payload);
     int channel = 0;
-    if (!extractJsonInt(requestBody.c_str(), "channel", channel)) {
+    if (!extractJsonInt(body.c_str(), "channel", channel)) {
         channel = 0;
     }
     const int status = applyDeviceCommand(ieeeText.c_str(), payload.c_str(), channel);
@@ -1885,6 +1985,10 @@ void WebConsole::handleDevicesFoundGet(AsyncWebServerRequest *request) {
 }
 
 void WebConsole::handleDevicesSearchPost(AsyncWebServerRequest *request) {
+    String body;
+    if (!takeRequestBody(request, &body)) {
+        return;
+    }
     const UserRecord *user = nullptr;
     if (!requireUser(request, &user)) {
         return;
@@ -1923,6 +2027,10 @@ void WebConsole::handleGatewayStatusGet(AsyncWebServerRequest *request) {
 }
 
 void WebConsole::handleDevicesSearchStopPost(AsyncWebServerRequest *request) {
+    String body;
+    if (!takeRequestBody(request, &body)) {
+        return;
+    }
     const UserRecord *user = nullptr;
     if (!requireUser(request, &user)) {
         return;

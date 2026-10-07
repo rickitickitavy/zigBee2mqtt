@@ -1088,12 +1088,19 @@ String DeviceTopicMap::listJson(OnlineFn isOnline, LastRssiFn lastRssi) {
 String DeviceTopicMap::listJson(OnlineFn isOnline, LastRssiFn lastRssi, ListTelemetryFn telemetry) {
     String json = "[";
     bool first = true;
+    size_t usedCount = 0;
+    for (DeviceTopicEntry *deviceEntry = head; deviceEntry != nullptr; deviceEntry = deviceEntry->next) {
+        if (deviceEntry->used) {
+            usedCount++;
+        }
+    }
+    json.reserve(usedCount * 320 + 2);
     for (DeviceTopicEntry *deviceEntry = head; deviceEntry != nullptr; deviceEntry = deviceEntry->next) {
         if (!deviceEntry->used) {
             continue;
         }
         if (!first) {
-            json += ",";
+            json += ',';
         }
         first = false;
         appendDeviceListEntryJson(this, json, deviceEntry, isOnline, lastRssi, telemetry);
