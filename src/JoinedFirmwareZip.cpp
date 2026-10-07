@@ -1,5 +1,6 @@
 #include "JoinedFirmwareZip.h"
 
+#include <new>
 #include <string.h>
 
 namespace JoinedFirmwareZip {
@@ -191,14 +192,20 @@ bool readVersionText(File &zipFile, char *destination, size_t destinationSize) {
     if (!versionMember.found) {
         return false;
     }
-    MemberReader reader;
-    if (!reader.open(zipFile, versionMember)) {
+    // MemberReader is large (tinfl + buffers); keep it off loopTask stack.
+    MemberReader *reader = new (std::nothrow) MemberReader();
+    if (reader == nullptr) {
+        return false;
+    }
+    if (!reader->open(zipFile, versionMember)) {
+        delete reader;
         return false;
     }
     uint8_t raw[32];
-    const size_t got = reader.read(raw, sizeof(raw) - 1);
-    const bool readFailed = reader.failed();
-    reader.close();
+    const size_t got = reader->read(raw, sizeof(raw) - 1);
+    const bool readFailed = reader->failed();
+    reader->close();
+    delete reader;
     if (got == 0 || readFailed) {
         return false;
     }
