@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "hooks": {
+    "preToolUse": [
+      {
+        "command": ".cursor/hooks/fragile-zones-guard.py",
+        "matcher": "Write|StrReplace|Delete|EditNotebook",
+        "failClosed": true
+      }
+    ]
+  }
+}

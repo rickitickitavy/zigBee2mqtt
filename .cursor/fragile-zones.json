@@ -1,0 +1,39 @@
+{
+  "zones": [
+    {
+      "id": "slave-spi-ota",
+      "title": "SPI programming of the slave firmware image",
+      "hardPaths": [
+        "src/FirmwareOta.cpp",
+        "include/FirmwareOta.h"
+      ],
+      "influencePaths": [
+        "include/SpiProtocol.h",
+        "src/InterChipHost.cpp",
+        "include/InterChipHost.h",
+        "src/InterChipSlave.cpp",
+        "include/InterChipSlave.h"
+      ]
+    },
+    {
+      "id": "firmware-update-process",
+      "title": "Full joined firmware update pipeline",
+      "includesZones": ["slave-spi-ota"],
+      "hardPaths": [
+        "src/FirmwareOta.cpp",
+        "include/FirmwareOta.h",
+        "src/JoinedFirmwareZip.cpp",
+        "include/JoinedFirmwareZip.h",
+        "scripts/firmware_join.py",
+        "scripts/firmware_split.py"
+      ],
+      "influencePaths": [
+        "src/WebConsole.cpp",
+        "include/WebConsole.h",
+        "data/index.html",
+        "docs/adr/0008-ota-slave-before-host.md",
+        "docs/adr/0003-two-chips-two-images-joined-zip.md"
+      ]
+    }
+  ]
+}

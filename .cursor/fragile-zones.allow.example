@@ -1,0 +1,6 @@
+# Copy to fragile-zones.allow only when a human approved a freeze lift.
+# One zone id or relative path per line.
+#
+# slave-spi-ota
+# firmware-update-process
+# src/FirmwareOta.cpp
