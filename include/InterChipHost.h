@@ -21,6 +21,7 @@ public:
     void setSettingsSource(uint8_t channel, uint8_t permitJoinSec);
     void setClockHz(uint32_t speedHz);
     uint32_t clockHz() const;
+    void pushLedBrightness(uint8_t bluePercent, uint8_t greenPercent);
     void setEventHandler(EventFn handler);
     void requestTimeSync();
     void noteKeepaliveQuiet();

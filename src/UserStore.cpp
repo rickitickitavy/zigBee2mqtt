@@ -326,6 +326,7 @@ void UserStore::copyRolesAndFlags(UserRecord *destination, const UserRecord *sou
     destination->editUsers = source->editUsers;
     destination->editConsoles = source->editConsoles;
     destination->monitor = source->monitor;
+    destination->controlDevices = source->controlDevices;
     destination->isBlocked = source->isBlocked;
     destination->theme = source->theme == UI_THEME_DARK ? UI_THEME_DARK : UI_THEME_LIGHT;
     if (replaceConsoles) {
@@ -479,6 +480,7 @@ bool UserStore::parseUsersJson(const String &json, bool requireHashes) {
         extractJsonBool(object.c_str(), "editUsers", user->editUsers);
         extractJsonBool(object.c_str(), "editConsoles", user->editConsoles);
         extractJsonBool(object.c_str(), "monitor", user->monitor);
+        extractJsonBool(object.c_str(), "controlDevices", user->controlDevices);
         extractJsonBool(object.c_str(), "isBlocked", user->isBlocked);
         user->theme = themeFromJsonId(themeText.c_str());
         if (!parseConsoleIdListFromObject(object.c_str(), &user->consoleIds)) {
@@ -754,6 +756,11 @@ size_t UserStore::packSyncPayload(uint8_t *out, size_t outMax, uint8_t flags, co
     }
     out[addedAtOffset + 4] = roleFlags;
     out[addedAtOffset + 5] = user->theme == UI_THEME_DARK ? UI_THEME_DARK : UI_THEME_LIGHT;
+    uint8_t roleFlags2 = 0;
+    if (user->controlDevices) {
+        roleFlags2 |= SPI_USER_FLAG2_CONTROL_DEVICES;
+    }
+    out[addedAtOffset + 6] = roleFlags2;
     return SPI_USER_SYNC_ENTRY_LEN;
 }
 
@@ -774,7 +781,7 @@ bool UserStore::unpackSyncPayload(const uint8_t *in, uint16_t length, uint8_t *f
     if ((*flags & SPI_USER_SYNC_DELETE) != 0) {
         return true;
     }
-    if (length < SPI_USER_SYNC_ENTRY_LEN) {
+    if (length < SPI_USER_SYNC_ENTRY_LEN_LEGACY) {
         return false;
     }
     const uint8_t *salt = in + 1 + SPI_USER_SYNC_NAME_LEN;
@@ -794,6 +801,10 @@ bool UserStore::unpackSyncPayload(const uint8_t *in, uint16_t length, uint8_t *f
     user->monitor = (roleFlags & SPI_USER_FLAG_MONITOR) != 0;
     user->isBlocked = (roleFlags & SPI_USER_FLAG_BLOCKED) != 0;
     user->theme = in[addedAtOffset + 5] == UI_THEME_DARK ? UI_THEME_DARK : UI_THEME_LIGHT;
+    user->controlDevices = false;
+    if (length >= SPI_USER_SYNC_ENTRY_LEN) {
+        user->controlDevices = (in[addedAtOffset + 6] & SPI_USER_FLAG2_CONTROL_DEVICES) != 0;
+    }
     user->consoleIds = nullptr;
     return true;
 }
@@ -886,6 +897,7 @@ UserWriteResult UserStore::updateUser(
     const bool previousEditUsers = user->editUsers;
     const bool previousEditConsoles = user->editConsoles;
     const bool previousMonitor = user->monitor;
+    const bool previousControlDevices = user->controlDevices;
     const bool previousBlocked = user->isBlocked;
     const uint8_t previousTheme = user->theme;
     char previousSalt[sizeof(user->passwordSaltHex)];
@@ -906,6 +918,7 @@ UserWriteResult UserStore::updateUser(
         user->editUsers = previousEditUsers;
         user->editConsoles = previousEditConsoles;
         user->monitor = previousMonitor;
+        user->controlDevices = previousControlDevices;
         user->isBlocked = previousBlocked;
         user->theme = previousTheme;
         return UserWriteLastAdmin;
@@ -921,6 +934,7 @@ UserWriteResult UserStore::updateUser(
             user->editUsers = previousEditUsers;
             user->editConsoles = previousEditConsoles;
             user->monitor = previousMonitor;
+            user->controlDevices = previousControlDevices;
             user->isBlocked = previousBlocked;
             user->theme = previousTheme;
             memcpy(user->passwordSaltHex, previousSalt, sizeof(previousSalt));
@@ -976,6 +990,8 @@ void UserStore::appendUserPublicJson(String &json, const UserRecord *user) const
     json += user->editConsoles ? "true" : "false";
     json += ",\"monitor\":";
     json += user->monitor ? "true" : "false";
+    json += ",\"controlDevices\":";
+    json += user->controlDevices ? "true" : "false";
     json += ",\"isBlocked\":";
     json += user->isBlocked ? "true" : "false";
     json += ",\"theme\":\"";
@@ -1004,6 +1020,8 @@ void UserStore::appendUserExportJson(String &json, const UserRecord *user) const
     json += user->editConsoles ? "true" : "false";
     json += ",\"monitor\":";
     json += user->monitor ? "true" : "false";
+    json += ",\"controlDevices\":";
+    json += user->controlDevices ? "true" : "false";
     json += ",\"isBlocked\":";
     json += user->isBlocked ? "true" : "false";
     json += ",\"theme\":\"";

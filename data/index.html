@@ -251,7 +251,43 @@
                 return true;
             }
             return !!(user.editDevices || user.addDevices || user.removeDevices || user.editUsers
-                || user.editConsoles || user.monitor);
+                || user.editConsoles || user.monitor || user.controlDevices);
+        }
+
+        function canControlDevices() {
+            return isAdminUser() || hasRole("controlDevices");
+        }
+
+        function armFeedbackPlateAutoHide(element) {
+            if (!element || element._feedbackHideArmed) {
+                return;
+            }
+            element._feedbackHideArmed = true;
+            var observer = new MutationObserver(function () {
+                if (element.hidden) {
+                    if (element._feedbackHideTimer) {
+                        clearTimeout(element._feedbackHideTimer);
+                        element._feedbackHideTimer = null;
+                    }
+                    return;
+                }
+                if (element._feedbackHideTimer) {
+                    clearTimeout(element._feedbackHideTimer);
+                }
+                element._feedbackHideTimer = setTimeout(function () {
+                    element.hidden = true;
+                    element._feedbackHideTimer = null;
+                }, 10000);
+            });
+            observer.observe(element, { attributes: true, attributeFilter: ["hidden"] });
+        }
+
+        function armAllFeedbackPlates() {
+            var plates = document.querySelectorAll(".save-error, .save-success");
+            var plateIndex;
+            for (plateIndex = 0; plateIndex < plates.length; plateIndex++) {
+                armFeedbackPlateAutoHide(plates[plateIndex]);
+            }
         }
 
         function setHidden(element, hidden) {
@@ -374,6 +410,10 @@
             var userNameInput = document.getElementById("loginUserName");
             var passwordInput = document.getElementById("loginPassword");
             var rememberInput = document.getElementById("loginRememberMe");
+            if (passwordInput && !passwordInput.value) {
+                passwordInput.focus();
+                return;
+            }
             fetch("/api/auth/login", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -443,6 +483,9 @@
             }
             if (user && user.editConsoles) {
                 roles.push("console editor");
+            }
+            if (user && user.controlDevices) {
+                roles.push("other device control");
             }
             if (user && user.monitor) {
                 roles.push("monitor");
@@ -540,6 +583,9 @@
             if (document.getElementById("userEditConsoles").checked) {
                 return true;
             }
+            if (document.getElementById("userControlDevices").checked) {
+                return true;
+            }
             if (document.getElementById("userMonitor").checked) {
                 return true;
             }
@@ -570,6 +616,7 @@
             document.getElementById("userRemoveDevices").checked = !!(user && user.removeDevices);
             document.getElementById("userEditUsers").checked = !!(user && user.editUsers);
             document.getElementById("userEditConsoles").checked = !!(user && user.editConsoles);
+            document.getElementById("userControlDevices").checked = !!(user && user.controlDevices);
             document.getElementById("userMonitor").checked = !!(user && user.monitor);
             document.getElementById("userIsBlocked").checked = !!(user && user.isBlocked);
             document.getElementById("userTheme").value = user && user.theme === "light" ? "light" : "dark";
@@ -728,6 +775,7 @@
                 removeDevices: document.getElementById("userRemoveDevices").checked,
                 editUsers: document.getElementById("userEditUsers").checked,
                 editConsoles: document.getElementById("userEditConsoles").checked,
+                controlDevices: document.getElementById("userControlDevices").checked,
                 monitor: document.getElementById("userMonitor").checked,
                 isBlocked: document.getElementById("userIsBlocked").checked,
                 theme: document.getElementById("userTheme").value,
@@ -859,7 +907,10 @@
 
         function loadHardware() {
             var saveError = document.getElementById("hardwareSaveError");
+            var saveSuccess = document.getElementById("hardwareSaveSuccess");
             var speedSelect = document.getElementById("spiSpeedHz");
+            var blueInput = document.getElementById("blueLedBrightness");
+            var greenInput = document.getElementById("greenLedBrightness");
             fetch("/api/hardware", { cache: "no-store" }).then(function (response) {
                 return response.text().then(function (text) {
                     if (!response.ok) {
@@ -871,12 +922,27 @@
                 if (saveError) {
                     saveError.hidden = true;
                 }
+                if (saveSuccess) {
+                    saveSuccess.hidden = true;
+                }
                 if (speedSelect) {
                     speedSelect.value = String(hardwareSettings.spiSpeedHz || 500000);
+                }
+                if (blueInput) {
+                    blueInput.value = String(hardwareSettings.blueLedBrightness || 100);
+                }
+                if (greenInput) {
+                    greenInput.value = String(hardwareSettings.greenLedBrightness || 100);
                 }
             }).catch(function (error) {
                 if (speedSelect && !speedSelect.value) {
                     speedSelect.value = "500000";
+                }
+                if (blueInput && !blueInput.value) {
+                    blueInput.value = "100";
+                }
+                if (greenInput && !greenInput.value) {
+                    greenInput.value = "100";
                 }
                 if (saveError) {
                     saveError.hidden = false;
@@ -893,7 +959,9 @@
             saveError.hidden = true;
             saveSuccess.hidden = true;
             var body = {
-                spiSpeedHz: parseInt(document.getElementById("spiSpeedHz").value, 10)
+                spiSpeedHz: parseInt(document.getElementById("spiSpeedHz").value, 10),
+                blueLedBrightness: parseInt(document.getElementById("blueLedBrightness").value, 10),
+                greenLedBrightness: parseInt(document.getElementById("greenLedBrightness").value, 10)
             };
             fetch("/api/hardware", {
                 method: "POST",
@@ -903,7 +971,7 @@
                 return response.text().then(function (text) {
                     if (response.ok) {
                         saveSuccess.hidden = false;
-                        saveSuccess.textContent = text || "Saved. SPI speed is active now.";
+                        saveSuccess.textContent = text || "Saved. Hardware settings are active now.";
                     } else {
                         saveError.hidden = false;
                         saveError.textContent = text || ("Save failed (HTTP " + response.status + ")");
@@ -2697,6 +2765,9 @@
         }
 
         function attachDeviceRowActions(row, device, reopenIeee) {
+            if (!canControlDevices()) {
+                return;
+            }
             var payloads = deviceTypeActionPayloads(device.type);
             if (!payloads.length) {
                 return;
@@ -3268,7 +3339,7 @@
                 deleteButton.hidden = !parameterDialogIsEdit || !(isAdminUser() || hasRole("removeDevices"));
             }
             if (commandTabButton) {
-                if (parameterDialogIsEdit) {
+                if (parameterDialogIsEdit && canControlDevices()) {
                     commandTabButton.classList.remove("is-hidden");
                 } else {
                     commandTabButton.classList.add("is-hidden");
@@ -5218,6 +5289,7 @@
                 });
             }
             applyThemeToDocument("dark");
+            armAllFeedbackPlates();
             checkSession();
         };
     </script>
@@ -5748,7 +5820,7 @@
             <div class="tab-content">
                 <div id="system-tab-log" class="system-tab-panel tab-panel active" role="tabpanel">
                     <div class="upload-card log-card">
-                        <p class="field-hint">Viewer shows the last 64 KB. Full ring (up to 512 KB in PSRAM) is available via Download.</p>
+                        <p class="field-hint">Viewer shows the last 64 KB. Download returns the entire host ring (up to 512 KB when PSRAM is available).</p>
                         <textarea id="memoryLogViewer" class="log-viewer" readonly></textarea>
                         <p id="logDownloadError" class="save-error" hidden></p>
                         <div class="dialog-actions">
@@ -5785,6 +5857,16 @@
                             <option value="40000000">40 MHz</option>
                         </select>
                         <p class="field-hint">Host SPI clock to the Zigbee slave. Maximum 40 MHz. Applied on Save without restart. Default 500 kHz.</p>
+                    </div>
+                    <div class="field">
+                        <label for="blueLedBrightness">BLUE LED brightness</label>
+                        <input id="blueLedBrightness" type="number" min="1" max="100" step="1" value="100">
+                        <p class="field-hint">PWM brightness for blue status LEDs on host and slave (1–100%). Default 100.</p>
+                    </div>
+                    <div class="field">
+                        <label for="greenLedBrightness">GREEN LED brightness</label>
+                        <input id="greenLedBrightness" type="number" min="1" max="100" step="1" value="100">
+                        <p class="field-hint">PWM brightness for green status LEDs on host and slave (1–100%). Default 100. Red LEDs stay digital full on/off.</p>
                     </div>
                     <div class="dialog-actions">
                         <button type="button" class="btn btn-primary" onclick="saveHardware()">Save</button>
@@ -5889,6 +5971,10 @@
             <label class="field-check">
                 <input id="userEditConsoles" type="checkbox" onchange="updateUserAssignedConsolesVisibility()">
                 Console editor
+            </label>
+            <label class="field-check">
+                <input id="userControlDevices" type="checkbox" onchange="updateUserAssignedConsolesVisibility()">
+                Other device control
             </label>
             <label class="field-check">
                 <input id="userMonitor" type="checkbox" onchange="updateUserAssignedConsolesVisibility()">

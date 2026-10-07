@@ -378,6 +378,16 @@ ZigbeeCoordinator::EndpointCommandStamp *ZigbeeCoordinator::allocateEndpointComm
 }
 
 ZigbeeCoordinator::DestCommandSlot *ZigbeeCoordinator::allocateDestFlight() {
+    for (DestCommandSlot *existing = destFlightHead; existing != nullptr; existing = existing->next) {
+        if (existing->occupied) {
+            continue;
+        }
+        DestCommandSlot *const keepNext = existing->next;
+        memset(existing, 0, sizeof(*existing));
+        existing->next = keepNext;
+        existing->endpoint = 255;
+        return existing;
+    }
     if (destFlightCount >= kMaxDestFlights) {
         return nullptr;
     }
@@ -1402,7 +1412,6 @@ bool ZigbeeCoordinator::controlOnOff(const uint8_t ieee[8], const char *command,
 
     DestCommandSlot *slot = destSlotFor(device->ieee, targetEndpoint, true);
     if (slot == nullptr) {
-        LOGGER.warning("No dest slot for command");
         return false;
     }
     if (slot->inFlight) {
@@ -1445,7 +1454,6 @@ bool ZigbeeCoordinator::writeAttribute(
 
     DestCommandSlot *slot = destSlotFor(device->ieee, targetEndpoint, true);
     if (slot == nullptr) {
-        LOGGER.warning("No dest slot for command");
         return false;
     }
     if (slot->inFlight) {
@@ -1514,7 +1522,6 @@ bool ZigbeeCoordinator::trySendStatusRead(StatusReadItem *item) {
 
     DestCommandSlot *slot = destSlotFor(device->ieee, targetEndpoint, true);
     if (slot == nullptr) {
-        LOGGER.warning("No dest slot for command");
         return false;
     }
     if (slot->inFlight || slot->hasNext) {
@@ -1562,7 +1569,6 @@ bool ZigbeeCoordinator::sendClusterCommand(
 
     DestCommandSlot *slot = destSlotFor(device->ieee, targetEndpoint, true);
     if (slot == nullptr) {
-        LOGGER.warning("No dest slot for command");
         return true;
     }
     if (slot->inFlight) {
@@ -2028,7 +2034,12 @@ ZigbeeCoordinator::DestCommandSlot *ZigbeeCoordinator::destSlotFor(
     }
     DestCommandSlot *slot = allocateDestFlight();
     if (slot == nullptr) {
-        LOGGER.warning("Dest command table full");
+        static unsigned long lastDestFullWarnMs = 0;
+        const unsigned long nowMs = millis();
+        if (lastDestFullWarnMs == 0 || (long)(nowMs - lastDestFullWarnMs) >= 5000L) {
+            lastDestFullWarnMs = nowMs;
+            LOGGER.warning("Dest command table full");
+        }
         return nullptr;
     }
     slot->occupied = true;

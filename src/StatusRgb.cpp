@@ -5,6 +5,28 @@ StatusRgb STATUS_RGB;
 
 static const int kLedPins[6] = {PIN_LED1, PIN_LED2, PIN_LED3, PIN_LED4, PIN_LED5, PIN_LED6};
 
+#if defined(BOARD_ROLE_HOST)
+static const LedColor kLedColors[6] = {
+    LedColorBlue,
+    LedColorGreen,
+    LedColorGreen,
+    LedColorGreen,
+    LedColorGreen,
+    LedColorRed
+};
+#elif defined(BOARD_ROLE_SLAVE)
+static const LedColor kLedColors[6] = {
+    LedColorRed,
+    LedColorBlue,
+    LedColorGreen,
+    LedColorBlue,
+    LedColorGreen,
+    LedColorBlue
+};
+#else
+#error "Define BOARD_ROLE_HOST or BOARD_ROLE_SLAVE"
+#endif
+
 bool StatusRgb::allowsPairingBlink() const {
     return !criticalHeld && !bootHeld;
 }
@@ -21,16 +43,61 @@ bool StatusRgb::hostBootBlinkHeld() const {
     return hostRole && bootHeld;
 }
 
-void StatusRgb::configureLedPin(int gpioNumber) {
+LedColor StatusRgb::colorForLed(int ledIndex) const {
+    if (ledIndex < 0 || ledIndex >= kLedCount) {
+        return LedColorRed;
+    }
+    return kLedColors[ledIndex];
+}
+
+uint8_t StatusRgb::clampBrightnessPercent(uint8_t percent) const {
+    if (percent < 1) {
+        return 1;
+    }
+    if (percent > 100) {
+        return 100;
+    }
+    return percent;
+}
+
+uint32_t StatusRgb::dutyForColor(LedColor color) const {
+    uint8_t percent = 100;
+    if (color == LedColorBlue) {
+        percent = blueBrightnessPercent;
+    } else if (color == LedColorGreen) {
+        percent = greenBrightnessPercent;
+    } else {
+        return kPwmMaxDuty;
+    }
+    return (kPwmMaxDuty * (uint32_t)percent) / 100UL;
+}
+
+void StatusRgb::configureLedPin(int ledIndex) {
+    const int gpioNumber = kLedPins[ledIndex];
+    const LedColor color = colorForLed(ledIndex);
+    if (color == LedColorRed) {
+        pinMode(gpioNumber, OUTPUT);
+        digitalWrite(gpioNumber, kLedOffLevel);
+        pwmAttached[ledIndex] = false;
+        return;
+    }
+    if (ledcAttach(gpioNumber, kPwmFrequencyHz, kPwmResolutionBits)) {
+        ledcWrite(gpioNumber, 0);
+        pwmAttached[ledIndex] = true;
+        return;
+    }
     pinMode(gpioNumber, OUTPUT);
     digitalWrite(gpioNumber, kLedOffLevel);
+    pwmAttached[ledIndex] = false;
 }
 
 void StatusRgb::begin() {
     bootHeld = true;
+    blueBrightnessPercent = 100;
+    greenBrightnessPercent = 100;
     for (int ledIndex = 0; ledIndex < kLedCount; ledIndex++) {
-        configureLedPin(kLedPins[ledIndex]);
-        lastLevel[ledIndex] = 255;
+        configureLedPin(ledIndex);
+        lastOutput[ledIndex] = 0xFFFF;
     }
 #if defined(BOARD_ROLE_HOST)
     hostRole = true;
@@ -47,6 +114,18 @@ void StatusRgb::begin() {
 #if PIN_STATUS_RGB >= 0
     rgbLedWrite(PIN_STATUS_RGB, 0, 0, 0);
 #endif
+    apply();
+}
+
+void StatusRgb::setColorBrightness(uint8_t bluePercent, uint8_t greenPercent) {
+    blueBrightnessPercent = clampBrightnessPercent(bluePercent);
+    greenBrightnessPercent = clampBrightnessPercent(greenPercent);
+    for (int ledIndex = 0; ledIndex < kLedCount; ledIndex++) {
+        const LedColor color = colorForLed(ledIndex);
+        if (color == LedColorBlue || color == LedColorGreen) {
+            lastOutput[ledIndex] = 0xFFFF;
+        }
+    }
     apply();
 }
 
@@ -203,11 +282,26 @@ void StatusRgb::writeLevels(const bool levelOn[kLedCount]) {
         return;
     }
     for (int ledIndex = 0; ledIndex < kLedCount; ledIndex++) {
-        const uint8_t level = levelOn[ledIndex] ? kLedOnLevel : kLedOffLevel;
-        if (level == lastLevel[ledIndex]) {
+        const LedColor color = colorForLed(ledIndex);
+        const int gpioNumber = kLedPins[ledIndex];
+        uint16_t outputValue = 0;
+        if (levelOn[ledIndex]) {
+            if (color == LedColorRed || !pwmAttached[ledIndex]) {
+                outputValue = kLedOnLevel;
+            } else {
+                outputValue = (uint16_t)dutyForColor(color);
+            }
+        } else {
+            outputValue = 0;
+        }
+        if (outputValue == lastOutput[ledIndex]) {
             continue;
         }
-        lastLevel[ledIndex] = level;
-        digitalWrite(kLedPins[ledIndex], level);
+        lastOutput[ledIndex] = outputValue;
+        if (color == LedColorRed || !pwmAttached[ledIndex]) {
+            digitalWrite(gpioNumber, levelOn[ledIndex] ? kLedOnLevel : kLedOffLevel);
+        } else {
+            ledcWrite(gpioNumber, outputValue);
+        }
     }
 }

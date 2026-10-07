@@ -99,6 +99,16 @@ uint32_t InterChipHost::clockHz() const {
     return spiClockHz;
 }
 
+void InterChipHost::pushLedBrightness(uint8_t bluePercent, uint8_t greenPercent) {
+    if (state != HostBringupNormal) {
+        return;
+    }
+    uint8_t payload[2];
+    payload[0] = bluePercent;
+    payload[1] = greenPercent;
+    enqueueInternal(SpiCmdSetLedBrightness, payload, 2, false, 0);
+}
+
 const char *InterChipHost::slaveFirmwareVersion() const {
     return slaveVersionText;
 }

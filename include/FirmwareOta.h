@@ -44,6 +44,9 @@ public:
     bool queueSlaveBegin(const SpiFrame &frame);
     void onSlaveSpiTransferDone();
 
+    using SpiClockHzFn = uint32_t (*)();
+    void setSpiClockRestoreHandler(SpiClockHzFn handler);
+
 private:
     Phase currentPhase = Phase::Idle;
     String errorText;
@@ -82,6 +85,8 @@ private:
     uint32_t lastSlaveDataBytes = 0;
     uint8_t slaveFrameFails = 0;
     volatile bool slavePackClaimed = false;
+    SpiClockHzFn spiClockRestoreFn = nullptr;
+    bool spiClockOverrideActive = false;
 
     void fail(const char *message);
     void clearStagingFiles();
@@ -97,6 +102,8 @@ private:
     void pumpSlaveApply();
     void armSlaveApplyAfterAckDrain();
     void pumpPackagePrepare();
+    void beginSlaveSpiClockOverride();
+    void endSlaveSpiClockOverride();
     const char *phaseId() const;
     uint8_t percentOf(uint32_t done, uint32_t total) const;
 };

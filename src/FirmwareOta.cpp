@@ -1,4 +1,5 @@
 #include "FirmwareOta.h"
+#include "Defines.h"
 #include "JoinedFirmwareZip.h"
 #include "InterChipHost.h"
 #include "InterChipSlave.h"
@@ -129,6 +130,32 @@ void FirmwareOta::closePackageStream() {
     }
 }
 
+void FirmwareOta::setSpiClockRestoreHandler(SpiClockHzFn handler) {
+    spiClockRestoreFn = handler;
+}
+
+void FirmwareOta::beginSlaveSpiClockOverride() {
+    if (spiClockOverrideActive) {
+        return;
+    }
+    spiClockOverrideActive = true;
+    INTER_CHIP_HOST.setClockHz(SPI_SPEED_HZ_4M);
+    LOGGER.info("SPI clock temporarily 4 MHz for slave firmware OTA");
+}
+
+void FirmwareOta::endSlaveSpiClockOverride() {
+    if (!spiClockOverrideActive) {
+        return;
+    }
+    spiClockOverrideActive = false;
+    uint32_t restoreHz = DEFAULT_SPI_SPEED_HZ;
+    if (spiClockRestoreFn != nullptr) {
+        restoreHz = spiClockRestoreFn();
+    }
+    INTER_CHIP_HOST.setClockHz(restoreHz);
+    LOGGER.info("SPI clock restored after slave firmware OTA");
+}
+
 void FirmwareOta::fail(const char *message) {
     errorText = message != nullptr ? message : "Firmware update failed";
     const bool abortUpdate = hostUpdateStarted || slaveOtaActive;
@@ -158,6 +185,7 @@ void FirmwareOta::fail(const char *message) {
     streamPos = 0;
     slaveFrameFails = 0;
     slavePackClaimed = false;
+    endSlaveSpiClockOverride();
     clearStagingFiles();
     LOGGER.error(errorText);
 }
@@ -501,6 +529,7 @@ void FirmwareOta::onSpiFrame(const SpiFrame &frame) {
 }
 
 bool FirmwareOta::startHostApply() {
+    endSlaveSpiClockOverride();
     if (!packageFile) {
         packageFile = LittleFS.open(kPackagePath, "r");
         if (!packageFile) {
@@ -615,6 +644,7 @@ void FirmwareOta::pumpPackagePrepare() {
         return;
     }
     currentPhase = Phase::Slave;
+    beginSlaveSpiClockOverride();
     INTER_CHIP_HOST.holdForFirmwareOta();
     LOGGER.info("Joined package stream ready, updating slave");
 }

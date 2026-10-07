@@ -634,6 +634,14 @@ static void onHostSpiEvent(const SpiFrame &frame) {
     }
     if (frame.cmd == SpiEvtSettingsOk && topicMap != nullptr) {
         ZIGBEE_SPI_PROXY.publishHostStores(topicMap, userStore);
+#if defined(BOARD_ROLE_HOST)
+        if (settingsManager != nullptr) {
+            INTER_CHIP_HOST.pushLedBrightness(
+                settingsManager->blueLedBrightness(),
+                settingsManager->greenLedBrightness()
+            );
+        }
+#endif
     }
 }
 
@@ -1517,7 +1525,11 @@ static void setupHost() {
         onDeviceUpserted,
         onDeviceRemoved
     );
-    webConsole->setHardwareApplyHandler([](uint32_t speedHz) { INTER_CHIP_HOST.setClockHz(speedHz); });
+    webConsole->setHardwareApplyHandler([](uint32_t speedHz, uint8_t bluePercent, uint8_t greenPercent) {
+        INTER_CHIP_HOST.setClockHz(speedHz);
+        STATUS_RGB.setColorBrightness(bluePercent, greenPercent);
+        INTER_CHIP_HOST.pushLedBrightness(bluePercent, greenPercent);
+    });
     webConsole->setDeviceOnlineHandler([](const uint8_t ieee[8]) {
         return ZIGBEE_SPI_PROXY.isOnline(ieee);
     });
@@ -1563,6 +1575,13 @@ static void setupHost() {
     GlobalSettings *settings = settingsManager->getSettings();
     INTER_CHIP_HOST.setSettingsSource(settings->zigbee.channel, settings->zigbee.permitJoinOnBootSec);
     INTER_CHIP_HOST.setClockHz(settingsManager->spiSpeedHz());
+    FIRMWARE_OTA.setSpiClockRestoreHandler([]() {
+        return settingsManager != nullptr ? settingsManager->spiSpeedHz() : DEFAULT_SPI_SPEED_HZ;
+    });
+    STATUS_RGB.setColorBrightness(
+        settingsManager->blueLedBrightness(),
+        settingsManager->greenLedBrightness()
+    );
     INTER_CHIP_HOST.setEventHandler(onHostSpiEvent);
     INTER_CHIP_HOST.begin();
     runDeviceRegistryFixtures();
