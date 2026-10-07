@@ -508,6 +508,23 @@ bool WebConsole::userCanRemoveDevices(const UserRecord *user) const {
     return user != nullptr && (user->isAdmin || user->removeDevices);
 }
 
+bool WebConsole::userCanControlDevices(const UserRecord *user) const {
+    return user != nullptr && (user->isAdmin || user->controlDevices);
+}
+
+bool WebConsole::userMaySendDeviceCommand(const UserRecord *user) const {
+    if (user == nullptr) {
+        return false;
+    }
+    if (user->isAdmin || user->controlDevices) {
+        return true;
+    }
+    if (!userIsOperator(user)) {
+        return true;
+    }
+    return UserStore::consoleIdCount(user) > 0;
+}
+
 bool WebConsole::userCanEditConsoles(const UserRecord *user) const {
     return user != nullptr && (user->isAdmin || user->editConsoles);
 }
@@ -517,7 +534,7 @@ bool WebConsole::userIsOperator(const UserRecord *user) const {
         return false;
     }
     return user->isAdmin || user->editDevices || user->addDevices || user->removeDevices || user->editUsers
-        || user->editConsoles || user->monitor;
+        || user->editConsoles || user->monitor || user->controlDevices;
 }
 
 bool WebConsole::requireEditConsoles(AsyncWebServerRequest *request, const UserRecord **userOut, bool touchActivity) {
@@ -557,6 +574,7 @@ void WebConsole::fillUserFromJson(const char *json, UserRecord *user) {
     extractJsonBool(json, "editUsers", user->editUsers);
     extractJsonBool(json, "editConsoles", user->editConsoles);
     extractJsonBool(json, "monitor", user->monitor);
+    extractJsonBool(json, "controlDevices", user->controlDevices);
     extractJsonBool(json, "isBlocked", user->isBlocked);
     extractJsonString(json, "theme", themeText);
     user->theme = UserStore::themeFromJsonId(themeText.c_str());
@@ -1122,9 +1140,18 @@ void WebConsole::handleHardwareGet(AsyncWebServerRequest *request) {
         return;
     }
     const uint32_t speedHz = settingsManager->spiSpeedHz();
-    LOGGER.info("Hardware GET spiSpeedHz=" + String((unsigned long)speedHz));
+    const uint8_t bluePercent = settingsManager->blueLedBrightness();
+    const uint8_t greenPercent = settingsManager->greenLedBrightness();
+    LOGGER.info(
+        "Hardware GET spiSpeedHz=" + String((unsigned long)speedHz)
+        + " blue=" + String(bluePercent) + " green=" + String(greenPercent)
+    );
     String json = "{\"spiSpeedHz\":";
     json += String((unsigned long)speedHz);
+    json += ",\"blueLedBrightness\":";
+    json += String(bluePercent);
+    json += ",\"greenLedBrightness\":";
+    json += String(greenPercent);
     json += "}";
     request->send(200, "application/json", json);
 }
@@ -1134,8 +1161,12 @@ void WebConsole::handleHardwarePost(AsyncWebServerRequest *request) {
         return;
     }
     int spiSpeedHz = DEFAULT_SPI_SPEED_HZ;
-    if (!extractJsonInt(requestBody.c_str(), "spiSpeedHz", spiSpeedHz)) {
-        request->send(400, "text/plain", "Need spiSpeedHz");
+    int blueLedBrightness = DEFAULT_LED_BRIGHTNESS_PERCENT;
+    int greenLedBrightness = DEFAULT_LED_BRIGHTNESS_PERCENT;
+    if (!extractJsonInt(requestBody.c_str(), "spiSpeedHz", spiSpeedHz)
+        || !extractJsonInt(requestBody.c_str(), "blueLedBrightness", blueLedBrightness)
+        || !extractJsonInt(requestBody.c_str(), "greenLedBrightness", greenLedBrightness)) {
+        request->send(400, "text/plain", "Need spiSpeedHz, blueLedBrightness, greenLedBrightness");
         return;
     }
     const uint32_t clamped = SettingsManager::clampSpiSpeedHz((uint32_t)spiSpeedHz);
@@ -1143,12 +1174,20 @@ void WebConsole::handleHardwarePost(AsyncWebServerRequest *request) {
         request->send(400, "text/plain", "spiSpeedHz must be 100000-40000000");
         return;
     }
+    if (blueLedBrightness < LED_BRIGHTNESS_PERCENT_MIN || blueLedBrightness > LED_BRIGHTNESS_PERCENT_MAX
+        || greenLedBrightness < LED_BRIGHTNESS_PERCENT_MIN || greenLedBrightness > LED_BRIGHTNESS_PERCENT_MAX) {
+        request->send(400, "text/plain", "LED brightness must be 1-100");
+        return;
+    }
+    const uint8_t bluePercent = (uint8_t)blueLedBrightness;
+    const uint8_t greenPercent = (uint8_t)greenLedBrightness;
     settingsManager->setSpiSpeedHz(clamped);
+    settingsManager->setLedBrightness(bluePercent, greenPercent);
     settingsManager->saveMain(false);
     if (applyHardware != nullptr) {
-        applyHardware(clamped);
+        applyHardware(clamped, bluePercent, greenPercent);
     }
-    request->send(200, "text/plain", "Saved. SPI speed is active now.");
+    request->send(200, "text/plain", "Saved. Hardware settings are active now.");
 }
 
 void WebConsole::appendMqttSettingsJson(String &json) {
@@ -1322,9 +1361,34 @@ bool WebConsole::applyHardwareJson(const char *json, String *errorText) {
         }
         return false;
     }
+    uint8_t bluePercent = settingsManager->blueLedBrightness();
+    uint8_t greenPercent = settingsManager->greenLedBrightness();
+    int blueLedBrightness = bluePercent;
+    int greenLedBrightness = greenPercent;
+    const bool haveBlue = extractJsonInt(json, "blueLedBrightness", blueLedBrightness);
+    const bool haveGreen = extractJsonInt(json, "greenLedBrightness", greenLedBrightness);
+    if (haveBlue) {
+        if (blueLedBrightness < LED_BRIGHTNESS_PERCENT_MIN || blueLedBrightness > LED_BRIGHTNESS_PERCENT_MAX) {
+            if (errorText != nullptr) {
+                *errorText = "blueLedBrightness must be 1-100";
+            }
+            return false;
+        }
+        bluePercent = (uint8_t)blueLedBrightness;
+    }
+    if (haveGreen) {
+        if (greenLedBrightness < LED_BRIGHTNESS_PERCENT_MIN || greenLedBrightness > LED_BRIGHTNESS_PERCENT_MAX) {
+            if (errorText != nullptr) {
+                *errorText = "greenLedBrightness must be 1-100";
+            }
+            return false;
+        }
+        greenPercent = (uint8_t)greenLedBrightness;
+    }
     settingsManager->setSpiSpeedHz(clamped);
+    settingsManager->setLedBrightness(bluePercent, greenPercent);
     if (applyHardware != nullptr) {
-        applyHardware(clamped);
+        applyHardware(clamped, bluePercent, greenPercent);
     }
     return true;
 }
@@ -1347,6 +1411,10 @@ void WebConsole::handleSettingsExportGet(AsyncWebServerRequest *request) {
     json += String(settings->zigbee.permitJoinOnBootSec);
     json += "},\"hardware\":{\"spiSpeedHz\":";
     json += String((unsigned long)settingsManager->spiSpeedHz());
+    json += ",\"blueLedBrightness\":";
+    json += String(settingsManager->blueLedBrightness());
+    json += ",\"greenLedBrightness\":";
+    json += String(settingsManager->greenLedBrightness());
     json += "},\"ui\":{\"theme\":\"";
     json += UserStore::themeJsonId(user->theme);
     json += "\"},\"devices\":";
@@ -1758,7 +1826,12 @@ void WebConsole::handleDevicesDelete(AsyncWebServerRequest *request) {
 }
 
 void WebConsole::handleDevicesCommandPost(AsyncWebServerRequest *request) {
-    if (!requireUser(request, nullptr)) {
+    const UserRecord *user = nullptr;
+    if (!requireUser(request, &user)) {
+        return;
+    }
+    if (!userMaySendDeviceCommand(user)) {
+        request->send(403, "text/plain", "Forbidden");
         return;
     }
     if (applyDeviceCommand == nullptr) {
@@ -1889,15 +1962,19 @@ void WebConsole::handleLogDownloadGet(AsyncWebServerRequest *request) {
     size_t start = 0;
     size_t length = 0;
     LOGGER.snapshotRing(&start, &length);
-    AsyncWebServerResponse *response = request->beginResponse(
+    AsyncWebServerResponse *response = request->beginChunkedResponse(
         "text/plain",
-        length,
         [start, length](uint8_t *buffer, size_t maxLen, size_t index) -> size_t {
+            if (index >= length) {
+                return 0;
+            }
             return LOGGER.copyRingSlice(start, length, index, reinterpret_cast<char *>(buffer), maxLen);
         }
     );
     response->addHeader("Cache-Control", "no-store");
     response->addHeader("Content-Disposition", "attachment; filename=\"z2m-log.txt\"");
+    response->addHeader("X-Log-Ring-Capacity", String((unsigned long)LOGGER.ringCapacityBytes()));
+    response->addHeader("X-Log-Ring-Used", String((unsigned long)length));
     request->send(response);
 }
 

@@ -13,7 +13,7 @@ public:
     using SearchStopFn = void (*)();
     using DeviceUpsertedFn = bool (*)(const DeviceTopicEntry *entry);
     using DeviceRemovedFn = bool (*)(const uint8_t ieee[8], uint8_t transport);
-    using HardwareApplyFn = void (*)(uint32_t spiSpeedHz);
+    using HardwareApplyFn = void (*)(uint32_t spiSpeedHz, uint8_t blueLedBrightness, uint8_t greenLedBrightness);
     using DeviceOnlineFn = bool (*)(const uint8_t ieee[8]);
     using DeviceRssiFn = bool (*)(const uint8_t ieee[8], int8_t *rssiDbm);
     using DevicesFileFn = String (*)();
@@ -101,6 +101,8 @@ private:
     bool userCanAddDevices(const UserRecord *user) const;
     bool userCanEditDevices(const UserRecord *user) const;
     bool userCanRemoveDevices(const UserRecord *user) const;
+    bool userCanControlDevices(const UserRecord *user) const;
+    bool userMaySendDeviceCommand(const UserRecord *user) const;
     bool userIsOperator(const UserRecord *user) const;
     bool userCanEditConsoles(const UserRecord *user) const;
     void sendAuthCookie(AsyncWebServerResponse *response, const char *tokenHex, uint32_t maxAgeSec);

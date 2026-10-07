@@ -697,6 +697,10 @@ void InterChipSlave::handleHostFrame(const SpiFrame &frame) {
         enqueueReply(SpiEvtSettingsOk, frame.seq, nullptr, 0);
         return;
     }
+    if (frame.cmd == SpiCmdSetLedBrightness && frame.length >= 2) {
+        STATUS_RGB.setColorBrightness(frame.payload[0], frame.payload[1]);
+        return;
+    }
     if (frame.cmd == SpiCmdTimeSync && frame.length >= 4) {
         const uint32_t unixSec = (uint32_t)frame.payload[0] | ((uint32_t)frame.payload[1] << 8)
             | ((uint32_t)frame.payload[2] << 16) | ((uint32_t)frame.payload[3] << 24);

@@ -31,7 +31,8 @@ enum SpiCommand : uint8_t {
     SpiCmdReadEvent = 0x10,
     SpiCmdZclCommand = 0x11,
     SpiCmdSetUser = 0x12,
-    SpiCmdGetUsers = 0x13
+    SpiCmdGetUsers = 0x13,
+    SpiCmdSetLedBrightness = 0x14
 };
 
 constexpr uint8_t SPI_DEVICE_SYNC_RESET = 0x01;
@@ -51,11 +52,13 @@ constexpr uint8_t SPI_USER_FLAG_EDIT_USERS = 0x10;
 constexpr uint8_t SPI_USER_FLAG_BLOCKED = 0x20;
 constexpr uint8_t SPI_USER_FLAG_EDIT_CONSOLES = 0x40;
 constexpr uint8_t SPI_USER_FLAG_MONITOR = 0x80;
+constexpr uint8_t SPI_USER_FLAG2_CONTROL_DEVICES = 0x01;
 constexpr size_t SPI_USER_SYNC_NAME_LEN = 32;
 constexpr size_t SPI_USER_SYNC_SALT_LEN = 16;
 constexpr size_t SPI_USER_SYNC_HASH_LEN = 32;
-constexpr size_t SPI_USER_SYNC_ENTRY_LEN =
+constexpr size_t SPI_USER_SYNC_ENTRY_LEN_LEGACY =
     1 + SPI_USER_SYNC_NAME_LEN + SPI_USER_SYNC_SALT_LEN + SPI_USER_SYNC_HASH_LEN + 4 + 1 + 1;
+constexpr size_t SPI_USER_SYNC_ENTRY_LEN = SPI_USER_SYNC_ENTRY_LEN_LEGACY + 1;
 constexpr size_t SPI_DEVICE_SYNC_NAME_LEN = 24;
 constexpr size_t SPI_DEVICE_SYNC_TOPIC_LEN = 64;
 constexpr size_t SPI_DEVICE_SYNC_ENTRY_LEN_NO_CHANNELS =

@@ -109,7 +109,7 @@ public:
 
     static constexpr int kMaxBoundDevices = DEVICE_MAP_SLOTS;
     static constexpr int kMaxDescriptorProbes = 32;
-    static constexpr int kMaxDestFlights = 32;
+    static constexpr int kMaxDestFlights = 128;
     static constexpr int kMaxStatusReads = DEVICE_MAP_SLOTS * 5;
     static constexpr int kMaxStatusIssued = DEVICE_MAP_SLOTS;
     static constexpr int kMaxStatusAnswers = 32;

@@ -4,6 +4,10 @@
 #include <time.h>
 #include <string.h>
 
+#if defined(BOARD_ROLE_HOST)
+#include <esp32-hal-psram.h>
+#endif
+
 Logger LOGGER;
 
 Logger::Logger() {}
@@ -12,9 +16,22 @@ void Logger::begin() {
     if (ring != nullptr) {
         return;
     }
+#if defined(BOARD_ROLE_HOST)
+    if (psramFound()) {
+        ring = static_cast<char *>(ps_malloc(kRingCapacityTarget));
+        if (ring != nullptr) {
+            ringCapacity = kRingCapacityTarget;
+            memset(ring, 0, ringCapacity);
+            return;
+        }
+    }
+#endif
     ring = static_cast<char *>(
         heap_caps_malloc(kRingCapacityTarget, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
     );
+    if (ring == nullptr) {
+        ring = static_cast<char *>(heap_caps_malloc(kRingCapacityTarget, MALLOC_CAP_SPIRAM));
+    }
     if (ring != nullptr) {
         ringCapacity = kRingCapacityTarget;
         memset(ring, 0, ringCapacity);

@@ -59,10 +59,27 @@ void MqttClient::begin(void (*rawCallback)(char *topic, byte *payload, unsigned 
 }
 
 void MqttClient::onMessage(char *topic, byte *payload, unsigned int length) {
+    // PubSubClient can underflow the payload length on a truncated PUBLISH after a
+    // TCP reset; walking that length into ROM (e.g. 0x40000000) panics the host.
+    static constexpr unsigned int kMaxPayloadBytes = 1024;
+    if (topic == nullptr || topic[0] == '\0') {
+        return;
+    }
+    if (length > kMaxPayloadBytes) {
+        LOGGER.warning(
+            "MQTT ignore corrupt/oversized message topic=" + String(topic)
+            + " len=" + String((unsigned long)length)
+        );
+        return;
+    }
+    if (length > 0 && payload == nullptr) {
+        LOGGER.warning("MQTT ignore message with null payload topic=" + String(topic));
+        return;
+    }
+
     String body;
-    body.reserve(length + 1);
-    for (unsigned int i = 0; i < length; i++) {
-        body += (char)payload[i];
+    if (length > 0) {
+        body.concat(reinterpret_cast<const char *>(payload), length);
     }
     LOGGER.debug("MQTT " + String(topic) + " = " + body);
     STATUS_RGB.pulseMqttCommandReceived();
@@ -278,6 +295,10 @@ bool MqttClient::publishMessage(const char *topic, const char *payload, bool ret
         LOGGER.info(String("MQTT send topic=") + topic + " data=" + data);
     } else {
         LOGGER.warning(String("MQTT send failed topic=") + topic + " data=" + data);
+        // Drop a half-closed remote socket so the next loop() does not parse junk.
+        if (!usesLocalBroker() && client != nullptr) {
+            client->disconnect();
+        }
     }
     return sent;
 }

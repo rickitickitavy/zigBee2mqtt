@@ -25,11 +25,15 @@ public:
     bool mainEqualsCommitted() const;
     uint32_t spiSpeedHz() const;
     void setSpiSpeedHz(uint32_t speedHz);
+    uint8_t blueLedBrightness() const;
+    uint8_t greenLedBrightness() const;
+    void setLedBrightness(uint8_t bluePercent, uint8_t greenPercent);
     uint8_t uiTheme() const;
     void setUiTheme(uint8_t themeId);
     static const char *uiThemeJsonId(uint8_t themeId);
     static uint8_t uiThemeFromJsonId(const char *themeId);
     static uint32_t clampSpiSpeedHz(uint32_t speedHz);
+    static uint8_t clampLedBrightnessPercent(uint8_t percent);
     static void clampMqttClientTimeout(int &timeoutMs);
     static void clampZigbeeChannel(uint8_t &channel);
 

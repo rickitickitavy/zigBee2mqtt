@@ -94,6 +94,7 @@ void SettingsManager::applyDefaults() {
     settings.zigbee.channel = DEFAULT_ZIGBEE_CHANNEL;
     settings.zigbee.permitJoinOnBootSec = DEFAULT_PERMIT_JOIN_SEC;
     setSpiSpeedHz(DEFAULT_SPI_SPEED_HZ);
+    setLedBrightness(DEFAULT_LED_BRIGHTNESS_PERCENT, DEFAULT_LED_BRIGHTNESS_PERCENT);
 }
 
 void SettingsManager::upgradeLegacyMainFromEeprom() {
@@ -197,6 +198,13 @@ uint32_t SettingsManager::clampSpiSpeedHz(uint32_t speedHz) {
     return speedHz;
 }
 
+uint8_t SettingsManager::clampLedBrightnessPercent(uint8_t percent) {
+    if (percent < LED_BRIGHTNESS_PERCENT_MIN || percent > LED_BRIGHTNESS_PERCENT_MAX) {
+        return DEFAULT_LED_BRIGHTNESS_PERCENT;
+    }
+    return percent;
+}
+
 uint32_t SettingsManager::spiSpeedHz() const {
     uint32_t speedHz = 0;
     memcpy(&speedHz, settings.reserved, sizeof(speedHz));
@@ -206,6 +214,27 @@ uint32_t SettingsManager::spiSpeedHz() const {
 void SettingsManager::setSpiSpeedHz(uint32_t speedHz) {
     const uint32_t clamped = clampSpiSpeedHz(speedHz);
     memcpy(settings.reserved, &clamped, sizeof(clamped));
+}
+
+uint8_t SettingsManager::blueLedBrightness() const {
+    const uint8_t stored = settings.reserved[LED_BLUE_BRIGHTNESS_RESERVED_OFFSET];
+    if (stored == 0) {
+        return DEFAULT_LED_BRIGHTNESS_PERCENT;
+    }
+    return clampLedBrightnessPercent(stored);
+}
+
+uint8_t SettingsManager::greenLedBrightness() const {
+    const uint8_t stored = settings.reserved[LED_GREEN_BRIGHTNESS_RESERVED_OFFSET];
+    if (stored == 0) {
+        return DEFAULT_LED_BRIGHTNESS_PERCENT;
+    }
+    return clampLedBrightnessPercent(stored);
+}
+
+void SettingsManager::setLedBrightness(uint8_t bluePercent, uint8_t greenPercent) {
+    settings.reserved[LED_BLUE_BRIGHTNESS_RESERVED_OFFSET] = clampLedBrightnessPercent(bluePercent);
+    settings.reserved[LED_GREEN_BRIGHTNESS_RESERVED_OFFSET] = clampLedBrightnessPercent(greenPercent);
 }
 
 uint8_t SettingsManager::uiTheme() const {
@@ -360,4 +389,7 @@ void SettingsManager::logSettings() {
     LOGGER.info("  zigbee permitJoinOnBootSec: " + String(settings.zigbee.permitJoinOnBootSec));
     LOGGER.info("  devices used: " + String(topicMap.usedCount()) + "/" + String(DEVICE_MAP_SLOTS));
     LOGGER.info("  spi speed Hz: " + String((unsigned long)spiSpeedHz()));
+    LOGGER.info(
+        "  led brightness blue/green: " + String(blueLedBrightness()) + "/" + String(greenLedBrightness())
+    );
 }
