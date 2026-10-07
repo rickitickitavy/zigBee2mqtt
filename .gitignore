@@ -1,5 +1,6 @@
 .pio
 .idea/
+.cursor/fragile-zones.allow
 include/generated/EmbeddedWebAssets.h
 cmake-build-*/
 .clangd

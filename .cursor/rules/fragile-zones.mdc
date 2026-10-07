@@ -1,0 +1,25 @@
+---
+description: Frozen fragile zones — stop and ask a human before changing OTA/SPI update logic or its influence surface
+alwaysApply: true
+---
+
+# Fragile zones (hardest freeze)
+
+Read and obey `docs/FRAGILE_ZONES.md` and `.cursor/fragile-zones.json`.
+
+## Before any edit
+
+If the task would change a **hard-frozen** path or clearly alter an **influence** path for zones `slave-spi-ota` or `firmware-update-process`:
+
+1. **STOP.** Do not edit, refactor, “quick fix”, or drive-by tidy those areas.
+2. Tell the human which zone id is involved and why.
+3. Wait for explicit approval that names the zone id (example: `I approve fragile zone slave-spi-ota`).
+4. Only after approval, the human (or the human instructing you) may add the zone id or path to `.cursor/fragile-zones.allow`. Do **not** create or widen that allow file yourself unless the human explicitly told you to in the same turn.
+5. A Cursor hook **denies** hard-frozen path edits without an allow entry. Do not try to bypass it with shell redirects.
+
+## Scope reminder
+
+- `slave-spi-ota` — SPI begin/chunk/end, ACK/retry/timeouts, slave apply drain.
+- `firmware-update-process` — whole joined update (HTTP stage → slave SPI → host apply → reboot), includes `slave-spi-ota`.
+
+ADRs 0008 / 0003 / 0011 explain design; they do **not** lift this freeze.
