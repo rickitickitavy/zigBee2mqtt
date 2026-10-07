@@ -26,6 +26,8 @@ struct MemberInfo {
 };
 
 bool findMembers(File &zipFile, MemberInfo *slaveOut, MemberInfo *hostOut);
+// Reads optional version.txt (STORE or DEFLATE). Returns false if missing/invalid.
+bool readVersionText(File &zipFile, char *destination, size_t destinationSize);
 
 // Sequential uncompressed reader over one ZIP member.
 class MemberReader {

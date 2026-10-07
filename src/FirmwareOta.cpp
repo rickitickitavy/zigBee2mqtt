@@ -16,8 +16,8 @@ static portMUX_TYPE gFirmwareOtaMux = portMUX_INITIALIZER_UNLOCKED;
 
 bool FirmwareOta::busy() const {
     return currentPhase == Phase::Receiving || currentPhase == Phase::Preparing
-        || currentPhase == Phase::Slave || currentPhase == Phase::Host
-        || currentPhase == Phase::Rebooting;
+        || currentPhase == Phase::Slave || currentPhase == Phase::VerifyingSlave
+        || currentPhase == Phase::Host || currentPhase == Phase::Rebooting;
 }
 
 bool FirmwareOta::isUpdatingSlave() const {
@@ -48,6 +48,8 @@ const char *FirmwareOta::phaseId() const {
             return "preparing";
         case Phase::Slave:
             return "slave";
+        case Phase::VerifyingSlave:
+            return "verifying_slave";
         case Phase::Host:
             return "host";
         case Phase::Failed:
@@ -84,7 +86,8 @@ String FirmwareOta::statusJson() const {
     if (currentPhase == Phase::Slave) {
         slavePercent = percentOf(imageOffset, slaveImageSize);
     } else if (
-        currentPhase == Phase::Host || currentPhase == Phase::Rebooting || currentPhase == Phase::Done
+        currentPhase == Phase::VerifyingSlave || currentPhase == Phase::Host
+        || currentPhase == Phase::Rebooting || currentPhase == Phase::Done
     ) {
         slavePercent = 100;
     }
@@ -185,6 +188,9 @@ void FirmwareOta::fail(const char *message) {
     streamPos = 0;
     slaveFrameFails = 0;
     slavePackClaimed = false;
+    slaveVerifyAttempt = 0;
+    slaveVerifyDeadlineMs = 0;
+    slaveVerifyResetPending = false;
     endSlaveSpiClockOverride();
     clearStagingFiles();
     LOGGER.error(errorText);
@@ -271,6 +277,10 @@ bool FirmwareOta::prepareJoinedPackage() {
         fail("Joined package must contain slave.bin and host.bin");
         return false;
     }
+    expectedSlaveVersion[0] = '\0';
+    if (!JoinedFirmwareZip::readVersionText(packageFile, expectedSlaveVersion, sizeof(expectedSlaveVersion))) {
+        LOGGER.warning("Joined package has no version.txt; will require slave version change after OTA");
+    }
     if (!memberReader.open(packageFile, slaveMember)) {
         closePackageStream();
         fail("Failed to open slave.bin stream");
@@ -283,7 +293,8 @@ bool FirmwareOta::prepareJoinedPackage() {
     streamPos = 0;
     LOGGER.info(
         "Joined package OK stream slave=" + String((unsigned long)slaveImageSize) + " host="
-        + String((unsigned long)hostImageSize)
+        + String((unsigned long)hostImageSize) + " expect="
+        + (expectedSlaveVersion[0] != '\0' ? expectedSlaveVersion : "(any-new)")
     );
     return true;
 }
@@ -367,8 +378,8 @@ void FirmwareOta::onSlaveFrameLost() {
             lastSlavePayloadLength = 0;
             lastSlaveDataBytes = 0;
             INTER_CHIP_HOST.noteKeepaliveQuiet();
-            LOGGER.info("Slave END ACK lost after complete image; continuing host update");
-            startHostApply();
+            LOGGER.info("Slave END ACK lost after complete image; verifying slave version");
+            beginSlaveVersionVerify();
             return;
         }
         fail("Slave firmware update failed after repeated SPI frame loss");
@@ -474,7 +485,7 @@ bool FirmwareOta::enqueueNextSlaveChunk() {
         portENTER_CRITICAL(&gFirmwareOtaMux);
         slavePackClaimed = false;
         portEXIT_CRITICAL(&gFirmwareOtaMux);
-        startHostApply();
+        beginSlaveVersionVerify();
         return true;
     }
 
@@ -522,10 +533,79 @@ void FirmwareOta::onSpiFrame(const SpiFrame &frame) {
     const bool done = imageOffset >= slaveImageSize;
     portEXIT_CRITICAL(&gFirmwareOtaMux);
     if (done) {
-        startHostApply();
+        beginSlaveVersionVerify();
         return;
     }
     enqueueNextSlaveChunk();
+}
+
+bool FirmwareOta::slaveVersionMatchesExpected() const {
+    if (!INTER_CHIP_HOST.isNormal()) {
+        return false;
+    }
+    const char *seen = INTER_CHIP_HOST.slaveFirmwareVersion();
+    if (seen == nullptr || seen[0] == '\0') {
+        return false;
+    }
+    if (expectedSlaveVersion[0] != '\0') {
+        return strcmp(seen, expectedSlaveVersion) == 0;
+    }
+    if (preOtaSlaveVersion[0] == '\0') {
+        return false;
+    }
+    return strcmp(seen, preOtaSlaveVersion) != 0;
+}
+
+void FirmwareOta::beginSlaveVersionVerify() {
+    endSlaveSpiClockOverride();
+    waitingForSlaveResult = false;
+    lastSlavePayloadLength = 0;
+    lastSlaveDataBytes = 0;
+    slaveVerifyAttempt = 1;
+    slaveVerifyResetPending = false;
+    slaveVerifyDeadlineMs = millis() + kSlaveVerifyWaitMs;
+    currentPhase = Phase::VerifyingSlave;
+    INTER_CHIP_HOST.noteKeepaliveQuiet();
+    LOGGER.info(
+        "Slave image transferred; waiting up to 15s for version "
+        + String(expectedSlaveVersion[0] != '\0' ? expectedSlaveVersion : "(changed)")
+    );
+}
+
+void FirmwareOta::pumpSlaveVersionVerify() {
+    if (currentPhase != Phase::VerifyingSlave) {
+        return;
+    }
+    if (slaveVerifyResetPending) {
+        slaveVerifyResetPending = false;
+        INTER_CHIP_HOST.resetSlaveSynchronous();
+        slaveVerifyDeadlineMs = millis() + kSlaveVerifyWaitMs;
+        LOGGER.info(
+            "Slave reset for version verify attempt "
+            + String((int)slaveVerifyAttempt) + "/" + String((int)kSlaveVerifyMaxAttempts)
+        );
+        return;
+    }
+    if (slaveVersionMatchesExpected()) {
+        LOGGER.info(
+            "Slave version verified: " + String(INTER_CHIP_HOST.slaveFirmwareVersion())
+        );
+        startHostApply();
+        return;
+    }
+    if ((long)(millis() - slaveVerifyDeadlineMs) < 0) {
+        return;
+    }
+    if (slaveVerifyAttempt >= kSlaveVerifyMaxAttempts) {
+        fail("Slave did not report expected firmware version after transfer");
+        return;
+    }
+    slaveVerifyAttempt++;
+    slaveVerifyResetPending = true;
+    LOGGER.warning(
+        "Slave version not ready (seen=\""
+        + String(INTER_CHIP_HOST.slaveFirmwareVersion()) + "\"); will reset"
+    );
 }
 
 bool FirmwareOta::startHostApply() {
@@ -644,6 +724,8 @@ void FirmwareOta::pumpPackagePrepare() {
         return;
     }
     currentPhase = Phase::Slave;
+    strncpy(preOtaSlaveVersion, INTER_CHIP_HOST.slaveFirmwareVersion(), sizeof(preOtaSlaveVersion) - 1);
+    preOtaSlaveVersion[sizeof(preOtaSlaveVersion) - 1] = '\0';
     beginSlaveSpiClockOverride();
     INTER_CHIP_HOST.holdForFirmwareOta();
     LOGGER.info("Joined package stream ready, updating slave");
@@ -655,6 +737,10 @@ void FirmwareOta::pump() {
     pumpPackagePrepare();
     if (currentPhase == Phase::Slave) {
         enqueueNextSlaveChunk();
+        return;
+    }
+    if (currentPhase == Phase::VerifyingSlave) {
+        pumpSlaveVersionVerify();
         return;
     }
     if (currentPhase == Phase::Host) {

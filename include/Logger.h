@@ -21,10 +21,14 @@ public:
     void setLineHook(LineHookFn hook);
     void appendSlaveLine(const char *line);
 
-    void error(String msg);
-    void warning(String msg);
-    void info(String msg);
-    void debug(String msg);
+    void error(const char *msg);
+    void error(const String &msg);
+    void warning(const char *msg);
+    void warning(const String &msg);
+    void info(const char *msg);
+    void info(const String &msg);
+    void debug(const char *msg);
+    void debug(const String &msg);
     void snapshotRing(size_t *start, size_t *length) const;
     void snapshotRingTail(size_t maxBytes, size_t *start, size_t *length) const;
     size_t copyRingSlice(size_t start, size_t length, size_t offset, char *destination, size_t maxLength) const;

@@ -70,7 +70,6 @@ private:
     AsyncWebServer server;
     AsyncWebSocket devicesSocket;
     AsyncWebSocket consolesSocket;
-    String requestBody;
     bool otaStarted = false;
     bool otaFailed = false;
     int otaCommand = 0;
@@ -139,7 +138,19 @@ private:
     void handleDevicesStoreGet(AsyncWebServerRequest *request);
     void handleDevicesCommandPost(AsyncWebServerRequest *request);
     void handleGatewayStatusGet(AsyncWebServerRequest *request);
-    void appendRequestBody(uint8_t *data, size_t len, size_t index);
+    static constexpr size_t kHttpBodyMaxSmall = 16 * 1024;
+    static constexpr size_t kHttpBodyMaxRestore = 256 * 1024;
+
+    void appendRequestBody(
+        AsyncWebServerRequest *request,
+        uint8_t *data,
+        size_t len,
+        size_t index,
+        size_t total,
+        size_t maxBytes
+    );
+    bool takeRequestBody(AsyncWebServerRequest *request, String *bodyOut);
+    void discardRequestBody(AsyncWebServerRequest *request);
     void handleLogGet(AsyncWebServerRequest *request);
     void handleLogDownloadGet(AsyncWebServerRequest *request);
     void handleVersionGet(AsyncWebServerRequest *request);

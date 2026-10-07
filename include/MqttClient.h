@@ -2,6 +2,8 @@
 
 #include <PubSubClient.h>
 #include <WiFi.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include "SettingsManager.h"
 #include "DeviceTopicMap.h"
 
@@ -50,6 +52,9 @@ private:
     unsigned long bootMs = 0;
     unsigned long lastBornAnnounceMs = 0;
     bool bornBootAnnounceDone = false;
+    volatile bool connectInProgress = false;
+    volatile bool remoteSessionAttachPending = false;
+    TaskHandle_t connectTaskHandle = nullptr;
 
     String topicStatus;
     String topicDevices;
@@ -64,6 +69,9 @@ private:
     void attachLocalBroker();
     void applyRemoteBrokerTarget();
     void reconnect();
+    void runRemoteConnect();
+    void finishRemoteSessionAttach();
+    static void connectTaskEntry(void *arg);
     void subscribeBridge();
     void clearTopicSubscriptions();
     TopicSubscription *findTopicSubscription(const char *topic) const;

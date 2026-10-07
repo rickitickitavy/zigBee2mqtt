@@ -197,26 +197,58 @@ void Logger::println(const String &msg) {
     }
 }
 
-void Logger::error(String msg) {
-    if (logLevel <= LOG_LEVEL_ERROR) {
-        println("ERROR: " + msg);
+void Logger::error(const char *msg) {
+    if (logLevel > LOG_LEVEL_ERROR || msg == nullptr) {
+        return;
     }
+    println(String("ERROR: ") + msg);
 }
 
-void Logger::warning(String msg) {
-    if (logLevel <= LOG_LEVEL_WARNING) {
-        println("WARNING: " + msg);
+void Logger::error(const String &msg) {
+    if (logLevel > LOG_LEVEL_ERROR) {
+        return;
     }
+    println(String("ERROR: ") + msg);
 }
 
-void Logger::debug(String msg) {
-    if (logLevel <= LOG_LEVEL_DEBUG) {
-        println("DEBUG: " + msg);
+void Logger::warning(const char *msg) {
+    if (logLevel > LOG_LEVEL_WARNING || msg == nullptr) {
+        return;
     }
+    println(String("WARNING: ") + msg);
 }
 
-void Logger::info(String msg) {
-    if (logLevel <= LOG_LEVEL_INFO) {
-        println("INFO: " + msg);
+void Logger::warning(const String &msg) {
+    if (logLevel > LOG_LEVEL_WARNING) {
+        return;
     }
+    println(String("WARNING: ") + msg);
+}
+
+void Logger::debug(const char *msg) {
+    if (logLevel > LOG_LEVEL_DEBUG || msg == nullptr) {
+        return;
+    }
+    println(String("DEBUG: ") + msg);
+}
+
+void Logger::debug(const String &msg) {
+    if (logLevel > LOG_LEVEL_DEBUG) {
+        return;
+    }
+    println(String("DEBUG: ") + msg);
+}
+
+void Logger::info(const char *msg) {
+    if (logLevel > LOG_LEVEL_INFO || msg == nullptr) {
+        return;
+    }
+    println(String("INFO: ") + msg);
+}
+
+void Logger::info(const String &msg) {
+    if (logLevel > LOG_LEVEL_INFO) {
+        return;
+    }
+    println(String("INFO: ") + msg);
 }

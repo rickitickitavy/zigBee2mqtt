@@ -38,12 +38,17 @@ private:
     bool staWebRebindArmed = false;
     InterfaceReadyFn interfaceReadyHandler = nullptr;
     bool recoveryApIdentity = false;
+    bool staScanActive = false;
+    bool staBootJoinPending = false;
+    unsigned long staBootJoinStartedMs = 0;
 
     void stopStationBeforeAp();
     void startAp(bool useRecoveryIdentity);
     bool isApRadioUp() const;
     void startSta();
     void beginStaJoin();
+    void beginStaJoinAsync();
+    void finishStaJoinFromScan(int16_t foundCount);
     void reconnectSta();
     void onStaConnected();
     void requestStaWebRebind();

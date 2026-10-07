@@ -1,4 +1,5 @@
 #include "ZigbeeSpiProxy.h"
+#include "BoundDeviceJson.h"
 #include "InterChipHost.h"
 #include "JsonField.h"
 #include "Logger.h"
@@ -1083,33 +1084,22 @@ int ZigbeeSpiProxy::onlineCount() const {
 String ZigbeeSpiProxy::devicesJson(DeviceTopicMap *topicMap) {
     String json = "[";
     bool first = true;
+    size_t usedCount = 0;
     for (CachedDevice *device = deviceHead; device != nullptr; device = device->next) {
-        if (!first) {
-            json += ",";
-        }
-        first = false;
-        json += "{\"ieee\":\"";
-        json += topicMap->formatIeee(device->ieee);
-        json += "\",\"nwk\":\"0x";
-        json += String(device->shortAddr, HEX);
-        json += "\",\"endpoint\":";
-        json += String(device->endpoint);
-        json += ",\"manufacturer\":\"";
-        json += device->manufacturer;
-        json += "\",\"model\":\"";
-        json += device->model;
-        json += "\"";
-        DeviceTopicEntry *mapped = topicMap->findByIeee(device->ieee);
-        if (mapped != nullptr) {
-            json += ",\"name\":\"";
-            json += mapped->friendlyName;
-            json += "\",\"state\":\"";
-            json += mapped->stateTopic;
-            json += "\",\"command\":\"";
-            json += mapped->commandTopic;
-            json += "\"";
-        }
-        json += "}";
+        usedCount++;
+    }
+    json.reserve(usedCount * 192 + 2);
+    for (CachedDevice *device = deviceHead; device != nullptr; device = device->next) {
+        appendBoundRadioDeviceJson(
+            json,
+            first,
+            topicMap,
+            device->ieee,
+            device->shortAddr,
+            device->endpoint,
+            device->manufacturer,
+            device->model
+        );
     }
     json += "]";
     return json;

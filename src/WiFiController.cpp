@@ -33,19 +33,8 @@ WiFiController::WiFiController(SettingsManager *settingsManager, bool forceAp)
     }
 
     startSta();
-    const unsigned long joinStartedMs = millis();
-    while ((millis() - joinStartedMs) < kStaJoinTimeoutMs) {
-        if (WiFi.status() == WL_CONNECTED) {
-            staEnabledAtBoot = true;
-            staWasConnected = true;
-            onStaConnected();
-            return;
-        }
-        delay(50);
-    }
-
-    LOGGER.warning("STA join failed; starting recovery AP");
-    startAp(true);
+    staBootJoinPending = true;
+    staBootJoinStartedMs = millis();
 }
 
 bool WiFiController::isApMode() const {
@@ -240,20 +229,60 @@ void WiFiController::beginStaJoin() {
 
     LOGGER.info("STA scanning 2.4 GHz for '" + targetSsid + "'");
     const int16_t foundCount = WiFi.scanNetworks(false, true, false, 300);
+    finishStaJoinFromScan(foundCount);
+}
+
+void WiFiController::beginStaJoinAsync() {
+    if (staScanActive) {
+        return;
+    }
+    GlobalSettings *settings = settingsManager->getSettings();
+    String targetSsid = String(settings->wifi.bssid);
+    targetSsid.trim();
+
+    wifi_country_t country;
+    memset(&country, 0, sizeof(country));
+    country.cc[0] = '0';
+    country.cc[1] = '1';
+    country.schan = 1;
+    country.nchan = 13;
+    country.max_tx_power = 20;
+    country.policy = WIFI_COUNTRY_POLICY_MANUAL;
+    esp_wifi_set_country(&country);
+    WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);
+    WiFi.setSortMethod(WIFI_CONNECT_AP_BY_SIGNAL);
+
+    LOGGER.info("STA async scanning 2.4 GHz for '" + targetSsid + "'");
+    const int16_t scanStarted = WiFi.scanNetworks(true, true, false, 300);
+    if (scanStarted == WIFI_SCAN_FAILED) {
+        LOGGER.warning("STA async scan failed to start; joining without scan");
+        WiFi.begin(targetSsid.c_str(), settings->wifi.password);
+        applyStaRadio();
+        return;
+    }
+    staScanActive = true;
+}
+
+void WiFiController::finishStaJoinFromScan(int16_t foundCount) {
+    GlobalSettings *settings = settingsManager->getSettings();
+    String targetSsid = String(settings->wifi.bssid);
+    targetSsid.trim();
+
     int matchIndex = -1;
     int32_t bestRssi = -127;
     if (foundCount <= 0) {
         LOGGER.warning("STA scan found no networks");
     }
-    for (int16_t i = 0; i < foundCount; i++) {
-        const String seenSsid = WiFi.SSID(i);
-        const int32_t seenRssi = WiFi.RSSI(i);
+    for (int16_t networkIndex = 0; networkIndex < foundCount; networkIndex++) {
+        const String seenSsid = WiFi.SSID(networkIndex);
+        const int32_t seenRssi = WiFi.RSSI(networkIndex);
         LOGGER.info(
-            "STA saw " + seenSsid + " ch " + String(WiFi.channel(i)) + " RSSI " + String(seenRssi)
+            "STA saw " + seenSsid + " ch " + String(WiFi.channel(networkIndex))
+                + " RSSI " + String(seenRssi)
         );
         if (seenSsid == targetSsid && seenRssi > bestRssi) {
             bestRssi = seenRssi;
-            matchIndex = i;
+            matchIndex = networkIndex;
         }
     }
 
@@ -283,7 +312,7 @@ void WiFiController::reconnectSta() {
     WiFi.disconnect(false, false);
     delay(100);
     WiFi.config(INADDR_NONE, INADDR_NONE, INADDR_NONE, INADDR_NONE);
-    beginStaJoin();
+    beginStaJoinAsync();
 }
 
 void WiFiController::startSta() {
@@ -295,7 +324,8 @@ void WiFiController::startSta() {
     WiFi.setSleep(false);
     WiFi.setHostname(settings->wifi.deviceName);
     delay(200);
-    beginStaJoin();
+    staEnabledAtBoot = true;
+    beginStaJoinAsync();
     LOGGER.info("STA MAC " + WiFi.macAddress());
 }
 
@@ -310,6 +340,35 @@ void WiFiController::update() {
 
     if (!staEnabledAtBoot) {
         return;
+    }
+
+    if (staScanActive) {
+        const int16_t scanResult = WiFi.scanComplete();
+        if (scanResult == WIFI_SCAN_RUNNING) {
+            return;
+        }
+        staScanActive = false;
+        if (scanResult == WIFI_SCAN_FAILED) {
+            LOGGER.warning("STA async scan failed; joining without scan");
+            GlobalSettings *settings = settingsManager->getSettings();
+            WiFi.begin(settings->wifi.bssid, settings->wifi.password);
+            applyStaRadio();
+        } else {
+            finishStaJoinFromScan(scanResult);
+        }
+    }
+
+    if (staBootJoinPending) {
+        if (isStaConnected()) {
+            staWasConnected = true;
+            onStaConnected();
+            staBootJoinPending = false;
+        } else if (!staScanActive && (millis() - staBootJoinStartedMs) >= kStaJoinTimeoutMs) {
+            LOGGER.warning("STA join failed; starting recovery AP");
+            staBootJoinPending = false;
+            startAp(true);
+            return;
+        }
     }
 
     const bool connected = isStaConnected();
@@ -329,7 +388,7 @@ void WiFiController::update() {
     }
     staWasConnected = connected;
 
-    if (!connected && (millis() - lastStaReconnectMs) >= kStaReconnectMs) {
+    if (!connected && !staScanActive && (millis() - lastStaReconnectMs) >= kStaReconnectMs) {
         lastStaReconnectMs = millis();
         reconnectSta();
     }

@@ -147,6 +147,79 @@ bool findMembers(File &zipFile, MemberInfo *slaveOut, MemberInfo *hostOut) {
     return slaveOut->found && hostOut->found;
 }
 
+bool readVersionText(File &zipFile, char *destination, size_t destinationSize) {
+    if (destination == nullptr || destinationSize == 0) {
+        return false;
+    }
+    destination[0] = '\0';
+    uint32_t centralOffset = 0;
+    uint16_t entryCount = 0;
+    if (!locateEndOfCentralDirectory(zipFile, &centralOffset, &entryCount) || entryCount == 0) {
+        return false;
+    }
+    MemberInfo versionMember{};
+    uint32_t cursor = centralOffset;
+    for (uint16_t index = 0; index < entryCount; index++) {
+        uint8_t central[46];
+        if (!zipFile.seek(cursor) || !readExact(zipFile, central, sizeof(central))) {
+            return false;
+        }
+        if (readU32(central) != kCentralDirSig) {
+            return false;
+        }
+        const uint16_t nameLength = readU16(central + 28);
+        const uint16_t extraLength = readU16(central + 30);
+        const uint16_t commentLength = readU16(central + 32);
+        const uint32_t localHeaderOffset = readU32(central + 42);
+        char name[96];
+        if (nameLength >= sizeof(name)) {
+            cursor += 46UL + nameLength + extraLength + commentLength;
+            continue;
+        }
+        if (!readExact(zipFile, reinterpret_cast<uint8_t *>(name), nameLength)) {
+            return false;
+        }
+        name[nameLength] = '\0';
+        if (nameEquals(name, nameLength, "version.txt")) {
+            if (!fillMemberFromLocalHeader(zipFile, localHeaderOffset, &versionMember)) {
+                return false;
+            }
+            break;
+        }
+        cursor += 46UL + nameLength + extraLength + commentLength;
+    }
+    if (!versionMember.found) {
+        return false;
+    }
+    MemberReader reader;
+    if (!reader.open(zipFile, versionMember)) {
+        return false;
+    }
+    uint8_t raw[32];
+    const size_t got = reader.read(raw, sizeof(raw) - 1);
+    const bool readFailed = reader.failed();
+    reader.close();
+    if (got == 0 || readFailed) {
+        return false;
+    }
+    raw[got] = '\0';
+    size_t start = 0;
+    while (start < got && (raw[start] == ' ' || raw[start] == '\t' || raw[start] == '\r' || raw[start] == '\n')) {
+        start++;
+    }
+    size_t end = start;
+    while (end < got && raw[end] != '\0' && raw[end] != '\r' && raw[end] != '\n' && raw[end] != ' '
+        && raw[end] != '\t') {
+        end++;
+    }
+    if (end <= start || (end - start) >= destinationSize) {
+        return false;
+    }
+    memcpy(destination, raw + start, end - start);
+    destination[end - start] = '\0';
+    return destination[0] != '\0';
+}
+
 bool MemberReader::open(File &zipFile, const MemberInfo &member) {
     close();
     if (!member.found || (member.method != kMethodStore && member.method != kMethodDeflate)) {
