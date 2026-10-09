@@ -6,13 +6,37 @@
 #include "Logger.h"
 
 #include <Update.h>
+#include <esp_heap_caps.h>
 #include <string.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/portmacro.h>
+#include <freertos/semphr.h>
 
 FirmwareOta FIRMWARE_OTA;
 
 static portMUX_TYPE gFirmwareOtaMux = portMUX_INITIALIZER_UNLOCKED;
+static SemaphoreHandle_t gPackageFsMutex = nullptr;
+
+static void ensurePackageFsMutex() {
+    if (gPackageFsMutex != nullptr) {
+        return;
+    }
+    // Created on loop before Slave SPI transfer; later SPI fail paths only take it.
+    gPackageFsMutex = xSemaphoreCreateRecursiveMutex();
+}
+
+static void takePackageFs() {
+    ensurePackageFsMutex();
+    if (gPackageFsMutex != nullptr) {
+        xSemaphoreTakeRecursive(gPackageFsMutex, portMAX_DELAY);
+    }
+}
+
+static void givePackageFs() {
+    if (gPackageFsMutex != nullptr) {
+        xSemaphoreGiveRecursive(gPackageFsMutex);
+    }
+}
 
 bool FirmwareOta::busy() const {
     return currentPhase == Phase::Receiving || currentPhase == Phase::Preparing
@@ -126,11 +150,52 @@ String FirmwareOta::statusJson() const {
     return json;
 }
 
+void FirmwareOta::freeSlaveImageRam() {
+    if (slaveImageRam != nullptr) {
+        free(slaveImageRam);
+        slaveImageRam = nullptr;
+    }
+    slaveImageRamSize = 0;
+}
+
 void FirmwareOta::closePackageStream() {
+    takePackageFs();
     memberReader.close();
     if (packageFile) {
         packageFile.close();
     }
+    givePackageFs();
+    freeSlaveImageRam();
+}
+
+bool FirmwareOta::loadSlaveImageToRam() {
+    freeSlaveImageRam();
+    if (slaveImageSize == 0 || !memberReader.isOpen()) {
+        return false;
+    }
+    uint8_t *buffer = static_cast<uint8_t *>(
+        heap_caps_malloc(slaveImageSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+    );
+    if (buffer == nullptr) {
+        buffer = static_cast<uint8_t *>(malloc(slaveImageSize));
+    }
+    if (buffer == nullptr) {
+        return false;
+    }
+    size_t got = 0;
+    while (got < slaveImageSize) {
+        const size_t n = memberReader.read(buffer + got, slaveImageSize - got);
+        if (n == 0 || memberReader.failed()) {
+            free(buffer);
+            return false;
+        }
+        got += n;
+        yield();
+    }
+    memberReader.close();
+    slaveImageRam = buffer;
+    slaveImageRamSize = slaveImageSize;
+    return true;
 }
 
 void FirmwareOta::setSpiClockRestoreHandler(SpiClockHzFn handler) {
@@ -266,13 +331,17 @@ bool FirmwareOta::writeStaging(const uint8_t *data, size_t length) {
 }
 
 bool FirmwareOta::prepareJoinedPackage() {
+    ensurePackageFsMutex();
     closePackageStream();
+    takePackageFs();
     packageFile = LittleFS.open(kPackagePath, "r");
     if (!packageFile) {
+        givePackageFs();
         fail("Joined package missing");
         return false;
     }
     if (!JoinedFirmwareZip::findMembers(packageFile, &slaveMember, &hostMember)) {
+        givePackageFs();
         closePackageStream();
         fail("Joined package must contain slave.bin and host.bin");
         return false;
@@ -282,6 +351,7 @@ bool FirmwareOta::prepareJoinedPackage() {
         LOGGER.warning("Joined package has no version.txt; will require slave version change after OTA");
     }
     if (!memberReader.open(packageFile, slaveMember)) {
+        givePackageFs();
         closePackageStream();
         fail("Failed to open slave.bin stream");
         return false;
@@ -291,8 +361,16 @@ bool FirmwareOta::prepareJoinedPackage() {
     imageSize = slaveImageSize;
     imageOffset = 0;
     streamPos = 0;
+    // Prefetch slave image into PSRAM so hostSpi can pack without LittleFS.
+    if (!loadSlaveImageToRam()) {
+        givePackageFs();
+        closePackageStream();
+        fail("Failed to load slave.bin into RAM");
+        return false;
+    }
+    givePackageFs();
     LOGGER.info(
-        "Joined package OK stream slave=" + String((unsigned long)slaveImageSize) + " host="
+        "Joined package OK ram slave=" + String((unsigned long)slaveImageSize) + " host="
         + String((unsigned long)hostImageSize) + " expect="
         + (expectedSlaveVersion[0] != '\0' ? expectedSlaveVersion : "(any-new)")
     );
@@ -396,8 +474,8 @@ bool FirmwareOta::packSlaveChunkFromStream(
     if (payloadOut == nullptr || packedLengthOut == nullptr || dataBytesOut == nullptr) {
         return false;
     }
-    if (!memberReader.isOpen() || !packageFile) {
-        fail("Slave image stream missing");
+    if (slaveImageRam == nullptr || slaveImageRamSize == 0 || slaveImageRamSize != slaveImageSize) {
+        fail("Slave image RAM missing");
         return false;
     }
     if (streamPos >= slaveImageSize) {
@@ -408,24 +486,20 @@ bool FirmwareOta::packSlaveChunkFromStream(
     uint8_t chunk[SPI_FILE_CHUNK_MAX];
     const uint32_t remaining = slaveImageSize - streamPos;
     const size_t toRead = remaining > SPI_FILE_CHUNK_MAX ? SPI_FILE_CHUNK_MAX : (size_t)remaining;
-    const size_t readLength = memberReader.read(chunk, toRead);
-    if (readLength != toRead || memberReader.failed()) {
-        fail("Slave image stream read failed");
-        return false;
-    }
+    memcpy(chunk, slaveImageRam + streamPos, toRead);
     uint8_t flags = 0;
-    if (streamPos + (uint32_t)readLength >= slaveImageSize) {
+    if (streamPos + (uint32_t)toRead >= slaveImageSize) {
         flags = SPI_OTA_END;
     }
     const uint16_t packedLength =
-        spiPackFirmwareOta(payloadOut, SPI_MAX_PAYLOAD, flags, chunk, (uint16_t)readLength);
+        spiPackFirmwareOta(payloadOut, SPI_MAX_PAYLOAD, flags, chunk, (uint16_t)toRead);
     if (packedLength == 0) {
         fail("Firmware OTA pack failed");
         return false;
     }
-    streamPos += (uint32_t)readLength;
+    streamPos += (uint32_t)toRead;
     *packedLengthOut = packedLength;
-    *dataBytesOut = (uint32_t)readLength;
+    *dataBytesOut = (uint32_t)toRead;
     return true;
 }
 
@@ -610,6 +684,7 @@ void FirmwareOta::pumpSlaveVersionVerify() {
 
 bool FirmwareOta::startHostApply() {
     endSlaveSpiClockOverride();
+    freeSlaveImageRam();
     if (!packageFile) {
         packageFile = LittleFS.open(kPackagePath, "r");
         if (!packageFile) {

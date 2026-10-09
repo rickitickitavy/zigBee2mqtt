@@ -76,6 +76,14 @@ private:
 
     void bindDevicesSocket();
     void bindConsolesSocket();
+    void handleLiveSocketEvent(
+        AsyncWebSocket *socket,
+        AsyncWebSocketClient *client,
+        AwsEventType type,
+        void *arg,
+        uint8_t *data,
+        size_t len
+    );
     void broadcastDeviceUpsert(const uint8_t ieee[8]);
     void handleRoot(AsyncWebServerRequest *request);
     void handleUserPage(AsyncWebServerRequest *request);

@@ -22,6 +22,18 @@ struct HttpRequestBody {
     size_t maxBytes = 0;
 };
 
+bool websocketPayloadIsPing(const uint8_t *data, size_t len) {
+    if (data == nullptr || len < 13) {
+        return false;
+    }
+    while (len > 0 && data[len - 1] == '\0') {
+        len--;
+    }
+    static const char kPingJson[] = "{\"op\":\"ping\"}";
+    const size_t pingLen = sizeof(kPingJson) - 1;
+    return len == pingLen && memcmp(data, kPingJson, pingLen) == 0;
+}
+
 }  // namespace
 
 WebConsole::WebConsole(SettingsManager *settingsManager, UserStore *userStore, ConsoleStore *consoleStore)
@@ -324,10 +336,52 @@ void WebConsole::loop() {
     consolesSocket.cleanupClients();
 }
 
+void WebConsole::handleLiveSocketEvent(
+    AsyncWebSocket *socket,
+    AsyncWebSocketClient *client,
+    AwsEventType type,
+    void *arg,
+    uint8_t *data,
+    size_t len
+) {
+    (void)socket;
+    if (client == nullptr) {
+        return;
+    }
+    if (type == WS_EVT_CONNECT) {
+        client->keepAlivePeriod(20);
+        return;
+    }
+    if (type != WS_EVT_DATA || data == nullptr || len == 0 || arg == nullptr) {
+        return;
+    }
+    const AwsFrameInfo *frameInfo = static_cast<const AwsFrameInfo *>(arg);
+    if (frameInfo->opcode != WS_TEXT
+        || !frameInfo->final
+        || frameInfo->index != 0
+        || frameInfo->len != len) {
+        return;
+    }
+    if (!websocketPayloadIsPing(data, len)) {
+        return;
+    }
+    client->text("{\"op\":\"pong\"}");
+}
+
 void WebConsole::bindDevicesSocket() {
     devicesSocket.handleHandshake([this](AsyncWebServerRequest *request) {
         return authenticatedUser(request, false) != nullptr;
     });
+    devicesSocket.onEvent(
+        [this](
+            AsyncWebSocket *socket,
+            AsyncWebSocketClient *client,
+            AwsEventType type,
+            void *arg,
+            uint8_t *data,
+            size_t len
+        ) { handleLiveSocketEvent(socket, client, type, arg, data, len); }
+    );
     server.addHandler(&devicesSocket);
 }
 
@@ -335,6 +389,16 @@ void WebConsole::bindConsolesSocket() {
     consolesSocket.handleHandshake([this](AsyncWebServerRequest *request) {
         return authenticatedUser(request, false) != nullptr;
     });
+    consolesSocket.onEvent(
+        [this](
+            AsyncWebSocket *socket,
+            AsyncWebSocketClient *client,
+            AwsEventType type,
+            void *arg,
+            uint8_t *data,
+            size_t len
+        ) { handleLiveSocketEvent(socket, client, type, arg, data, len); }
+    );
     server.addHandler(&consolesSocket);
 }
 

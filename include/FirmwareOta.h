@@ -58,6 +58,8 @@ private:
     JoinedFirmwareZip::MemberInfo slaveMember{};
     JoinedFirmwareZip::MemberInfo hostMember{};
     JoinedFirmwareZip::MemberReader memberReader{};
+    uint8_t *slaveImageRam = nullptr;
+    uint32_t slaveImageRamSize = 0;
     uint32_t packageSize = 0;
     uint32_t slaveImageSize = 0;
     uint32_t hostImageSize = 0;
@@ -99,6 +101,8 @@ private:
     void fail(const char *message);
     void clearStagingFiles();
     void closePackageStream();
+    void freeSlaveImageRam();
+    bool loadSlaveImageToRam();
     bool packSlaveChunkFromStream(uint8_t *payloadOut, uint16_t *packedLengthOut, uint32_t *dataBytesOut);
     bool enqueueNextSlaveChunk();
     bool sendLastSlaveFrame(bool isResend);

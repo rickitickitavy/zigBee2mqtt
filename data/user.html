@@ -22,12 +22,91 @@
         var assignedConsoles = [];
         var activeConsoleIndex = 0;
         var registeredDeviceRows = [];
+        var LIVE_WS_PING_MS = 15000;
+        var LIVE_WS_PONG_MS = 5000;
+
+        function createLiveSocketLiveness(isWanted) {
+            var pingTimer = null;
+            var pongTimer = null;
+            var awaitingPong = false;
+            var activeSocket = null;
+
+            function clearTimers() {
+                if (pingTimer != null) {
+                    window.clearInterval(pingTimer);
+                    pingTimer = null;
+                }
+                if (pongTimer != null) {
+                    window.clearTimeout(pongTimer);
+                    pongTimer = null;
+                }
+                awaitingPong = false;
+            }
+
+            return {
+                bind: function (socket) {
+                    clearTimers();
+                    activeSocket = socket;
+                    pingTimer = window.setInterval(function () {
+                        if (!isWanted()) {
+                            return;
+                        }
+                        if (activeSocket !== socket || socket.readyState !== WebSocket.OPEN) {
+                            return;
+                        }
+                        if (awaitingPong) {
+                            try {
+                                socket.close();
+                            } catch (closeError) {
+                            }
+                            return;
+                        }
+                        awaitingPong = true;
+                        try {
+                            socket.send("{\"op\":\"ping\"}");
+                        } catch (sendError) {
+                            try {
+                                socket.close();
+                            } catch (closeError) {
+                            }
+                            return;
+                        }
+                        pongTimer = window.setTimeout(function () {
+                            if (awaitingPong && activeSocket === socket) {
+                                try {
+                                    socket.close();
+                                } catch (closeError) {
+                                }
+                            }
+                        }, LIVE_WS_PONG_MS);
+                    }, LIVE_WS_PING_MS);
+                },
+                notePong: function () {
+                    awaitingPong = false;
+                    if (pongTimer != null) {
+                        window.clearTimeout(pongTimer);
+                        pongTimer = null;
+                    }
+                },
+                stop: function () {
+                    clearTimers();
+                    activeSocket = null;
+                }
+            };
+        }
+
         var devicesLiveWanted = false;
         var devicesLiveSocket = null;
         var devicesLiveReconnectTimer = null;
+        var devicesLiveLiveness = createLiveSocketLiveness(function () {
+            return devicesLiveWanted && !firmwareRebootWaitActive;
+        });
         var consolesLiveWanted = false;
         var consolesLiveSocket = null;
         var consolesLiveReconnectTimer = null;
+        var consolesLiveLiveness = createLiveSocketLiveness(function () {
+            return consolesLiveWanted && !firmwareRebootWaitActive;
+        });
 
         function normalizeThemeId(themeId) {
             return themeId === "dark" ? "dark" : "light";
@@ -678,6 +757,10 @@
             if (!message || !message.op) {
                 return;
             }
+            if (message.op === "pong") {
+                devicesLiveLiveness.notePong();
+                return;
+            }
             if (message.op === "reload") {
                 loadDevices();
                 return;
@@ -715,6 +798,7 @@
 
         function stopDevicesLive() {
             devicesLiveWanted = false;
+            devicesLiveLiveness.stop();
             if (devicesLiveReconnectTimer != null) {
                 window.clearTimeout(devicesLiveReconnectTimer);
                 devicesLiveReconnectTimer = null;
@@ -738,10 +822,16 @@
             var protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
             var socket = new WebSocket(protocol + "//" + window.location.host + "/ws/devices");
             devicesLiveSocket = socket;
+            socket.onopen = function () {
+                if (devicesLiveSocket === socket) {
+                    devicesLiveLiveness.bind(socket);
+                }
+            };
             socket.onmessage = function (event) {
                 applyDevicesLiveMessage(event.data);
             };
             socket.onclose = function () {
+                devicesLiveLiveness.stop();
                 devicesLiveSocket = null;
                 if (!devicesLiveWanted || firmwareRebootWaitActive) {
                     return;
@@ -763,7 +853,14 @@
             } catch (parseError) {
                 return;
             }
-            if (!message || message.op !== "reload") {
+            if (!message || !message.op) {
+                return;
+            }
+            if (message.op === "pong") {
+                consolesLiveLiveness.notePong();
+                return;
+            }
+            if (message.op !== "reload") {
                 return;
             }
             loadUserConsoles();
@@ -771,6 +868,7 @@
 
         function stopConsolesLive() {
             consolesLiveWanted = false;
+            consolesLiveLiveness.stop();
             if (consolesLiveReconnectTimer != null) {
                 window.clearTimeout(consolesLiveReconnectTimer);
                 consolesLiveReconnectTimer = null;
@@ -794,10 +892,16 @@
             var protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
             var socket = new WebSocket(protocol + "//" + window.location.host + "/ws/consoles");
             consolesLiveSocket = socket;
+            socket.onopen = function () {
+                if (consolesLiveSocket === socket) {
+                    consolesLiveLiveness.bind(socket);
+                }
+            };
             socket.onmessage = function (event) {
                 applyConsolesLiveMessage(event.data);
             };
             socket.onclose = function () {
+                consolesLiveLiveness.stop();
                 consolesLiveSocket = null;
                 if (!consolesLiveWanted || firmwareRebootWaitActive) {
                     return;
