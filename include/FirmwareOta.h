@@ -60,6 +60,8 @@ private:
     JoinedFirmwareZip::MemberReader memberReader{};
     uint8_t *slaveImageRam = nullptr;
     uint32_t slaveImageRamSize = 0;
+    bool hasSlaveImage = false;
+    bool hasHostImage = false;
     uint32_t packageSize = 0;
     uint32_t slaveImageSize = 0;
     uint32_t hostImageSize = 0;
@@ -97,6 +99,7 @@ private:
     uint8_t slaveVerifyAttempt = 0;
     unsigned long slaveVerifyDeadlineMs = 0;
     bool slaveVerifyResetPending = false;
+    bool slaveAwaitingLinkForReupload = false;
 
     void fail(const char *message);
     void clearStagingFiles();
@@ -108,10 +111,12 @@ private:
     bool sendLastSlaveFrame(bool isResend);
     void onSlaveFrameLost();
     bool prepareJoinedPackage();
+    void startSlaveUploadCycle();
     void beginSlaveVersionVerify();
     void pumpSlaveVersionVerify();
     bool slaveVersionMatchesExpected() const;
     bool startHostApply();
+    void finishSlaveOnlySuccess();
     void pumpHostApply();
     void pumpSlaveBegin();
     void pumpSlaveApply();

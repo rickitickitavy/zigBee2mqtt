@@ -145,7 +145,7 @@ bool findMembers(File &zipFile, MemberInfo *slaveOut, MemberInfo *hostOut) {
         }
         cursor += 46UL + nameLength + extraLength + commentLength;
     }
-    return slaveOut->found && hostOut->found;
+    return slaveOut->found || hostOut->found;
 }
 
 bool readVersionText(File &zipFile, char *destination, size_t destinationSize) {

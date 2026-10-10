@@ -50,7 +50,47 @@ static bool sameDeviceControlDest(const SpiFrame &frame, const uint8_t *payload,
     return memcmp(frame.payload, payload, 8) == 0 && frame.payload[8] == payload[8];
 }
 
+bool InterChipHost::isSlaveResetPaused() const {
+    if (slaveResetPauseUntilMs == 0) {
+        return false;
+    }
+    return (long)(millis() - slaveResetPauseUntilMs) < 0;
+}
+
+uint32_t InterChipHost::slaveResetPauseRemainingMs() const {
+    if (!isSlaveResetPaused()) {
+        return 0;
+    }
+    return (uint32_t)(slaveResetPauseUntilMs - millis());
+}
+
+void InterChipHost::releaseSlaveResetLine() {
+    pinMode(PIN_SLAVE_RST, OUTPUT);
+    digitalWrite(PIN_SLAVE_RST, HIGH);
+    if (resetAsserting) {
+        resetAsserting = false;
+        state = HostBringupWaitReady;
+        waitStartedMs = millis();
+    }
+}
+
+void InterChipHost::startSlaveResetPause() {
+    slaveResetPauseUntilMs = millis() + kSlaveResetPauseMs;
+    releaseSlaveResetLine();
+    LOGGER.info("Slave reset pause 120s (USB update window)");
+}
+
+void InterChipHost::cancelSlaveResetPause() {
+    slaveResetPauseUntilMs = 0;
+    LOGGER.info("Slave reset pause cancelled");
+}
+
 void InterChipHost::resetSlaveSynchronous() {
+    if (isSlaveResetPaused()) {
+        LOGGER.warning("Skipping sync slave reset; pause active");
+        releaseSlaveResetLine();
+        return;
+    }
     pinMode(PIN_SLAVE_RST, OUTPUT);
     digitalWrite(PIN_SLAVE_RST, LOW);
     delay(kRstPulseMs);
@@ -285,6 +325,11 @@ bool InterChipHost::enqueueInternal(
 }
 
 void InterChipHost::enterReset() {
+    if (isSlaveResetPaused()) {
+        LOGGER.warning("Skipping slave reset; pause active");
+        releaseSlaveResetLine();
+        return;
+    }
     if (FIRMWARE_OTA.isUpdatingSlave()) {
         LOGGER.warning("Skipping slave reset during firmware OTA");
         return;
@@ -320,6 +365,11 @@ void InterChipHost::noteLinkLostAndReset() {
 }
 
 void InterChipHost::pulseResetStart() {
+    if (isSlaveResetPaused()) {
+        LOGGER.warning("Skipping slave reset pulse; pause active");
+        releaseSlaveResetLine();
+        return;
+    }
     digitalWrite(PIN_SLAVE_RST, LOW);
     resetStartedMs = millis();
     resetAsserting = true;

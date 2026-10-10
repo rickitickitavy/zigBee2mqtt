@@ -4,6 +4,7 @@
 #include "JsonField.h"
 #include "ZigbeeDeviceType.h"
 #include "FirmwareOta.h"
+#include "InterChipHost.h"
 #include "UserStore.h"
 #include "generated/EmbeddedWebAssets.h"
 
@@ -147,6 +148,20 @@ void WebConsole::begin() {
         }
     );
 
+    server.on(
+        "/api/slave-reset-pause",
+        HTTP_GET,
+        [this](AsyncWebServerRequest *request) { handleSlaveResetPauseGet(request); }
+    );
+    server.on(
+        "/api/slave-reset-pause",
+        HTTP_POST,
+        [this](AsyncWebServerRequest *request) { handleSlaveResetPausePost(request); },
+        nullptr,
+        [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+            appendRequestBody(request, data, len, index, total, kHttpBodyMaxSmall);
+        }
+    );
     server.on(
         "/api/hardware",
         HTTP_GET,
@@ -2171,6 +2186,53 @@ void WebConsole::handleFirmwareUpdateStatusGet(AsyncWebServerRequest *request) {
     request->send(response);
 }
 
+void WebConsole::appendSlaveResetPauseJson(String &json) const {
+    const bool active = INTER_CHIP_HOST.isSlaveResetPaused();
+    const uint32_t remainingMs = INTER_CHIP_HOST.slaveResetPauseRemainingMs();
+    json = "{\"active\":";
+    json += active ? "true" : "false";
+    json += ",\"remainingMs\":";
+    json += String((unsigned long)remainingMs);
+    json += "}";
+}
+
+void WebConsole::handleSlaveResetPauseGet(AsyncWebServerRequest *request) {
+    if (!requireAdmin(request, nullptr, false)) {
+        return;
+    }
+    String json;
+    appendSlaveResetPauseJson(json);
+    AsyncWebServerResponse *response = request->beginResponse(200, "application/json", json);
+    response->addHeader("Cache-Control", "no-store");
+    request->send(response);
+}
+
+void WebConsole::handleSlaveResetPausePost(AsyncWebServerRequest *request) {
+    if (!requireAdmin(request, nullptr)) {
+        return;
+    }
+    String body;
+    if (!takeRequestBody(request, &body)) {
+        request->send(400, "text/plain", "Bad body");
+        return;
+    }
+    bool active = false;
+    if (!extractJsonBool(body.c_str(), "active", active)) {
+        request->send(400, "text/plain", "Need active");
+        return;
+    }
+    if (active) {
+        INTER_CHIP_HOST.startSlaveResetPause();
+    } else {
+        INTER_CHIP_HOST.cancelSlaveResetPause();
+    }
+    String json;
+    appendSlaveResetPauseJson(json);
+    AsyncWebServerResponse *response = request->beginResponse(200, "application/json", json);
+    response->addHeader("Cache-Control", "no-store");
+    request->send(response);
+}
+
 void WebConsole::handleOtaUpload(
     AsyncWebServerRequest *request,
     const String &filename,
@@ -2213,9 +2275,14 @@ void WebConsole::handleOtaDone(AsyncWebServerRequest *request) {
     if (!requireAdmin(request, nullptr)) {
         return;
     }
-    if (!otaStarted || otaFailed
-        || (FIRMWARE_OTA.phase() != FirmwareOta::Phase::Preparing
-            && FIRMWARE_OTA.phase() != FirmwareOta::Phase::Slave)) {
+    const FirmwareOta::Phase phase = FIRMWARE_OTA.phase();
+    const bool stagingAccepted = phase == FirmwareOta::Phase::Preparing
+        || phase == FirmwareOta::Phase::Slave
+        || phase == FirmwareOta::Phase::VerifyingSlave
+        || phase == FirmwareOta::Phase::Host
+        || phase == FirmwareOta::Phase::Rebooting
+        || phase == FirmwareOta::Phase::Done;
+    if (!otaStarted || otaFailed || !stagingAccepted) {
         String errorMessage = "Upload failed";
         if (FIRMWARE_OTA.phase() == FirmwareOta::Phase::Failed) {
             errorMessage = FIRMWARE_OTA.statusJson();
@@ -2228,5 +2295,5 @@ void WebConsole::handleOtaDone(AsyncWebServerRequest *request) {
         return;
     }
     otaStarted = false;
-    request->send(200, "text/plain", "Firmware stored. Updating slave, then host.");
+    request->send(200, "text/plain", "Firmware stored. Applying present images.");
 }

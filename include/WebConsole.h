@@ -163,6 +163,9 @@ private:
     void handleLogDownloadGet(AsyncWebServerRequest *request);
     void handleVersionGet(AsyncWebServerRequest *request);
     void handleFirmwareUpdateStatusGet(AsyncWebServerRequest *request);
+    void handleSlaveResetPauseGet(AsyncWebServerRequest *request);
+    void handleSlaveResetPausePost(AsyncWebServerRequest *request);
+    void appendSlaveResetPauseJson(String &json) const;
     void handleOtaUpload(
         AsyncWebServerRequest *request,
         const String &filename,

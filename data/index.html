@@ -94,6 +94,9 @@
             }
             if (name == "update") {
                 loadVersion();
+                refreshSlaveResetPause();
+            } else {
+                stopSlaveResetPauseTicker();
             }
         }
 
@@ -1604,6 +1607,81 @@
             });
         }
 
+        var slaveResetPauseTicker = null;
+        var slaveResetPauseLabel = "Wait for update slave";
+
+        function stopSlaveResetPauseTicker() {
+            if (slaveResetPauseTicker != null) {
+                window.clearInterval(slaveResetPauseTicker);
+                slaveResetPauseTicker = null;
+            }
+        }
+
+        function formatSlaveResetPauseLabel(remainingMs) {
+            var totalSeconds = Math.max(0, Math.ceil(Number(remainingMs) / 1000));
+            var minutes = Math.floor(totalSeconds / 60);
+            var seconds = totalSeconds % 60;
+            var secondsText = seconds < 10 ? "0" + seconds : String(seconds);
+            return slaveResetPauseLabel + " (" + minutes + ":" + secondsText + ")";
+        }
+
+        function applySlaveResetPauseState(payload) {
+            var button = document.getElementById("slaveResetPauseBtn");
+            if (!button) {
+                return;
+            }
+            var active = !!(payload && payload.active);
+            var remainingMs = payload && payload.remainingMs != null ? Number(payload.remainingMs) : 0;
+            if (!active || remainingMs <= 0) {
+                button.textContent = slaveResetPauseLabel;
+                stopSlaveResetPauseTicker();
+                return;
+            }
+            button.textContent = formatSlaveResetPauseLabel(remainingMs);
+            if (slaveResetPauseTicker == null) {
+                slaveResetPauseTicker = window.setInterval(function () {
+                    refreshSlaveResetPause();
+                }, 1000);
+            }
+        }
+
+        function refreshSlaveResetPause() {
+            fetch("/api/slave-reset-pause", { cache: "no-store" }).then(function (response) {
+                if (!response.ok) {
+                    throw new Error("pause unavailable");
+                }
+                return response.json();
+            }).then(function (payload) {
+                applySlaveResetPauseState(payload);
+            }).catch(function () {
+            });
+        }
+
+        function toggleSlaveResetPause() {
+            fetch("/api/slave-reset-pause", { cache: "no-store" }).then(function (response) {
+                if (!response.ok) {
+                    throw new Error("pause unavailable");
+                }
+                return response.json();
+            }).then(function (current) {
+                var nextActive = !(current && current.active);
+                return fetch("/api/slave-reset-pause", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ active: nextActive }),
+                    cache: "no-store"
+                }).then(function (response) {
+                    if (!response.ok) {
+                        throw new Error("pause update failed");
+                    }
+                    return response.json();
+                });
+            }).then(function (payload) {
+                applySlaveResetPauseState(payload);
+            }).catch(function () {
+            });
+        }
+
         function uploadFirmware() {
             var fileInput = document.getElementById("updateCodeFile");
             var cardStatus = document.getElementById("updateCodeStatus");
@@ -1756,7 +1834,10 @@
                 return "Master firmware written. Router is going to reboot.";
             }
             if (phase === "done") {
-                return "Firmware written. Router is going to reboot.";
+                if (payload && payload.needsReboot) {
+                    return "Firmware written. Router is going to reboot.";
+                }
+                return "Slave firmware update complete. Host was not restarted.";
             }
             if (phase === "failed") {
                 return payload.error || "Slave or host firmware update failed.";
@@ -1937,12 +2018,18 @@
                     return response.json();
                 }).then(function (payload) {
                     applyFirmwareStatusPercents(payload);
-                    if (payload.phase === "host" || payload.phase === "rebooting" || payload.phase === "done") {
+                    if (payload.phase === "host" || payload.phase === "rebooting"
+                        || (payload.phase === "done" && payload.needsReboot)) {
                         firmwareUpdateReachedHost = true;
                     }
                     setFirmwareUpdateStatus(firmwareStatusMessage(payload));
-                    if (payload.phase === "rebooting" || payload.phase === "done") {
+                    if (payload.phase === "rebooting" || (payload.phase === "done" && payload.needsReboot)) {
                         startFirmwareRebootWait();
+                        return;
+                    }
+                    if (payload.phase === "done" && !payload.needsReboot) {
+                        stopFirmwareStatusPoll();
+                        markFirmwareUpdateCloseable();
                         return;
                     }
                     if (payload.phase === "failed" || payload.phase === "idle") {
@@ -5937,10 +6024,12 @@
                     <div class="upload-card">
                         <h3 class="upload-title">Code (firmware)</h3>
                         <p class="field-hint">Running version: <span id="firmwareVersion">—</span></p>
-                        <p class="field-hint">Upload one joined ZIP (<code>slave.bin</code> + <code>host.bin</code>). Build with PlatformIO envs <code>esp32-c6-slave</code> and <code>esp32-s3-host</code>, then <code>scripts/firmware_join.py</code>.</p>
+                        <p class="field-hint">Upload a ZIP with <code>slave.bin</code> and/or <code>host.bin</code> (only present images are applied). Build with PlatformIO envs <code>esp32-c6-slave</code> / <code>esp32-s3-host</code>, then <code>scripts/firmware_join.py</code>.</p>
                         <input id="updateCodeFile" type="file" accept=".zip,application/zip,application/octet-stream">
                         <p id="updateCodeStatus" class="upload-status"></p>
                         <button type="button" class="btn btn-primary btn-inline" onclick="uploadFirmware()">Upload joined package</button>
+                        <p class="field-hint">For USB programming of the slave, pause host EN resets for 120 seconds. Press again to cancel.</p>
+                        <button type="button" id="slaveResetPauseBtn" class="btn btn-secondary btn-inline" onclick="toggleSlaveResetPause()">Wait for update slave</button>
                     </div>
                 </div>
                 <div id="system-tab-hardware" class="system-tab-panel tab-panel" role="tabpanel">

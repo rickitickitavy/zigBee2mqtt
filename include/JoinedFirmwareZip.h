@@ -25,6 +25,7 @@ struct MemberInfo {
     bool found = false;
 };
 
+// Fills slave/host members when present. Returns true if at least one image is found.
 bool findMembers(File &zipFile, MemberInfo *slaveOut, MemberInfo *hostOut);
 // Reads optional version.txt (STORE or DEFLATE). Returns false if missing/invalid.
 bool readVersionText(File &zipFile, char *destination, size_t destinationSize);
