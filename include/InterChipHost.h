@@ -27,9 +27,14 @@ public:
     void noteKeepaliveQuiet();
     void holdForFirmwareOta();
     const char *slaveFirmwareVersion() const;
+    bool isSlaveResetPaused() const;
+    uint32_t slaveResetPauseRemainingMs() const;
+    void startSlaveResetPause();
+    void cancelSlaveResetPause();
 
 private:
     static constexpr int kOutQueue = 32;
+    static constexpr unsigned long kSlaveResetPauseMs = 120000UL;
     static constexpr unsigned long kReadyTimeoutMs = 10000UL;
     static constexpr unsigned long kReplyTimeoutMs = 3000UL;
     static constexpr unsigned long kOtaBeginReplyTimeoutMs = 180000UL;
@@ -84,9 +89,11 @@ private:
     volatile uint8_t pingTimeouts = 0;
     uint8_t bringupFailStreak = 0;
     bool bootResetCompleted = false;
+    unsigned long slaveResetPauseUntilMs = 0;
 
     void pulseResetStart();
     void pulseResetFinishIfDue();
+    void releaseSlaveResetLine();
     bool enqueueInternal(uint8_t cmd, const uint8_t *payload, uint16_t length, bool expectReply, uint8_t seq);
     bool tryCoalesceDeviceControl(uint8_t cmd, const uint8_t *payload, uint16_t length, bool expectReply);
     void transferOnce(const SpiFrame *hostFrame);

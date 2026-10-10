@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Join host.bin + slave.bin into a firmware-joined.zip for System → Update."""
+"""Join host.bin and/or slave.bin into a firmware ZIP for System → Update."""
 
 from __future__ import annotations
 
@@ -22,8 +22,18 @@ def read_firmware_version(defines_path: Path) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--host", required=True, type=Path, help="Host application .bin")
-    parser.add_argument("--slave", required=True, type=Path, help="Slave application .bin")
+    parser.add_argument(
+        "--host",
+        type=Path,
+        default=None,
+        help="Host application .bin (optional if --slave is set)",
+    )
+    parser.add_argument(
+        "--slave",
+        type=Path,
+        default=None,
+        help="Slave application .bin (optional if --host is set)",
+    )
     parser.add_argument(
         "-o",
         "--output",
@@ -49,10 +59,18 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    if not args.host.is_file() or args.host.stat().st_size == 0:
-        raise SystemExit(f"host binary missing or empty: {args.host}")
-    if not args.slave.is_file() or args.slave.stat().st_size == 0:
-        raise SystemExit(f"slave binary missing or empty: {args.slave}")
+    if args.host is None and args.slave is None:
+        raise SystemExit("Provide at least one of --host or --slave")
+
+    members: list[str] = []
+    if args.slave is not None:
+        if not args.slave.is_file() or args.slave.stat().st_size == 0:
+            raise SystemExit(f"slave binary missing or empty: {args.slave}")
+        members.append("slave.bin")
+    if args.host is not None:
+        if not args.host.is_file() or args.host.stat().st_size == 0:
+            raise SystemExit(f"host binary missing or empty: {args.host}")
+        members.append("host.bin")
 
     version = args.version.strip() if args.version else read_firmware_version(args.defines)
     if not version or len(version) > 15:
@@ -61,11 +79,13 @@ def main() -> int:
     compression = zipfile.ZIP_DEFLATED if args.deflate else zipfile.ZIP_STORED
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(args.output, "w", compression=compression) as archive:
-        archive.write(args.slave, arcname="slave.bin")
-        archive.write(args.host, arcname="host.bin")
+        if args.slave is not None:
+            archive.write(args.slave, arcname="slave.bin")
+        if args.host is not None:
+            archive.write(args.host, arcname="host.bin")
         archive.writestr("version.txt", version + "\n")
 
-    print(f"Wrote {args.output} (slave.bin + host.bin + version.txt={version})")
+    print(f"Wrote {args.output} ({' + '.join(members)} + version.txt={version})")
     return 0
 
 

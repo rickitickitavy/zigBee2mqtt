@@ -107,7 +107,11 @@ String FirmwareOta::statusJson() const {
     } else if (currentPhase != Phase::Idle && currentPhase != Phase::Failed) {
         uploadPercent = 100;
     }
-    if (currentPhase == Phase::Slave) {
+    if (!hasSlaveImage
+        && (currentPhase == Phase::Host || currentPhase == Phase::Rebooting
+            || currentPhase == Phase::Done)) {
+        slavePercent = 100;
+    } else if (currentPhase == Phase::Slave) {
         slavePercent = percentOf(imageOffset, slaveImageSize);
     } else if (
         currentPhase == Phase::VerifyingSlave || currentPhase == Phase::Host
@@ -115,7 +119,11 @@ String FirmwareOta::statusJson() const {
     ) {
         slavePercent = 100;
     }
-    if (currentPhase == Phase::Host) {
+    if (!hasHostImage
+        && (currentPhase == Phase::VerifyingSlave || currentPhase == Phase::Done
+            || (currentPhase == Phase::Slave && hasSlaveImage))) {
+        hostPercent = 100;
+    } else if (currentPhase == Phase::Host) {
         hostPercent = percentOf(imageOffset, hostImageSize);
     } else if (currentPhase == Phase::Rebooting || currentPhase == Phase::Done) {
         hostPercent = 100;
@@ -135,6 +143,14 @@ String FirmwareOta::statusJson() const {
     json += String((unsigned long)imageOffset);
     json += ",\"bytesTotal\":";
     json += String((unsigned long)imageSize);
+    json += ",\"hasSlave\":";
+    json += hasSlaveImage ? "true" : "false";
+    json += ",\"hasHost\":";
+    json += hasHostImage ? "true" : "false";
+    const bool needsReboot = currentPhase == Phase::Rebooting || hostRestartPending
+        || (currentPhase == Phase::Done && hasHostImage && hostUpdateStarted);
+    json += ",\"needsReboot\":";
+    json += needsReboot ? "true" : "false";
     if (currentPhase == Phase::Failed && errorText.length() > 0) {
         json += ",\"error\":\"";
         for (size_t i = 0; i < errorText.length(); i++) {
@@ -256,6 +272,7 @@ void FirmwareOta::fail(const char *message) {
     slaveVerifyAttempt = 0;
     slaveVerifyDeadlineMs = 0;
     slaveVerifyResetPending = false;
+    slaveAwaitingLinkForReupload = false;
     endSlaveSpiClockOverride();
     clearStagingFiles();
     LOGGER.error(errorText);
@@ -290,6 +307,8 @@ bool FirmwareOta::beginStaging(size_t contentLength) {
     hostRestartPending = false;
     packagePreparePending = false;
     rebootReadyMs = 0;
+    hasSlaveImage = false;
+    hasHostImage = false;
     slaveMember = JoinedFirmwareZip::MemberInfo{};
     hostMember = JoinedFirmwareZip::MemberInfo{};
     LittleFS.mkdir("/ota");
@@ -343,35 +362,46 @@ bool FirmwareOta::prepareJoinedPackage() {
     if (!JoinedFirmwareZip::findMembers(packageFile, &slaveMember, &hostMember)) {
         givePackageFs();
         closePackageStream();
-        fail("Joined package must contain slave.bin and host.bin");
+        fail("Joined package needs slave.bin and/or host.bin");
         return false;
     }
+    hasSlaveImage = slaveMember.found;
+    hasHostImage = hostMember.found;
     expectedSlaveVersion[0] = '\0';
-    if (!JoinedFirmwareZip::readVersionText(packageFile, expectedSlaveVersion, sizeof(expectedSlaveVersion))) {
-        LOGGER.warning("Joined package has no version.txt; will require slave version change after OTA");
-    }
-    if (!memberReader.open(packageFile, slaveMember)) {
-        givePackageFs();
-        closePackageStream();
-        fail("Failed to open slave.bin stream");
-        return false;
-    }
-    slaveImageSize = slaveMember.uncompressedSize;
-    hostImageSize = hostMember.uncompressedSize;
-    imageSize = slaveImageSize;
+    slaveImageSize = hasSlaveImage ? slaveMember.uncompressedSize : 0;
+    hostImageSize = hasHostImage ? hostMember.uncompressedSize : 0;
     imageOffset = 0;
     streamPos = 0;
-    // Prefetch slave image into PSRAM so hostSpi can pack without LittleFS.
-    if (!loadSlaveImageToRam()) {
-        givePackageFs();
-        closePackageStream();
-        fail("Failed to load slave.bin into RAM");
-        return false;
+    if (hasSlaveImage) {
+        if (!JoinedFirmwareZip::readVersionText(
+                packageFile,
+                expectedSlaveVersion,
+                sizeof(expectedSlaveVersion)
+            )) {
+            LOGGER.warning("Joined package has no version.txt; will require slave version change after OTA");
+        }
+        if (!memberReader.open(packageFile, slaveMember)) {
+            givePackageFs();
+            closePackageStream();
+            fail("Failed to open slave.bin stream");
+            return false;
+        }
+        imageSize = slaveImageSize;
+        // Prefetch slave image into PSRAM so hostSpi can pack without LittleFS.
+        if (!loadSlaveImageToRam()) {
+            givePackageFs();
+            closePackageStream();
+            fail("Failed to load slave.bin into RAM");
+            return false;
+        }
+    } else {
+        imageSize = hostImageSize;
     }
     givePackageFs();
     LOGGER.info(
-        "Joined package OK ram slave=" + String((unsigned long)slaveImageSize) + " host="
-        + String((unsigned long)hostImageSize) + " expect="
+        "Joined package OK slave="
+        + (hasSlaveImage ? String((unsigned long)slaveImageSize) : String("skip")) + " host="
+        + (hasHostImage ? String((unsigned long)hostImageSize) : String("skip")) + " expect="
         + (expectedSlaveVersion[0] != '\0' ? expectedSlaveVersion : "(any-new)")
     );
     return true;
@@ -630,19 +660,44 @@ bool FirmwareOta::slaveVersionMatchesExpected() const {
     return strcmp(seen, preOtaSlaveVersion) != 0;
 }
 
+void FirmwareOta::startSlaveUploadCycle() {
+    waitingForSlaveResult = false;
+    beginQueued = false;
+    beginAcked = false;
+    imageSize = slaveImageSize;
+    imageOffset = 0;
+    streamPos = 0;
+    lastSlavePayloadLength = 0;
+    lastSlaveDataBytes = 0;
+    lastSlaveSeq = 0;
+    slaveFrameFails = 0;
+    slavePackClaimed = false;
+    slaveVerifyResetPending = false;
+    slaveAwaitingLinkForReupload = false;
+    currentPhase = Phase::Slave;
+    beginSlaveSpiClockOverride();
+    INTER_CHIP_HOST.holdForFirmwareOta();
+    INTER_CHIP_HOST.noteKeepaliveQuiet();
+}
+
 void FirmwareOta::beginSlaveVersionVerify() {
     endSlaveSpiClockOverride();
     waitingForSlaveResult = false;
     lastSlavePayloadLength = 0;
     lastSlaveDataBytes = 0;
-    slaveVerifyAttempt = 1;
     slaveVerifyResetPending = false;
+    slaveAwaitingLinkForReupload = false;
+    if (slaveVerifyAttempt == 0) {
+        slaveVerifyAttempt = 1;
+    }
     slaveVerifyDeadlineMs = millis() + kSlaveVerifyWaitMs;
     currentPhase = Phase::VerifyingSlave;
     INTER_CHIP_HOST.noteKeepaliveQuiet();
     LOGGER.info(
         "Slave image transferred; waiting up to 15s for version "
         + String(expectedSlaveVersion[0] != '\0' ? expectedSlaveVersion : "(changed)")
+        + " (attempt " + String((int)slaveVerifyAttempt) + "/"
+        + String((int)kSlaveVerifyMaxAttempts) + ")"
     );
 }
 
@@ -653,18 +708,50 @@ void FirmwareOta::pumpSlaveVersionVerify() {
     if (slaveVerifyResetPending) {
         slaveVerifyResetPending = false;
         INTER_CHIP_HOST.resetSlaveSynchronous();
+        slaveAwaitingLinkForReupload = true;
         slaveVerifyDeadlineMs = millis() + kSlaveVerifyWaitMs;
         LOGGER.info(
-            "Slave reset for version verify attempt "
+            "Slave reset before re-upload attempt "
             + String((int)slaveVerifyAttempt) + "/" + String((int)kSlaveVerifyMaxAttempts)
         );
+        return;
+    }
+    if (slaveAwaitingLinkForReupload) {
+        if (slaveVersionMatchesExpected()) {
+            slaveAwaitingLinkForReupload = false;
+            LOGGER.info(
+                "Slave version verified: " + String(INTER_CHIP_HOST.slaveFirmwareVersion())
+            );
+            if (hasHostImage) {
+                startHostApply();
+            } else {
+                finishSlaveOnlySuccess();
+            }
+            return;
+        }
+        if (INTER_CHIP_HOST.isNormal()) {
+            LOGGER.info(
+                "Re-uploading slave firmware attempt "
+                + String((int)slaveVerifyAttempt) + "/" + String((int)kSlaveVerifyMaxAttempts)
+            );
+            startSlaveUploadCycle();
+            return;
+        }
+        if ((long)(millis() - slaveVerifyDeadlineMs) < 0) {
+            return;
+        }
+        fail("Slave link not ready for firmware re-upload");
         return;
     }
     if (slaveVersionMatchesExpected()) {
         LOGGER.info(
             "Slave version verified: " + String(INTER_CHIP_HOST.slaveFirmwareVersion())
         );
-        startHostApply();
+        if (hasHostImage) {
+            startHostApply();
+        } else {
+            finishSlaveOnlySuccess();
+        }
         return;
     }
     if ((long)(millis() - slaveVerifyDeadlineMs) < 0) {
@@ -678,24 +765,41 @@ void FirmwareOta::pumpSlaveVersionVerify() {
     slaveVerifyResetPending = true;
     LOGGER.warning(
         "Slave version not ready (seen=\""
-        + String(INTER_CHIP_HOST.slaveFirmwareVersion()) + "\"); will reset"
+        + String(INTER_CHIP_HOST.slaveFirmwareVersion())
+        + "\"); will reset and re-upload"
     );
+}
+
+void FirmwareOta::finishSlaveOnlySuccess() {
+    endSlaveSpiClockOverride();
+    freeSlaveImageRam();
+    closePackageStream();
+    clearStagingFiles();
+    currentPhase = Phase::Done;
+    LOGGER.info("Slave-only firmware update complete (host unchanged)");
 }
 
 bool FirmwareOta::startHostApply() {
     endSlaveSpiClockOverride();
     freeSlaveImageRam();
+    if (!hasHostImage) {
+        fail("Joined package has no host.bin");
+        return false;
+    }
     if (!packageFile) {
         packageFile = LittleFS.open(kPackagePath, "r");
         if (!packageFile) {
             fail("Joined package missing for host stream");
             return false;
         }
-        if (!JoinedFirmwareZip::findMembers(packageFile, &slaveMember, &hostMember)) {
+        if (!JoinedFirmwareZip::findMembers(packageFile, &slaveMember, &hostMember)
+            || !hostMember.found) {
             closePackageStream();
             fail("Joined package lost host.bin");
             return false;
         }
+        hasHostImage = hostMember.found;
+        hasSlaveImage = slaveMember.found;
     }
     memberReader.close();
     if (!memberReader.open(packageFile, hostMember)) {
@@ -720,7 +824,10 @@ bool FirmwareOta::startHostApply() {
     imageSize = hostImageSize;
     imageOffset = 0;
     INTER_CHIP_HOST.noteKeepaliveQuiet();
-    LOGGER.info("Slave firmware committed, streaming host update");
+    LOGGER.info(
+        hasSlaveImage ? "Slave firmware committed, streaming host update"
+                      : "Host-only package, streaming host update"
+    );
     return true;
 }
 
@@ -798,12 +905,19 @@ void FirmwareOta::pumpPackagePrepare() {
     if (!prepareJoinedPackage()) {
         return;
     }
-    currentPhase = Phase::Slave;
+    if (!hasSlaveImage) {
+        LOGGER.info("Joined package has no slave.bin; updating host only");
+        startHostApply();
+        return;
+    }
     strncpy(preOtaSlaveVersion, INTER_CHIP_HOST.slaveFirmwareVersion(), sizeof(preOtaSlaveVersion) - 1);
     preOtaSlaveVersion[sizeof(preOtaSlaveVersion) - 1] = '\0';
-    beginSlaveSpiClockOverride();
-    INTER_CHIP_HOST.holdForFirmwareOta();
-    LOGGER.info("Joined package stream ready, updating slave");
+    slaveVerifyAttempt = 1;
+    startSlaveUploadCycle();
+    LOGGER.info(
+        hasHostImage ? "Joined package stream ready, updating slave then host"
+                     : "Joined package stream ready, updating slave only"
+    );
 }
 
 void FirmwareOta::pump() {
